@@ -1,0 +1,8 @@
+.git
+node_modules
+data
+.env
+.env.*
+.wyr-secrets.json
+.wyr-secrets.json.*
+*.log
