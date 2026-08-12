@@ -4,6 +4,8 @@ data/
 .env.local
 .env.*
 !.env.example
+.wyr-secrets.json
+.wyr-secrets.json.*
 *.log
 *.tmp
 .DS_Store
