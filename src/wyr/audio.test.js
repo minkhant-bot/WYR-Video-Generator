@@ -15,7 +15,7 @@ test('narration reads only both choices, with no prompt prefix or percentages', 
   assert.equal(buildNarration({ optionA: { text: 'Would you rather stay in a luxury hotel' }, optionB: { text: 'Would you rather camp in the wilderness?' } }), 'Stay in a luxury hotel, or camp in the wilderness?');
 });
 test('voice generation writes one measured file per scene', async () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-')); try { const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AriaNeural', rate: '+0%', timeoutMs: 1000, ttsFactory: () => ({ call: async () => ({ data: Buffer.alloc(1200, 1), subtitles: [] }) }), measureDuration: async () => 4.25 }); assert.equal(voiceovers.length, 1); assert.equal(voiceovers[0].duration, 4.25); assert.ok(fs.statSync(voiceovers[0].localPath).size > 0); } finally { fs.rmSync(dir, { recursive: true, force: true }); } });
-test('timeline never truncates narration and delays reveal until speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
+test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
 test('timeline rejects narration that would create an excessive scene', () => { assert.throws(() => buildSceneTimeline({ voiceovers: [{ duration: 12 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }), /exceed/); });
 test('SFX schedule contains entrance, reveal, and transition at the visual timestamps in every scene', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
@@ -45,7 +45,7 @@ test('countdown schedules the three source cue onsets and reveals when the seque
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
     assert.deepEqual(events.map(event => event.number), [3, 2, 1]);
     assert.ok(events[0].sceneTime > scene.voiceStart + scene.voiceDuration);
-    assert.deepEqual(events.map(event => Number((event.sceneTime - scene.countdownStart).toFixed(6))), WYR_TEMPLATE.timing.countdownCueOffsets.map(value => Number(value.toFixed(6))));
+    events.forEach((event, index) => assert.ok(Math.abs((event.sceneTime - scene.countdownStart) - WYR_TEMPLATE.timing.countdownCueOffsets[index]) < 0.000001));
     assert.equal(Number((scene.countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration).toFixed(6)), Number(scene.revealTime.toFixed(6)));
   }
 });
@@ -55,6 +55,12 @@ test('countdown validation fails when any scene is missing 3, 2, or 1', () => {
     const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.number === number));
     assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 3, 2, and 1/);
   }
+});
+test('countdown validation rejects a narration-to-countdown gap over 0.20s', () => {
+  const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }], baseDuration: 7 });
+  const schedule = buildCountdownSchedule(timeline);
+  const invalidTimeline = { ...timeline, scenes: timeline.scenes.map(scene => ({ ...scene, countdownStart: scene.countdownStart + 0.11 })) };
+  assert.throws(() => assertCompleteCountdownSchedule({ timeline: invalidTimeline, events: schedule.events }), /narration-to-countdown gap is 0\.210s/);
 });
 test('local SFX always installs the production countdown sequence', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-'));

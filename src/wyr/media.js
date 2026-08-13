@@ -46,17 +46,15 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const answerEnd = Math.min(revealTime, contentEnd);
   const aWinner = Number(question.optionA.percentage) >= Number(question.optionB.percentage);
   const bWinner = Number(question.optionB.percentage) > Number(question.optionA.percentage);
-  const incomingDuration = timing.transitionSlideDuration;
+  const incomingDuration = index === 0 ? timing.initialEntranceDuration : timing.transitionSlideDuration;
   const slideDistance = (canvas.width + layout.imageWidth) / 2;
   const incomingProgress = `clip(t/${incomingDuration},0,1)`;
   const outgoingProgress = `clip((t-${contentEnd})/${timing.transitionSlideDuration},0,1)`;
-  const topMotion = `${index > 0 ? `-${slideDistance}*(1-${incomingProgress})` : '0'}+${slideDistance}*${outgoingProgress}`;
-  const bottomMotion = `${index > 0 ? `${slideDistance}*(1-${incomingProgress})` : '0'}-${slideDistance}*${outgoingProgress}`;
-  const optionEntranceA = index > 0 ? 0 : timing.optionAEntrance;
-  const optionEntranceB = index > 0 ? 0 : timing.optionBEntrance;
-  const optionFadeIn = index > 0 ? 0.01 : timing.optionEntranceDuration;
-  const optionAlphaA = activeAlpha({ start: optionEntranceA, fadeIn: optionFadeIn, end: answerEnd, fadeOut: timing.percentageRevealDuration });
-  const optionAlphaB = activeAlpha({ start: optionEntranceB, fadeIn: optionFadeIn, end: answerEnd, fadeOut: timing.percentageRevealDuration });
+  const topMotion = `-${slideDistance}*(1-${incomingProgress})+${slideDistance}*${outgoingProgress}`;
+  const bottomMotion = `${slideDistance}*(1-${incomingProgress})-${slideDistance}*${outgoingProgress}`;
+  const optionEntranceStart = index === 0 ? -0.01 : 0;
+  const optionAlphaA = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
+  const optionAlphaB = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
   const percentAlpha = activeAlpha({ start: revealTime, fadeIn: timing.percentageRevealDuration, end: contentEnd + timing.transitionSlideDuration, fadeOut: timing.transitionSlideDuration });
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0x19D8EE:x=${x}-4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
@@ -64,11 +62,9 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:borderw=7:bordercolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
   const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
-  const firstSceneTopFade = index === 0 ? `,fade=t=in:st=0:d=${timing.imageFadeIn}:alpha=1` : '';
-  const firstSceneBottomFade = index === 0 ? `,fade=t=in:st=${timing.optionBEntrance}:d=${timing.imageFadeIn}:alpha=1` : '';
   const filter = [
-    `[0:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba${firstSceneTopFade}[aimg]`,
-    `[1:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba${firstSceneBottomFade}[bimg]`,
+    `[0:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[aimg]`,
+    `[1:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[bimg]`,
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,

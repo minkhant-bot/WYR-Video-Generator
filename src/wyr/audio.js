@@ -49,14 +49,18 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
   if (!Array.isArray(voiceovers) || voiceovers.length === 0) throw new Error('At least one measured narration is required to build the scene timeline.');
   let cursor = 0;
   const scenes = voiceovers.map((voiceover, index) => {
-    const voiceStart = 0.3; const countdownStart = voiceStart + voiceover.duration + WYR_TEMPLATE.timing.countdownPauseAfterVoice;
+    const voiceStart = 0.3;
+    const narrationEnd = voiceStart + voiceover.duration;
+    const countdownStart = narrationEnd + WYR_TEMPLATE.timing.countdownPauseAfterVoice;
+    const countdownGap = countdownStart - narrationEnd;
+    if (countdownGap < 0 || countdownGap > WYR_TEMPLATE.timing.maximumNarrationCountdownGap) throw new Error(`Scene ${index + 1} narration-to-countdown gap is ${countdownGap.toFixed(3)}s; expected no more than ${WYR_TEMPLATE.timing.maximumNarrationCountdownGap.toFixed(2)}s.`);
     const revealTime = countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration;
     const requiredDuration = revealTime + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
     const duration = frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
     if (duration > maximumSceneDuration) throw new Error(`Scene ${index + 1} narration is ${voiceover.duration.toFixed(2)}s and would exceed the ${maximumSceneDuration}s scene limit. Regenerate shorter option text.`);
     const contentEnd = duration - WYR_TEMPLATE.timing.transitionOutDuration;
     const countdown = [3, 2, 1].map((number, countdownIndex) => ({ number, time: countdownStart + WYR_TEMPLATE.timing.countdownCueOffsets[countdownIndex] }));
-    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, countdownStart, countdown, revealTime, contentEnd, transitionOutDuration: WYR_TEMPLATE.timing.transitionOutDuration };
+    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, transitionOutDuration: WYR_TEMPLATE.timing.transitionOutDuration };
     cursor += duration; return scene;
   });
   return { version: 1, baseDuration, maximumSceneDuration, voicePaddingSeconds, totalDuration: cursor, scenes };
@@ -69,6 +73,9 @@ export const assertCompleteCountdownSchedule = ({ timeline, events }) => {
   if (!Array.isArray(timeline?.scenes) || !Array.isArray(events)) throw new Error('Timeline and countdown events are required.');
   for (let sceneIndex = 0; sceneIndex < timeline.scenes.length; sceneIndex += 1) {
     const scene = timeline.scenes[sceneIndex]; const sceneEvents = events.filter(event => event.sceneIndex === sceneIndex);
+    const narrationEnd = scene.voiceStart + scene.voiceDuration;
+    const countdownGap = scene.countdownStart - narrationEnd;
+    if (!Number.isFinite(countdownGap) || countdownGap < 0 || countdownGap > WYR_TEMPLATE.timing.maximumNarrationCountdownGap) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} narration-to-countdown gap is ${Number.isFinite(countdownGap) ? `${countdownGap.toFixed(3)}s` : 'invalid'}; expected no more than ${WYR_TEMPLATE.timing.maximumNarrationCountdownGap.toFixed(2)}s.`);
     if (sceneEvents.length !== COUNTDOWN_NUMBERS.length) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain 3, 2, and 1; found ${sceneEvents.length} event(s).`);
     for (let countdownIndex = 0; countdownIndex < COUNTDOWN_NUMBERS.length; countdownIndex += 1) {
       const number = COUNTDOWN_NUMBERS[countdownIndex]; const matching = sceneEvents.filter(event => event.number === number);

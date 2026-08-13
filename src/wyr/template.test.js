@@ -4,6 +4,13 @@ import { fitOptionText, WYR_TEMPLATE } from './template.js';
 
 const measureText = async (text, fontSize) => Array.from(text).reduce((width, character) => width + (character === ' ' ? 0.32 : 0.56) * fontSize, 0);
 
+test('production timing uses the reference first-scene slide and bounded post-narration gap', () => {
+  assert.equal(WYR_TEMPLATE.timing.initialEntranceDuration, 0.4);
+  assert.equal(WYR_TEMPLATE.timing.transitionSlideDuration, 0.2);
+  assert.equal(WYR_TEMPLATE.timing.countdownPauseAfterVoice, 0.1);
+  assert.equal(WYR_TEMPLATE.timing.maximumNarrationCountdownGap, 0.2);
+});
+
 test('font fitting keeps preferred size for very short text', async () => {
   const fit = await fitOptionText({ text: 'Fly', measureText });
   assert.equal(fit.fontSize, WYR_TEMPLATE.typography.preferredOptionSize);
