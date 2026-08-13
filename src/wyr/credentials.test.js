@@ -91,3 +91,44 @@ test('content history and bounded retry configuration support a persistent volum
     for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
   }
 });
+
+test('Groq rate-limit recovery has bounded production defaults', () => {
+  const names = ['WYR_GROQ_RATE_LIMIT_RETRIES', 'WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS'];
+  const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    for (const name of names) delete process.env[name];
+    const config = getConfig(); assert.equal(config.groqRateLimitRetries, 4); assert.equal(config.groqRateLimitMaxWaitMs, 60_000);
+  } finally {
+    for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
+  }
+});
+
+test('production concurrency controls have safe defaults and accept environment overrides', () => {
+  const variables = { WYR_PEXELS_CONCURRENCY: 4, WYR_TTS_CONCURRENCY: 4, WYR_SCENE_RENDER_CONCURRENCY: 2, WYR_FFMPEG_THREADS: 4 };
+  const original = Object.fromEntries(Object.keys(variables).map(name => [name, process.env[name]]));
+  try {
+    for (const name of Object.keys(variables)) delete process.env[name];
+    const defaults = getConfig();
+    assert.deepEqual([defaults.pexelsConcurrency, defaults.ttsConcurrency, defaults.sceneRenderConcurrency, defaults.ffmpegThreads], [4, 4, 2, 4]);
+    process.env.WYR_PEXELS_CONCURRENCY = '7'; process.env.WYR_TTS_CONCURRENCY = '6'; process.env.WYR_SCENE_RENDER_CONCURRENCY = '3'; process.env.WYR_FFMPEG_THREADS = '5';
+    const overridden = getConfig();
+    assert.deepEqual([overridden.pexelsConcurrency, overridden.ttsConcurrency, overridden.sceneRenderConcurrency, overridden.ffmpegThreads], [7, 6, 3, 5]);
+  } finally {
+    for (const [name, value] of Object.entries(original)) value === undefined ? delete process.env[name] : process.env[name] = value;
+  }
+});
+
+test('production concurrency controls reject invalid, zero, and negative values', () => {
+  const names = ['WYR_PEXELS_CONCURRENCY', 'WYR_TTS_CONCURRENCY', 'WYR_SCENE_RENDER_CONCURRENCY', 'WYR_FFMPEG_THREADS'];
+  const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    for (const name of names) {
+      for (const value of ['0', '-1', '1.5', 'invalid']) {
+        for (const resetName of names) delete process.env[resetName]; process.env[name] = value;
+        assert.throws(() => getConfig(), new RegExp(`${name} must be a positive integer`));
+      }
+    }
+  } finally {
+    for (const [name, value] of Object.entries(original)) value === undefined ? delete process.env[name] : process.env[name] = value;
+  }
+});

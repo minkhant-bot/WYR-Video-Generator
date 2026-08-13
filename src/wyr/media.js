@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { writeJsonAtomic } from './utils.js';
+import { mapWithConcurrency, writeJsonAtomic } from './utils.js';
 import { fitOptionText, WYR_TEMPLATE } from './template.js';
 import { assertFontAvailable, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildSfxSchedule, SFX_EVENT_TYPES } from './audio.js';
@@ -16,8 +16,8 @@ const run = (binary, args, label) => new Promise((resolve, reject) => {
   child.once('close', code => code === 0 ? resolve(stderr) : reject(new Error(`${label} exited with code ${code}: ${stderr.slice(-4000)}`)));
 });
 const filterPath = file => file.replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "'\\''");
-const createTextMeasurer = ({ renderDir, font }) => {
-  const cache = new Map(); const measureDir = path.join(renderDir, 'measure'); fs.mkdirSync(measureDir, { recursive: true });
+const createTextMeasurer = ({ renderDir, font, namespace }) => {
+  const cache = new Map(); const measureDir = path.join(renderDir, 'measure', namespace); fs.mkdirSync(measureDir, { recursive: true });
   return async (text, fontSize) => {
     const key = `${fontSize}:${text}`; if (cache.has(key)) return cache.get(key);
     const id = crypto.createHash('sha256').update(key).digest('hex').slice(0, 20); const textFile = path.join(measureDir, `${id}.txt`);
@@ -28,11 +28,11 @@ const createTextMeasurer = ({ renderDir, font }) => {
   };
 };
 const activeAlpha = ({ start, fadeIn, end, fadeOut }) => `'clip((t-${start})/${fadeIn},0,1)*clip((${end}-t)/${fadeOut},0,1)'`;
-const renderSegment = async ({ question, assets, index, duration, timeline, renderDir }) => {
+const renderSegment = async ({ question, assets, index, duration, timeline, renderDir, ffmpegThreads }) => {
   const a = assets.find(asset => asset.questionIndex === index && asset.slot === 'A'); const b = assets.find(asset => asset.questionIndex === index && asset.slot === 'B');
   if (!a || !b) throw new Error(`Missing render assets for question ${index + 1}.`);
   const font = assertFontAvailable();
-  const measureText = createTextMeasurer({ renderDir, font });
+  const measureText = createTextMeasurer({ renderDir, font, namespace: `q${String(index + 1).padStart(2, '0')}` });
   const [aFit, bFit] = await Promise.all([fitOptionText({ text: question.optionA.text, measureText }), fitOptionText({ text: question.optionB.text, measureText })]);
   const prefix = path.join(renderDir, `q${index + 1}`); const aText = `${prefix}-a.txt`; const bText = `${prefix}-b.txt`; const aPercentText = `${prefix}-a-percent.txt`; const bPercentText = `${prefix}-b-percent.txt`;
   fs.writeFileSync(aText, aFit.text); fs.writeFileSync(bText, bFit.text);
@@ -79,7 +79,7 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
       'setrange=limited,format=yuv420p[out]',
     ].join(',')}`,
   ].join(';');
-  await run(ffmpegPath, ['-y', '-loop', '1', '-t', String(duration), '-i', a.localPath, '-loop', '1', '-t', String(duration), '-i', b.localPath, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-t', String(duration), output], `render segment ${index + 1}`);
+  await run(ffmpegPath, ['-y', '-loop', '1', '-t', String(duration), '-i', a.localPath, '-loop', '1', '-t', String(duration), '-i', b.localPath, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'ultrafast', '-crf', '24', '-t', String(duration), output], `render segment ${index + 1}`);
   return output;
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
@@ -90,12 +90,18 @@ export const assertProductionAudioInputs = ({ plan, voiceovers = [], timeline, s
   if ((voiceovers.length && voiceovers.length !== plan.questions.length) || !timeline || !sfx || SFX_EVENT_TYPES.some(type => !sfx[type]?.localPath) || !sfx.countdownSequence?.localPath) throw new Error('Production audio rendering requires a timeline and all local SFX files, plus one voice file per scene when narration is enabled.');
   return true;
 };
-export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, onProgress }) => {
-  const renderDir = path.join(workspace, 'render'); const segments = [];
-  for (let index = 0; index < plan.questions.length; index += 1) {
+export const renderSceneSegments = async ({ plan, assets, duration, timeline, renderDir, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, renderScene = renderSegment }) => {
+  if (!Number.isInteger(ffmpegThreads) || ffmpegThreads < 1) throw new TypeError('FFmpeg threads must be a positive integer.');
+  let completed = 0;
+  return mapWithConcurrency(plan.questions, sceneConcurrency, async (question, index) => {
     const scene = timeline?.scenes[index]; const sceneDuration = scene?.duration ?? duration;
-    segments.push(await renderSegment({ question: plan.questions[index], assets, index, duration: sceneDuration, timeline: scene, renderDir })); onProgress?.(index + 1, plan.questions.length);
-  }
+    const segment = await renderScene({ question, assets, index, duration: sceneDuration, timeline: scene, renderDir, ffmpegThreads });
+    completed += 1; onProgress?.(completed, plan.questions.length); return segment;
+  });
+};
+export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress }) => {
+  const renderDir = path.join(workspace, 'render');
+  const segments = await renderSceneSegments({ plan, assets, duration, timeline, renderDir, sceneConcurrency, ffmpegThreads, onProgress });
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${segments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');

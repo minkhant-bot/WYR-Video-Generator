@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONTENT_CATEGORIES, QUALITY_DIMENSIONS } from './content.js';
-import { writeJsonAtomic } from './utils.js';
+import { CONTENT_CATEGORIES, QUALITY_DIMENSIONS, groqRateLimitDetails } from './content.js';
+import { log, writeJsonAtomic } from './utils.js';
 
 const HISTORY_VERSION = 1;
 const QUALITY_THRESHOLD = 7;
@@ -102,17 +102,32 @@ export const selectCategories = (history, count) => {
 };
 
 export class ContentGenerationError extends Error {}
-export const generateProductionPlan = async ({ provider, historyStore, questionCount = 8, maxAttempts = 4 }) => {
+export class ContentRateLimitError extends ContentGenerationError {
+  constructor(message, { acceptedCount, requiredCount, retries, waitedMs } = {}) { super(message); this.code = 'groq_rate_limit_exceeded'; this.acceptedCount = acceptedCount; this.requiredCount = requiredCount; this.retries = retries; this.waitedMs = waitedMs; }
+}
+
+export const DEFAULT_GROQ_RATE_LIMIT_POLICY = Object.freeze({ maxRetries: 4, maxWaitMs: 60_000, baseDelayMs: 1_000, maxDelayMs: 15_000, jitterMs: 250 });
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const rateLimitFailure = ({ accepted, questionCount, retries, waitedMs, maxRetries, maxWaitMs, lastProviderError }) => new ContentRateLimitError(
+  `Groq rate limit did not recover within the bounded policy (${maxRetries} retries, ${maxWaitMs}ms maximum cumulative wait): accepted ${accepted.length} of ${questionCount} required distinct high-quality dilemmas. No incomplete video was rendered.${lastProviderError ? ` Last provider error: ${lastProviderError.message}` : ''}`,
+  { acceptedCount: accepted.length, requiredCount: questionCount, retries, waitedMs },
+);
+
+export const generateProductionPlan = async ({ provider, historyStore, questionCount = 8, maxAttempts = 4, rateLimitPolicy = {}, sleep = wait, random = Math.random }) => {
   if (!provider || typeof provider.generatePlan !== 'function') throw new TypeError('A content provider is required.');
   if (!historyStore || typeof historyStore.load !== 'function' || typeof historyStore.appendPlan !== 'function') throw new TypeError('A persistent content history store is required.');
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new TypeError('maxAttempts must be a positive integer.');
+  const configuredPolicy = Object.fromEntries(Object.entries(rateLimitPolicy).filter(([, value]) => value !== undefined));
+  const policy = { ...DEFAULT_GROQ_RATE_LIMIT_POLICY, ...configuredPolicy };
+  if (!Number.isInteger(policy.maxRetries) || policy.maxRetries < 0 || !Number.isFinite(policy.maxWaitMs) || policy.maxWaitMs < 0 || !Number.isFinite(policy.baseDelayMs) || policy.baseDelayMs < 0 || !Number.isFinite(policy.maxDelayMs) || policy.maxDelayMs < 0 || !Number.isFinite(policy.jitterMs) || policy.jitterMs < 0) throw new TypeError('Groq rate-limit policy values must be non-negative numbers, and maxRetries must be an integer.');
   const history = historyStore.load(); const priorQuestions = historyQuestions(history); const accepted = []; const rejectionSummary = [];
   const targetCategories = selectCategories(history, questionCount);
-  let lastProviderError = null; let topic = null;
-  for (let attempt = 1; attempt <= maxAttempts && accepted.length < questionCount; attempt += 1) {
+  let lastProviderError = null; let topic = null; let attempt = 0; let rateLimitRetries = 0; let rateLimitWaitedMs = 0;
+  while (attempt < maxAttempts && accepted.length < questionCount) {
     const missingCategories = targetCategories.filter(category => !accepted.some(question => question.category === category));
     try {
       const candidates = await provider.generatePlan(missingCategories.length, { categories: missingCategories, exclusions: [...recentExclusions(history), ...accepted.map(question => `${question.optionA.text} OR ${question.optionB.text}`)] });
+      attempt += 1;
       topic ||= candidates.topic;
       for (const candidate of candidates.questions) {
         if (accepted.length >= questionCount) break;
@@ -125,10 +140,24 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
         if (reasons.length) { rejectionSummary.push({ attempt, dilemma: `${candidate.optionA.text} OR ${candidate.optionB.text}`, reasons }); continue; }
         accepted.push({ ...candidate, duplicateCheck: { status: 'clear', comparedAgainst: priorQuestions.length + accepted.length } });
       }
-    } catch (error) { lastProviderError = error; rejectionSummary.push({ attempt, providerError: error.message }); }
+    } catch (error) {
+      lastProviderError = error;
+      const rateLimit = groqRateLimitDetails(error);
+      if (rateLimit.rateLimited) {
+        if (rateLimitRetries >= policy.maxRetries) throw rateLimitFailure({ accepted, questionCount, retries: rateLimitRetries, waitedMs: rateLimitWaitedMs, maxRetries: policy.maxRetries, maxWaitMs: policy.maxWaitMs, lastProviderError });
+        const exponentialDelay = Math.min(policy.maxDelayMs, policy.baseDelayMs * (2 ** rateLimitRetries));
+        const jitter = Math.floor(random() * (policy.jitterMs + 1));
+        const waitMs = rateLimit.retryAfterMs ?? (exponentialDelay + jitter);
+        if (!Number.isFinite(waitMs) || waitMs < 0 || rateLimitWaitedMs + waitMs > policy.maxWaitMs) throw rateLimitFailure({ accepted, questionCount, retries: rateLimitRetries, waitedMs: rateLimitWaitedMs, maxRetries: policy.maxRetries, maxWaitMs: policy.maxWaitMs, lastProviderError });
+        rateLimitRetries += 1; rateLimitWaitedMs += waitMs;
+        log('content.groq_rate_limit_wait', { retry: rateLimitRetries, maxRetries: policy.maxRetries, waitMs, cumulativeWaitMs: rateLimitWaitedMs, accepted: accepted.length, required: questionCount, remaining: questionCount - accepted.length, source: rateLimit.retryAfterMs === null ? 'exponential_backoff' : 'retry_after' });
+        await sleep(waitMs); continue;
+      }
+      attempt += 1; rejectionSummary.push({ attempt, providerError: error.message, kind: 'provider_failure' });
+    }
   }
   if (accepted.length !== questionCount) throw new ContentGenerationError(`Content generation failed after ${maxAttempts} bounded attempt(s): accepted ${accepted.length} of ${questionCount} required distinct high-quality dilemmas.${lastProviderError ? ` Last provider error: ${lastProviderError.message}` : ''}`);
-  const plan = { version: 1, topic: topic || 'High-stakes dream choices', percentages: null, contentQuality: { threshold: QUALITY_THRESHOLD, attemptsAllowed: maxAttempts, rejectedCandidates: rejectionSummary.length, categoryStrategy: 'least-recently-used' }, questions: accepted.map((question, index) => ({ ...question, index })) };
+  const plan = { version: 1, topic: topic || 'High-stakes dream choices', percentages: null, contentQuality: { threshold: QUALITY_THRESHOLD, attemptsAllowed: maxAttempts, attemptsUsed: attempt, rejectedCandidates: rejectionSummary.filter(rejection => rejection.dilemma).length, providerFailures: rejectionSummary.filter(rejection => rejection.providerError).length, rateLimitRetries, rateLimitWaitedMs, categoryStrategy: 'least-recently-used' }, questions: accepted.map((question, index) => ({ ...question, index })) };
   historyStore.appendPlan(plan);
   return plan;
 };

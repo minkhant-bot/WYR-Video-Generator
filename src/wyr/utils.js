@@ -22,4 +22,19 @@ export const retry = async (operation, { attempts, label }) => {
   }
   throw new Error(`${label} failed after ${attempts} attempt(s): ${lastError?.message}`, { cause: lastError });
 };
+export const mapWithConcurrency = async (items, concurrency, operation) => {
+  if (!Array.isArray(items)) throw new TypeError('Concurrent work items must be an array.');
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError('Concurrency must be a positive integer.');
+  if (typeof operation !== 'function') throw new TypeError('Concurrent operation must be a function.');
+  const results = new Array(items.length); let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex; nextIndex += 1;
+      results[index] = await operation(items[index], index);
+    }
+  };
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+};
 export const publicJob = job => ({ id: job.id, status: job.status, stage: job.stage, progress: job.progress, error: job.error, topic: job.topic, createdAt: job.createdAt, updatedAt: job.updatedAt, verification: job.verification, outputUrl: job.status === 'completed' ? `/api/jobs/${job.id}/video` : null, downloadUrl: job.status === 'completed' ? `/api/jobs/${job.id}/download` : null, creditsUrl: job.status === 'completed' ? `/api/jobs/${job.id}/credits` : null });

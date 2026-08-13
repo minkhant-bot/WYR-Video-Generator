@@ -14,6 +14,12 @@ const number = (name, fallback, min, max) => {
   return value;
 };
 
+const positiveInteger = (name, fallback) => {
+  const value = process.env[name] === undefined ? fallback : Number(process.env[name]);
+  if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer.`);
+  return value;
+};
+
 export const getConfig = () => {
   const credentials = resolveApiKeys();
   const contentHistoryDir = process.env.WYR_CONTENT_HISTORY_DIR ? resolveProjectPath(process.env.WYR_CONTENT_HISTORY_DIR) : path.join(DEFAULT_DATA_DIR, 'content-history');
@@ -22,11 +28,17 @@ export const getConfig = () => {
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
     questionCount: integer('WYR_QUESTION_COUNT', 8, 8, 8),
     contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 4, 1, 8),
+    groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 4, 0, 8),
+    groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 60_000, 1_000, 300_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
     maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 15, 8, 15),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
+    pexelsConcurrency: positiveInteger('WYR_PEXELS_CONCURRENCY', 4),
+    ttsConcurrency: positiveInteger('WYR_TTS_CONCURRENCY', 4),
+    sceneRenderConcurrency: positiveInteger('WYR_SCENE_RENDER_CONCURRENCY', 2),
+    ffmpegThreads: positiveInteger('WYR_FFMPEG_THREADS', 4),
     timeoutMs: integer('WYR_REQUEST_TIMEOUT_MS', 20_000, 1_000, 120_000),
     ttsTimeoutMs: integer('WYR_TTS_TIMEOUT_MS', 60_000, 5_000, 120_000),
     groqApiKey: credentials.groqApiKey,

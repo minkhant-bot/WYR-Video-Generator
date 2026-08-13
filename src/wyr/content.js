@@ -62,8 +62,23 @@ export const validatePlan = (input, questionCount) => {
 export class ContentProvider { async generatePlan() { throw new Error('ContentProvider.generatePlan must be implemented.'); } }
 
 class GroqGenerationError extends Error {
-  constructor(message, code) { super(message); this.code = code; }
+  constructor(message, code, details = {}) { super(message); this.code = code; Object.assign(this, details); }
 }
+
+const retryAfterMilliseconds = (value, now = Date.now()) => {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : null;
+};
+
+export const groqRateLimitDetails = error => {
+  for (let current = error; current; current = current.cause) {
+    if (current.status === 429 || current.code === 'rate_limit_exceeded' || current.code === 'rate_limit') return { rateLimited: true, retryAfterMs: Number.isFinite(current.retryAfterMs) ? current.retryAfterMs : null };
+  }
+  return { rateLimited: false, retryAfterMs: null };
+};
 
 const planSchema = () => {
   const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' } }, required: ['text', 'searchQuery'], additionalProperties: false };
@@ -93,7 +108,7 @@ const groqErrorFromResponse = async response => {
     || /failed_generation|failed to generate json/i.test(raw);
   if (failedGeneration) return new GroqGenerationError(`Groq generation failed with HTTP ${response.status}.`, 'failed_generation');
   const code = normalize(remoteError?.code || remoteError?.type);
-  return new GroqGenerationError(`Groq returned HTTP ${response.status}${code ? ` (${code})` : ''}.`, code || 'http_error');
+  return new GroqGenerationError(`Groq returned HTTP ${response.status}${code ? ` (${code})` : ''}.`, code || 'http_error', { status: response.status, retryAfterMs: response.status === 429 ? retryAfterMilliseconds(response.headers.get('retry-after')) : null });
 };
 
 const validateGeneratedPlan = (text, questionCount) => {
@@ -149,6 +164,7 @@ export class GroqContentProvider extends ContentProvider {
     }
     try { return await this.requestPlan({ questionCount, mode: 'json_object', context }); }
     catch (error) {
+      if (groqRateLimitDetails(error).rateLimited) throw error;
       throw new Error(`Groq content generation failed after ${STRUCTURED_ATTEMPTS} structured attempt(s) and one JSON-object fallback: ${error.message}`, { cause: error });
     }
   }

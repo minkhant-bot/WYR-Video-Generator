@@ -58,4 +58,4 @@ const server = http.createServer(async (req, res) => {
     return json(res, 500, { error: 'The request could not be completed.' });
   }
 });
-server.listen(startupConfig.port, '0.0.0.0', () => log('server.started', { port: startupConfig.port, rootDir: startupConfig.rootDir }));
+server.listen(startupConfig.port, '0.0.0.0', () => log('server.started', { port: startupConfig.port, rootDir: startupConfig.rootDir, pexelsConcurrency: startupConfig.pexelsConcurrency, ttsConcurrency: startupConfig.ttsConcurrency, sceneRenderConcurrency: startupConfig.sceneRenderConcurrency, ffmpegThreads: startupConfig.ffmpegThreads }));

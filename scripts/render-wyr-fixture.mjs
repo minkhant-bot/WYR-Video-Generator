@@ -6,8 +6,10 @@ import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLoc
 import { WYR_TEMPLATE } from '../src/wyr/template.js';
 import { writeJsonAtomic } from '../src/wyr/utils.js';
 import { PROJECT_ROOT, resolveProjectPath } from '../src/wyr/runtime.js';
+import { getConfig } from '../src/wyr/config.js';
 
 if (process.env.WYR_FIXTURE_MODE !== 'true' && !process.argv.includes('--fixture')) throw new Error('Fixture rendering requires explicit WYR_FIXTURE_MODE=true or --fixture.');
+const config = getConfig();
 const workspace = process.env.WYR_FIXTURE_DIR ? resolveProjectPath(process.env.WYR_FIXTURE_DIR) : path.join(PROJECT_ROOT, 'data', 'wyr-fixture-job');
 for (const folder of ['', 'assets', 'audio', 'render', 'output']) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
 const plan = createFixturePlan(); const assets = await createFixtureAssets({ assetsDir: path.join(workspace, 'assets') });
@@ -18,6 +20,6 @@ const sfx = await createLocalSfx({ audioDir: path.join(workspace, 'audio') });
 const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
 writeJsonAtomic(path.join(workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(workspace, 'sfx.json'), { provider: sfx.provider, entrance: sfx.entrance, reveal: sfx.reveal, transition: sfx.transition, countdownSequence: sfx.countdownSequence, schedule: sfxSchedule, countdownSchedule });
 buildComposition({ plan, assets, timeline, sfx, workspace });
-const outputPath = await renderVideo({ plan, assets, timeline, sfx, sfxSchedule, countdownSchedule, workspace, onProgress: (done, total) => console.log(JSON.stringify({ stage: 'rendering', done, total })) });
+const outputPath = await renderVideo({ plan, assets, timeline, sfx, sfxSchedule, countdownSchedule, workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => console.log(JSON.stringify({ stage: 'rendering', done, total })) });
 const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
 console.log(JSON.stringify({ status: 'completed', workspace, outputPath, scenes: plan.questions.length, uniqueImages: new Set(assets.map(asset => asset.id)).size, verification }, null, 2));

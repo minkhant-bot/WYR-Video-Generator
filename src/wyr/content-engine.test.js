@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CONTENT_CATEGORIES } from './content.js';
-import { assessQuestionQuality, compareDilemmas, ContentGenerationError, ContentHistoryStore, generateProductionPlan, selectCategories } from './content-engine.js';
+import { assessQuestionQuality, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, generateProductionPlan, selectCategories } from './content-engine.js';
 
 const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
 const dilemma = (a, b, category = 'superpowers', scores = quality) => ({ category, quality: scores, optionA: { text: a, searchQuery: `${a} concept photo` }, optionB: { text: b, searchQuery: `${b} concept photo` } });
+const rateLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), { status: 429, code: 'rate_limit_exceeded', retryAfterMs });
 const temporaryStore = operation => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-content-history-'));
   const store = new ContentHistoryStore(path.join(directory, 'history.json'));
@@ -87,4 +88,62 @@ test('production selection succeeds with exactly 8 distinct quality-gated questi
   assert.equal(plan.questions.length, 8);
   assert.equal(plan.questions.every(question => question.duplicateCheck.status === 'clear'), true);
   assert.equal(store.load().videos[0].questions.length, 8);
+}));
+
+test('seven accepted dilemmas survive a 429 and only the final missing dilemma is requested again', async () => temporaryStore(async store => {
+  const requestedCounts = []; const contexts = []; const waits = []; let calls = 0;
+  const low = { ...quality, curiosity: 4 };
+  const provider = { async generatePlan(count, context) {
+    calls += 1; requestedCounts.push(count); contexts.push(context);
+    if (calls === 1) return { topic: 'Partial progress', questions: context.categories.map((category, index) => dilemma(`${category} wonder`, `${category} escape`, category, index === 7 ? low : quality)) };
+    if (calls === 2) throw rateLimitError(25);
+    return { topic: 'Final replacement', questions: [dilemma('Summon friendly dragons', 'Open magical portals', context.categories[0])] };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 1000 }, sleep: async milliseconds => waits.push(milliseconds) });
+  assert.deepEqual(requestedCounts, [8, 1, 1]);
+  assert.deepEqual(contexts.slice(1).map(context => context.categories), [['fantasy'], ['fantasy']]);
+  assert.deepEqual(waits, [25]);
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.questions[0].optionA.text, 'superpowers wonder');
+  assert.equal(plan.contentQuality.attemptsUsed, 2);
+  assert.equal(plan.contentQuality.rateLimitRetries, 1);
+}));
+
+test('Retry-After controls the rate-limit wait duration', async () => temporaryStore(async store => {
+  const waits = []; let calls = 0;
+  const provider = { async generatePlan(count, context) { calls += 1; if (calls === 1) throw rateLimitError(2400); return { topic: 'Recovered', questions: [dilemma('Control gravity', 'Control lightning', context.categories[0])] }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 1, maxAttempts: 1, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 3000 }, sleep: async milliseconds => waits.push(milliseconds) });
+  assert.equal(plan.questions.length, 1); assert.deepEqual(waits, [2400]); assert.equal(calls, 2);
+}));
+
+test('missing Retry-After uses bounded exponential backoff with jitter support', async () => temporaryStore(async store => {
+  const waits = []; let calls = 0;
+  const provider = { async generatePlan(count, context) { calls += 1; if (calls <= 2) throw rateLimitError(undefined); return { topic: 'Recovered', questions: [dilemma('Control gravity', 'Control lightning', context.categories[0])] }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 1, maxAttempts: 1, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 1000, baseDelayMs: 100, maxDelayMs: 500, jitterMs: 50 }, sleep: async milliseconds => waits.push(milliseconds), random: () => 0 });
+  assert.deepEqual(waits, [100, 200]); assert.equal(calls, 3); assert.equal(plan.contentQuality.rateLimitWaitedMs, 300);
+}));
+
+test('rate-limit wait budget fails clearly without persisting or rendering an incomplete plan', async () => temporaryStore(async store => {
+  const waits = []; let calls = 0; const low = { ...quality, curiosity: 4 };
+  const provider = { async generatePlan(count, context) { calls += 1; if (calls === 1) return { topic: 'Partial', questions: context.categories.map((category, index) => dilemma(`${category} prize`, `${category} journey`, category, index === 7 ? low : quality)) }; throw rateLimitError(1500); } };
+  await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 4, maxWaitMs: 1000 }, sleep: async milliseconds => waits.push(milliseconds) }), error => {
+    assert.ok(error instanceof ContentRateLimitError); assert.equal(error.code, 'groq_rate_limit_exceeded'); assert.equal(error.acceptedCount, 7); assert.match(error.message, /No incomplete video was rendered/); return true;
+  });
+  assert.equal(calls, 2); assert.deepEqual(waits, []); assert.deepEqual(store.load().videos, []);
+}));
+
+test('rate-limit recovery does not bypass duplicate or persistent-history checks', async () => temporaryStore(async store => {
+  store.appendPlan({ topic: 'Previous', questions: [dilemma('Control gravity', 'Control lightning', 'superpowers')] });
+  const requestedCounts = []; let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1; requestedCounts.push(count);
+    if (calls === 1) throw rateLimitError(1);
+    if (calls === 2) return { topic: 'Duplicate first', questions: context.categories.map((category, index) => index === 0 ? dilemma('Control gravity', 'Control lightning', category) : dilemma(`${category} vision`, `${category} adventure`, category)) };
+    return { topic: 'Replacement', questions: [dilemma('Breathe beneath oceans', 'Walk across clouds', context.categories[0])] };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 100 }, sleep: async () => {} });
+  assert.deepEqual(requestedCounts, [8, 8, 1]);
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.questions.some(question => compareDilemmas(question, dilemma('Control gravity', 'Control lightning')).duplicate), false);
+  assert.equal(store.load().videos.length, 2);
 }));

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fetchWithTimeout, retry } from './utils.js';
+import { fetchWithTimeout, mapWithConcurrency, retry } from './utils.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
@@ -39,25 +39,36 @@ const rewriteQuery = (query, optionText, attempt) => {
   const optionWords = optionText.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !['would', 'rather', 'every', 'always', 'have', 'your'].includes(word));
   return [...new Set([...words.slice(0, 2), ...optionWords])].slice(0, 5).join(' ');
 };
-export const findAndDownloadImages = async ({ plan, provider, assetsDir, maxRetries, onProgress }) => {
-  const used = new Set(); const selections = [];
+export const findAndDownloadImages = async ({ plan, provider, assetsDir, maxRetries, concurrency = 4, onProgress }) => {
+  const used = new Set();
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
-  for (let index = 0; index < options.length; index += 1) {
-    const option = options[index]; let selected; let finalQuery = option.searchQuery; const searchAttempts = [];
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      finalQuery = attempt === 0 ? option.searchQuery : rewriteQuery(option.searchQuery, option.text, attempt);
-      if (!finalQuery) continue;
-      const candidates = await retry(() => provider.search(finalQuery), { attempts: 2, label: `image search for "${finalQuery}"` });
+  const states = options.map((option, index) => ({ index, option, selected: null, finalQuery: option.searchQuery, searchAttempts: [] }));
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const pending = states.filter(state => !state.selected);
+    if (!pending.length) break;
+    const searchResults = await mapWithConcurrency(pending, concurrency, async state => {
+      const query = attempt === 0 ? state.option.searchQuery : rewriteQuery(state.option.searchQuery, state.option.text, attempt);
+      if (!query) return { query, candidates: [] };
+      const candidates = await retry(() => provider.search(query), { attempts: 2, label: `image search for "${query}"` });
+      return { query, candidates };
+    });
+    for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex += 1) {
+      const state = pending[pendingIndex]; const { query, candidates } = searchResults[pendingIndex]; state.finalQuery = query;
       const usable = candidates.filter(candidate => !used.has(candidate.id) && Math.min(candidate.width, candidate.height) >= 900 && Math.max(candidate.width, candidate.height) >= 1600);
-      selected = usable.sort((left, right) => scoreCandidate(right, finalQuery) - scoreCandidate(left, finalQuery))[0];
-      searchAttempts.push({ attempt: attempt + 1, query: finalQuery, candidates: candidates.length, usableCandidates: usable.length, selectedId: selected?.id || null });
-      if (selected) break;
+      const selected = [...usable].sort((left, right) => scoreCandidate(right, query) - scoreCandidate(left, query))[0];
+      state.searchAttempts.push({ attempt: attempt + 1, query, candidates: candidates.length, usableCandidates: usable.length, selectedId: selected?.id || null });
+      if (selected) { state.selected = selected; used.add(selected.id); }
     }
-    if (!selected) throw new Error(`No acceptable unique image found for question ${option.questionIndex + 1}, option ${option.slot} after ${maxRetries + 1} search attempt(s).`);
-    used.add(selected.id);
-    const filename = `q${String(option.questionIndex + 1).padStart(2, '0')}-${option.slot.toLowerCase()}-${selected.id}.jpg`; const localPath = path.join(assetsDir, filename);
-    await provider.downloadAsset(selected, localPath);
-    selections.push({ ...option, queryUsed: finalQuery, searchAttempts, provider: 'Pexels', ...selected, localPath, filename }); onProgress?.(index + 1, options.length);
   }
+  const missing = states.find(state => !state.selected);
+  if (missing) throw new Error(`No acceptable unique image found for question ${missing.option.questionIndex + 1}, option ${missing.option.slot} after ${maxRetries + 1} search attempt(s).`);
+  let completed = 0;
+  const selections = await mapWithConcurrency(states, concurrency, async state => {
+    const { option, selected, finalQuery, searchAttempts } = state;
+    const filename = `q${String(option.questionIndex + 1).padStart(2, '0')}-${option.slot.toLowerCase()}-${selected.id}.jpg`; const localPath = path.join(assetsDir, filename);
+    await provider.downloadAsset(selected, localPath); completed += 1; onProgress?.(completed, options.length);
+    return { ...option, queryUsed: finalQuery, searchAttempts, provider: 'Pexels', ...selected, localPath, filename };
+  });
+  if (new Set(selections.map(selection => selection.id)).size !== selections.length) throw new Error('Pexels selection produced duplicate photo IDs.');
   return selections;
 };

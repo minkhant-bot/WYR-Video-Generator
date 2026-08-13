@@ -27,6 +27,7 @@ const generatedPlan = () => ({ topic: 'Dream adventures', questions: [
 ].map((item, index) => ({ ...item, category: categories[index], quality })) });
 const successfulResponse = (plan = generatedPlan()) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
 const failedGenerationResponse = () => new Response(JSON.stringify({ error: { message: 'Failed to generate JSON', code: 'failed_generation', failed_generation: 'PRIVATE-GENERATION-DIAGNOSTIC' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+const rateLimitResponse = retryAfter => new Response(JSON.stringify({ error: { message: 'Rate limit reached', code: 'rate_limit_exceeded' } }), { status: 429, headers: { 'content-type': 'application/json', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) } });
 const withMockedFetch = async (responses, operation) => {
   const originalFetch = globalThis.fetch; const requests = []; let index = 0;
   globalThis.fetch = async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return responses[index++] || responses.at(-1); };
@@ -61,6 +62,13 @@ test('Groq structured retry succeeds with a shorter repair prompt', async () => 
   assert.equal(plan.questions.length, 8); assert.equal(requests.length, 2);
   assert.notEqual(requests[0].body.messages[1].content, requests[1].body.messages[1].content);
   assert.ok(requests[1].body.messages[1].content.length < requests[0].body.messages[1].content.length);
+}));
+
+test('Groq exposes HTTP 429 and Retry-After without internally burning structured retries', async () => withMockedFetch([rateLimitResponse('2.5')], async requests => {
+  await assert.rejects(() => provider().generatePlan(8), error => {
+    assert.equal(error.status, 429); assert.equal(error.code, 'rate_limit_exceeded'); assert.equal(error.retryAfterMs, 2500); return true;
+  });
+  assert.equal(requests.length, 1);
 }));
 
 test('Groq falls back to JSON Object mode and validates a successful object', async () => withMockedFetch([

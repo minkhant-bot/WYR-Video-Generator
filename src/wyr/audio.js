@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EdgeTTS } from '@seepine/edge-tts';
-import { retry } from './utils.js';
+import { mapWithConcurrency, retry } from './utils.js';
 import { WYR_TEMPLATE } from './template.js';
 import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 
@@ -27,21 +27,21 @@ export const measureAudioDuration = async audioPath => {
   return duration;
 };
 
-export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration }) => {
-  fs.mkdirSync(audioDir, { recursive: true }); const voiceovers = [];
-  const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
-  for (let index = 0; index < plan.questions.length; index += 1) {
-    const narration = buildNarration(plan.questions[index]); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
+export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration }) => {
+  fs.mkdirSync(audioDir, { recursive: true }); let completed = 0;
+  return mapWithConcurrency(plan.questions, concurrency, async (question, index) => {
+    const narration = buildNarration(question); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
     await retry(async () => {
+      const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
       let result;
       try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
       if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
       fs.writeFileSync(localPath, result.data);
     }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
     const duration = await measureDuration(localPath);
-    voiceovers.push({ questionIndex: index, narration, filename, localPath, duration, voice, rate }); onProgress?.(index + 1, plan.questions.length);
-  }
-  return voiceovers;
+    completed += 1; onProgress?.(completed, plan.questions.length);
+    return { questionIndex: index, narration, filename, localPath, duration, voice, rate };
+  });
 };
 
 const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_TEMPLATE.canvas.fps;

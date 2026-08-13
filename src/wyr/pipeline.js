@@ -13,22 +13,22 @@ const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, loc
 export const runPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   try {
-    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', voice: config.edgeVoice });
+    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
-    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries });
+    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
     const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
 
     update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
     const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
-    const assets = await findAndDownloadImages({ plan, provider: imageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    const assets = await findAndDownloadImages({ plan, provider: imageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
     if (assets.length !== plan.questions.length * 2 || new Set(assets.map(asset => asset.id)).size !== assets.length) throw new Error(`Expected ${plan.questions.length * 2} unique Pexels photos; received ${assets.length}.`);
     writeJsonAtomic(path.join(job.workspace, 'assets.json'), relativeMetadata(assets, job.workspace));
     writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: 'Pexels', providerUrl: 'https://www.pexels.com', photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.photoUrl, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
     writeJsonAtomic(path.join(job.workspace, 'voiceovers.json'), relativeMetadata(voiceovers, job.workspace));
 
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });
@@ -39,7 +39,7 @@ export const runPipeline = async ({ job, store, config }) => {
     buildComposition({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace });
 
     update({ status: 'rendering', stage: 'rendering', progress: 71 });
-    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, sfx, sfxSchedule, countdownSchedule, workspace: job.workspace, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
+    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, sfx, sfxSchedule, countdownSchedule, workspace: job.workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
     update({ status: 'verifying', stage: 'verifying', progress: 95 });
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
@@ -59,7 +59,7 @@ export const runFixturePipeline = async ({ job, store, config }) => {
     update({ topic: plan.topic, progress: 40, status: 'building_timeline', stage: 'building_timeline' });
     buildComposition({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace });
     update({ status: 'rendering', stage: 'rendering', progress: 55 });
-    const outputPath = await renderVideo({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace, onProgress: (done, total) => update({ progress: 55 + Math.round(done / total * 40) }) });
+    const outputPath = await renderVideo({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => update({ progress: 55 + Math.round(done / total * 40) }) });
     update({ status: 'verifying', stage: 'verifying', progress: 96 });
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: plan.questions.length * config.secondsPerQuestion, renderDir: path.join(job.workspace, 'render') });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification); update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification });
