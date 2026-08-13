@@ -66,3 +66,28 @@ test('pipeline defaults to a natural English male Edge voice', () => {
   try { delete process.env.WYR_EDGE_VOICE; assert.equal(getConfig().edgeVoice, 'en-US-AndrewNeural'); }
   finally { original === undefined ? delete process.env.WYR_EDGE_VOICE : process.env.WYR_EDGE_VOICE = original; }
 });
+
+test('pipeline defaults to a slower natural Edge speaking rate', () => {
+  const original = process.env.WYR_EDGE_VOICE_RATE;
+  try { delete process.env.WYR_EDGE_VOICE_RATE; assert.equal(getConfig().edgeVoiceRate, '-10%'); }
+  finally { original === undefined ? delete process.env.WYR_EDGE_VOICE_RATE : process.env.WYR_EDGE_VOICE_RATE = original; }
+});
+
+test('pipeline allows scenes to grow for slower narration and countdown pacing', () => {
+  const original = process.env.WYR_MAX_SCENE_DURATION;
+  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 15); }
+  finally { original === undefined ? delete process.env.WYR_MAX_SCENE_DURATION : process.env.WYR_MAX_SCENE_DURATION = original; }
+});
+
+test('content history and bounded retry configuration support a persistent volume path', () => {
+  const names = ['WYR_CONTENT_HISTORY_DIR', 'WYR_CONTENT_GENERATION_RETRIES'];
+  const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.WYR_CONTENT_HISTORY_DIR = '/data/wyr-content-history'; process.env.WYR_CONTENT_GENERATION_RETRIES = '6';
+    const config = getConfig();
+    assert.equal(config.contentHistoryPath, '/data/wyr-content-history/history.json');
+    assert.equal(config.contentGenerationRetries, 6);
+  } finally {
+    for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
+  }
+});

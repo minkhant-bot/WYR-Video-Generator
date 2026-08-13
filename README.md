@@ -32,6 +32,8 @@ Open `http://localhost:3100` after starting the server. For a credential-free se
 
 Job workspaces default to `data/wyr-jobs`; fixture output defaults to `data/wyr-fixture-job`. Relative paths in `WYR_JOBS_DIR`, `WYR_FIXTURE_DIR`, `FFMPEG_PATH`, and `FFPROBE_PATH` resolve from the project root, not the current shell directory.
 
+Accepted production dilemmas and recently used categories are stored atomically in `WYR_CONTENT_HISTORY_DIR/history.json` (default: ignored `data/content-history/history.json`). Set `WYR_CONTENT_HISTORY_DIR` to a mounted Railway persistent-volume directory, such as `/data/wyr-content-history`, to preserve duplicate prevention across redeployments. Without a persistent volume, history survives normal server restarts on the same filesystem but cross-deployment retention cannot be guaranteed. `WYR_CONTENT_GENERATION_RETRIES` bounds automatic replacement attempts; a job fails clearly instead of rendering if eight strong, distinct dilemmas cannot be accepted.
+
 For isolated testing, `WYR_SECRET_CONFIG_PATH` can select another local credential file. Relative paths resolve from the project root; ensure any custom path is excluded from version control.
 
 ## Visual reference

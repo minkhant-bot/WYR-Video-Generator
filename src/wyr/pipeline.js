@@ -2,6 +2,7 @@ import path from 'node:path';
 import { writeJsonAtomic, log } from './utils.js';
 import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
+import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages } from './images.js';
 import { buildComposition, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
@@ -14,7 +15,9 @@ export const runPipeline = async ({ job, store, config }) => {
   try {
     assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', voice: config.edgeVoice });
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
-    const generated = await new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs }).generatePlan(config.questionCount);
+    const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
+    const historyStore = new ContentHistoryStore(config.contentHistoryPath);
+    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries });
     const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
 
     update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
@@ -32,7 +35,7 @@ export const runPipeline = async ({ job, store, config }) => {
     const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds, maximumSceneDuration: config.maximumSceneDuration });
     const sfx = await createLocalSfx({ audioDir: path.join(job.workspace, 'audio') });
     const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
-    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, entrance: { ...sfx.entrance, localPath: path.relative(job.workspace, sfx.entrance.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, tick: { ...sfx.tick, localPath: path.relative(job.workspace, sfx.tick.localPath) }, schedule: sfxSchedule, countdownSchedule });
+    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, entrance: { ...sfx.entrance, localPath: path.relative(job.workspace, sfx.entrance.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, countdownSequence: { ...sfx.countdownSequence, localPath: path.relative(job.workspace, sfx.countdownSequence.localPath) }, schedule: sfxSchedule, countdownSchedule });
     buildComposition({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace });
 
     update({ status: 'rendering', stage: 'rendering', progress: 71 });

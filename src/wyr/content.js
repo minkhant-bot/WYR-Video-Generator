@@ -3,7 +3,17 @@ import { fetchWithTimeout } from './utils.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const STRUCTURED_ATTEMPTS = 3;
-const TEMPERATURE = 0.1;
+const TEMPERATURE = 0.8;
+
+export const CONTENT_CATEGORIES = Object.freeze([
+  'superpowers', 'money', 'luxury', 'dream lifestyle', 'travel', 'impossible choices',
+  'future technology', 'fantasy', 'time', 'freedom', 'dream homes', 'cars', 'food',
+  'adventure', 'fame', 'survival-lite', 'space', 'ocean', 'friendship/social',
+  'funny hypothetical',
+]);
+export const QUALITY_DIMENSIONS = Object.freeze([
+  'dilemmaStrength', 'curiosity', 'emotionalPull', 'visualPotential', 'readability',
+]);
 
 const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
 const normalizeOption = (option, index, label) => {
@@ -11,6 +21,15 @@ const normalizeOption = (option, index, label) => {
   if (text.length < 3 || text.length > 500) throw new Error(`Question ${index + 1} option ${label} text must contain 3–500 characters before visual fitting.`);
   if (searchQuery.length < 3 || searchQuery.length > 100) throw new Error(`Question ${index + 1} option ${label} search query must contain 3–100 characters.`);
   return { text, searchQuery };
+};
+
+const normalizeQuality = (quality, index) => {
+  if (!quality || typeof quality !== 'object') throw new Error(`Question ${index + 1} must include quality scores.`);
+  return Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => {
+    const value = Number(quality[dimension]);
+    if (!Number.isInteger(value) || value < 1 || value > 10) throw new Error(`Question ${index + 1} quality.${dimension} must be an integer from 1–10.`);
+    return [dimension, value];
+  }));
 };
 
 const significantWords = text => new Set(text.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !['the', 'and', 'for', 'you', 'your', 'with', 'every'].includes(word)));
@@ -27,12 +46,15 @@ export const validatePlan = (input, questionCount) => {
   const seen = new Set(); const previousWordSets = [];
   const questions = input.questions.map((question, index) => {
     const optionA = normalizeOption(question?.optionA, index, 'A'); const optionB = normalizeOption(question?.optionB, index, 'B');
+    const category = normalize(question?.category).toLowerCase();
+    if (!CONTENT_CATEGORIES.includes(category)) throw new Error(`Question ${index + 1} category must be one of the supported production categories.`);
+    const quality = normalizeQuality(question?.quality, index);
     if (optionA.text.toLowerCase() === optionB.text.toLowerCase()) throw new Error(`Question ${index + 1} has identical options.`);
     const signature = [optionA.text, optionB.text].map(text => text.toLowerCase()).sort().join('|');
     if (seen.has(signature)) throw new Error(`Question ${index + 1} duplicates another question.`);
     const words = significantWords(signature);
     if (previousWordSets.some(previous => similarity(words, previous) >= 0.65)) throw new Error(`Question ${index + 1} is too similar to another question.`);
-    seen.add(signature); previousWordSets.push(words); return { index, optionA, optionB };
+    seen.add(signature); previousWordSets.push(words); return { index, category, quality, optionA, optionB };
   });
   return { version: 1, topic, percentages: null, questions };
 };
@@ -45,15 +67,21 @@ class GroqGenerationError extends Error {
 
 const planSchema = () => {
   const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' } }, required: ['text', 'searchQuery'], additionalProperties: false };
-  const question = { type: 'object', properties: { optionA: option, optionB: option }, required: ['optionA', 'optionB'], additionalProperties: false };
+  const quality = { type: 'object', properties: Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => [dimension, { type: 'integer', minimum: 1, maximum: 10 }])), required: QUALITY_DIMENSIONS, additionalProperties: false };
+  const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, quality, optionA: option, optionB: option }, required: ['category', 'quality', 'optionA', 'optionB'], additionalProperties: false };
   return { type: 'object', properties: { topic: { type: 'string' }, questions: { type: 'array', items: question } }, required: ['topic', 'questions'], additionalProperties: false };
 };
 
-const initialPrompt = questionCount => `Create one English Would You Rather topic and exactly ${questionCount} unique questions. For every question provide optionA and optionB. Each option needs only text and searchQuery. Keep option text simple and under 55 characters. Keep each Pexels searchQuery to 2–5 concrete visual words. Use safe, broadly appealing ideas. Do not include percentages or explanations.`;
-const repairPrompt = (questionCount, attempt) => attempt === 2
-  ? `Return exactly ${questionCount} unique Would You Rather questions as JSON. Use only: topic, questions, optionA, optionB, text, searchQuery. Keep option text under 55 characters. Keep searchQuery concrete and 2–5 words. No percentages or extra fields.`
-  : `JSON only. Exactly ${questionCount} questions. Keys only: topic, questions, optionA, optionB, text, searchQuery. Short option text. Concrete 2–5 word searchQuery.`;
-const objectPrompt = questionCount => `${repairPrompt(questionCount, 3)} Shape: {"topic":"...","questions":[{"optionA":{"text":"...","searchQuery":"..."},"optionB":{"text":"...","searchQuery":"..."}}]}`;
+const contextText = context => {
+  const categories = Array.isArray(context?.categories) ? context.categories.filter(category => CONTENT_CATEGORIES.includes(category)) : [];
+  const exclusions = Array.isArray(context?.exclusions) ? context.exclusions.slice(-80) : [];
+  return `${categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : ''}${exclusions.length ? ` Do not repeat or paraphrase these prior dilemmas: ${exclusions.join('; ')}.` : ''}`;
+};
+const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} exceptionally engaging English Would You Rather dilemmas for short-form video.${contextText(context)} Both options must be tempting, surprising, funny, or emotionally compelling; neither may be obviously superior. Prefer 2–8 words per option and never exceed 55 characters. Avoid generic pairs such as coffee/tea, cats/dogs, summer/winter, or city/countryside. Avoid politics, graphic violence, sexual or hateful content, dangerous challenges, and complicated conditions. Give each question one supported category and honest integer 1–10 scores for dilemmaStrength, curiosity, emotionalPull, visualPotential, and readability. Every score should be at least 7 only when the candidate truly earns it. Each Pexels searchQuery must be 2–5 concrete visual words that clearly distinguish the two choices. Return no percentages or explanations.`;
+const repairPrompt = (questionCount, attempt, context) => attempt === 2
+  ? `Return exactly ${questionCount} strong, distinct dilemmas in the required JSON schema.${contextText(context)} Use supported categories and all five honest integer quality scores. Each option must be instantly readable, ideally 2–8 words and under 55 characters. Both sides must be compelling. Use concrete 2–5 word image queries. No percentages or extra fields.`
+  : `JSON only. Exactly ${questionCount} distinct high-quality dilemmas.${contextText(context)} Include category, all five quality scores, optionA and optionB with short text and concrete searchQuery.`;
+const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, 3, context)} Shape: {"topic":"...","questions":[{"category":"fantasy","quality":{"dilemmaStrength":8,"curiosity":8,"emotionalPull":8,"visualPotential":8,"readability":9},"optionA":{"text":"...","searchQuery":"..."},"optionB":{"text":"...","searchQuery":"..."}}]}`;
 
 const groqErrorFromResponse = async response => {
   const raw = await response.text(); let payload;
@@ -86,7 +114,7 @@ const validateGeneratedPlan = (text, questionCount) => {
 
 export class GroqContentProvider extends ContentProvider {
   constructor({ apiKey, model, timeoutMs }) { super(); this.apiKey = apiKey; this.model = model; this.timeoutMs = timeoutMs; }
-  async requestPlan({ questionCount, mode, attempt = 1 }) {
+  async requestPlan({ questionCount, mode, attempt = 1, context = {} }) {
     const structured = mode === 'json_schema';
     const response = await fetchWithTimeout(GROQ_URL, {
       method: 'POST',
@@ -97,7 +125,7 @@ export class GroqContentProvider extends ContentProvider {
         max_completion_tokens: 2500,
         messages: [
           { role: 'system', content: 'Return only the requested Would You Rather plan as JSON.' },
-          { role: 'user', content: structured ? (attempt === 1 ? initialPrompt(questionCount) : repairPrompt(questionCount, attempt)) : objectPrompt(questionCount) },
+          { role: 'user', content: structured ? (attempt === 1 ? initialPrompt(questionCount, context) : repairPrompt(questionCount, attempt, context)) : objectPrompt(questionCount, context) },
         ],
         response_format: structured
           ? { type: 'json_schema', json_schema: { name: 'would_you_rather_plan', strict: true, schema: planSchema() } }
@@ -112,14 +140,14 @@ export class GroqContentProvider extends ContentProvider {
     if (message?.refusal) throw new GroqGenerationError('Groq refused content generation.', 'refusal');
     return validateGeneratedPlan(message?.content, questionCount);
   }
-  async generatePlan(questionCount) {
+  async generatePlan(questionCount, context = {}) {
     for (let attempt = 1; attempt <= STRUCTURED_ATTEMPTS; attempt += 1) {
-      try { return await this.requestPlan({ questionCount, mode: 'json_schema', attempt }); }
+      try { return await this.requestPlan({ questionCount, mode: 'json_schema', attempt, context }); }
       catch (error) {
         if (!['failed_generation', 'invalid_generation'].includes(error.code)) throw error;
       }
     }
-    try { return await this.requestPlan({ questionCount, mode: 'json_object' }); }
+    try { return await this.requestPlan({ questionCount, mode: 'json_object', context }); }
     catch (error) {
       throw new Error(`Groq content generation failed after ${STRUCTURED_ATTEMPTS} structured attempt(s) and one JSON-object fallback: ${error.message}`, { cause: error });
     }

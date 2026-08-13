@@ -46,34 +46,40 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const answerEnd = Math.min(revealTime, contentEnd);
   const aWinner = Number(question.optionA.percentage) >= Number(question.optionB.percentage);
   const bWinner = Number(question.optionB.percentage) > Number(question.optionA.percentage);
-  const optionAlphaA = activeAlpha({ start: timing.optionAEntrance, fadeIn: timing.optionEntranceDuration, end: answerEnd, fadeOut: timing.percentageRevealDuration });
-  const optionAlphaB = activeAlpha({ start: timing.optionBEntrance, fadeIn: timing.optionEntranceDuration, end: answerEnd, fadeOut: timing.percentageRevealDuration });
-  const percentAlpha = activeAlpha({ start: revealTime, fadeIn: timing.percentageRevealDuration, end: contentEnd, fadeOut: timing.transitionOutDuration });
-  const countdownLayers = (timeline?.countdown || []).map(({ number, time }) => {
-    const alpha = activeAlpha({ start: time, fadeIn: timing.countdownFadeDuration, end: time + timing.countdownInterval, fadeOut: timing.countdownFadeDuration });
-    return `drawtext=fontfile=${font}:text='${number}':fontsize=${typography.countdownSize}:fontcolor=white:borderw=12:bordercolor=black:shadowcolor=0xF45A78:shadowx=6:shadowy=6:x=(w-text_w)/2:y=(h-text_h)/2:alpha=${alpha}`;
-  });
+  const incomingDuration = timing.transitionSlideDuration;
+  const slideDistance = (canvas.width + layout.imageWidth) / 2;
+  const incomingProgress = `clip(t/${incomingDuration},0,1)`;
+  const outgoingProgress = `clip((t-${contentEnd})/${timing.transitionSlideDuration},0,1)`;
+  const topMotion = `${index > 0 ? `-${slideDistance}*(1-${incomingProgress})` : '0'}+${slideDistance}*${outgoingProgress}`;
+  const bottomMotion = `${index > 0 ? `${slideDistance}*(1-${incomingProgress})` : '0'}-${slideDistance}*${outgoingProgress}`;
+  const optionEntranceA = index > 0 ? 0 : timing.optionAEntrance;
+  const optionEntranceB = index > 0 ? 0 : timing.optionBEntrance;
+  const optionFadeIn = index > 0 ? 0.01 : timing.optionEntranceDuration;
+  const optionAlphaA = activeAlpha({ start: optionEntranceA, fadeIn: optionFadeIn, end: answerEnd, fadeOut: timing.percentageRevealDuration });
+  const optionAlphaB = activeAlpha({ start: optionEntranceB, fadeIn: optionFadeIn, end: answerEnd, fadeOut: timing.percentageRevealDuration });
+  const percentAlpha = activeAlpha({ start: revealTime, fadeIn: timing.percentageRevealDuration, end: contentEnd + timing.transitionSlideDuration, fadeOut: timing.transitionSlideDuration });
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0x19D8EE:x=${x}-4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0xF45A78:x=${x}+4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:borderw=7:bordercolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
-  const percentLayer = ({ textFile, winner, y }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x=(w-text_w)/2:y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
+  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
+  const firstSceneTopFade = index === 0 ? `,fade=t=in:st=0:d=${timing.imageFadeIn}:alpha=1` : '';
+  const firstSceneBottomFade = index === 0 ? `,fade=t=in:st=${timing.optionBEntrance}:d=${timing.imageFadeIn}:alpha=1` : '';
   const filter = [
-    `[0:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba,fade=t=in:st=0:d=${timing.imageFadeIn}:alpha=1,fade=t=out:st=${contentEnd}:d=${timing.transitionOutDuration}:alpha=1[aimg]`,
-    `[1:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba,fade=t=in:st=${timing.optionBEntrance}:d=${timing.imageFadeIn}:alpha=1,fade=t=out:st=${contentEnd}:d=${timing.transitionOutDuration}:alpha=1[bimg]`,
+    `[0:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba${firstSceneTopFade}[aimg]`,
+    `[1:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba${firstSceneBottomFade}[bimg]`,
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
-    `[base][aimg]overlay=x=(W-w)/2:y=${layout.topImageY}:format=auto[tmpa]`,
-    `[tmpa][bimg]overlay=x=(W-w)/2:y=${layout.bottomImageY}:format=auto[tmpb]`,
+    `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
+    `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
     `color=c=black@0:s=${layout.orSize}x${layout.orSize}:r=${canvas.fps}:d=${duration},format=rgba,geq=r=0:g=0:b=0:a='if(lte((X-${layout.orSize / 2})*(X-${layout.orSize / 2})+(Y-${layout.orSize / 2})*(Y-${layout.orSize / 2}),${layout.orSize / 2}*${layout.orSize / 2}),255,0)'[orcircle]`,
     `[tmpb][orcircle]overlay=x=(W-w)/2:y=${canvas.height / 2}-${layout.orSize / 2}[withor]`,
     `[withor]${[
-      ...textLayer({ textFile: aText, fontSize: aFit.fontSize, x: layout.textX, y: layout.topTextY, alphaExpression: optionAlphaA }),
-      ...textLayer({ textFile: bText, fontSize: bFit.fontSize, x: layout.textX, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
-      percentLayer({ textFile: aPercentText, winner: aWinner, y: layout.topPercentageY }),
-      percentLayer({ textFile: bPercentText, winner: bWinner, y: layout.bottomPercentageY }),
+      ...textLayer({ textFile: aText, fontSize: aFit.fontSize, x: `'${layout.textX}+${topMotion}'`, y: layout.topTextY, alphaExpression: optionAlphaA }),
+      ...textLayer({ textFile: bText, fontSize: bFit.fontSize, x: `'${layout.textX}+${bottomMotion}'`, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
+      percentLayer({ textFile: aPercentText, winner: aWinner, y: layout.topPercentageY, motion: topMotion }),
+      percentLayer({ textFile: bPercentText, winner: bWinner, y: layout.bottomPercentageY, motion: bottomMotion }),
       `drawtext=fontfile=${font}:text='OR':fontsize=${typography.orSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2-5`,
-      ...countdownLayers,
       'setrange=limited,format=yuv420p[out]',
     ].join(',')}`,
   ].join(';');
@@ -81,8 +87,12 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   return output;
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, entrance: sfx.entrance.filename, reveal: sfx.reveal.filename, transition: sfx.transition.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, entrance: sfx.entrance.filename, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
+};
+export const assertProductionAudioInputs = ({ plan, voiceovers = [], timeline, sfx }) => {
+  if ((voiceovers.length && voiceovers.length !== plan.questions.length) || !timeline || !sfx || SFX_EVENT_TYPES.some(type => !sfx[type]?.localPath) || !sfx.countdownSequence?.localPath) throw new Error('Production audio rendering requires a timeline and all local SFX files, plus one voice file per scene when narration is enabled.');
+  return true;
 };
 export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, onProgress }) => {
   const renderDir = path.join(workspace, 'render'); const segments = [];
@@ -93,13 +103,13 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${segments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
-  if (voiceovers.length) {
-    if (voiceovers.length !== plan.questions.length || !timeline || !sfx || SFX_EVENT_TYPES.some(type => !sfx[type]?.localPath) || !sfx.tick?.localPath) throw new Error('Narrated rendering requires one voice file per scene, a timeline, and all local SFX files.');
+  if (voiceovers.length || (timeline && sfx)) {
+    assertProductionAudioInputs({ plan, voiceovers, timeline, sfx });
     const schedule = sfxSchedule || buildSfxSchedule(timeline); assertCompleteSfxSchedule({ timeline, events: schedule.events });
     const countdown = countdownSchedule || buildCountdownSchedule(timeline); assertCompleteCountdownSchedule({ timeline, events: countdown.events });
     const inputs = ['-y', '-i', silentVideo]; for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
     const sfxInputs = {}; for (const type of SFX_EVENT_TYPES) { sfxInputs[type] = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx[type].localPath); }
-    const tickInput = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx.tick.localPath);
+    const countdownInput = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx.countdownSequence.localPath);
     const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`]; const mixLabels = ['[bed]'];
     for (let index = 0; index < voiceovers.length; index += 1) {
       const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].voiceStart) * 1000); filters.push(`[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,volume=1,adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
@@ -112,10 +122,10 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
         filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
       }
     }
-    filters.push(`[${tickInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.tick.volume},asplit=${countdown.events.length}${countdown.events.map((_, index) => `[tick${index}raw]`).join('')}`);
-    for (let index = 0; index < countdown.events.length; index += 1) {
-      const delay = Math.round(countdown.events[index].timestamp * 1000);
-      filters.push(`[tick${index}raw]adelay=delays=${delay}:all=1[tick${index}]`); mixLabels.push(`[tick${index}]`);
+    filters.push(`[${countdownInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.countdownSequence.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[countdownSequence${index}raw]`).join('')}`);
+    for (let index = 0; index < timeline.scenes.length; index += 1) {
+      const label = `countdownSequence${index}`; const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].countdownStart) * 1000);
+      filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
     }
     filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
     await run(ffmpegPath, [...inputs, '-filter_complex', filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', String(totalDuration), '-movflags', '+faststart', output], 'mix narration and SFX');

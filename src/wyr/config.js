@@ -16,12 +16,15 @@ const number = (name, fallback, min, max) => {
 
 export const getConfig = () => {
   const credentials = resolveApiKeys();
+  const contentHistoryDir = process.env.WYR_CONTENT_HISTORY_DIR ? resolveProjectPath(process.env.WYR_CONTENT_HISTORY_DIR) : path.join(DEFAULT_DATA_DIR, 'content-history');
   return {
     port: integer('WYR_PORT', 3100, 1, 65535),
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
     questionCount: integer('WYR_QUESTION_COUNT', 8, 8, 8),
+    contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 4, 1, 8),
+    contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
-    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 11, 8, 15),
+    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 15, 8, 15),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     timeoutMs: integer('WYR_REQUEST_TIMEOUT_MS', 20_000, 1_000, 120_000),
@@ -30,7 +33,7 @@ export const getConfig = () => {
     groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
     pexelsApiKey: credentials.pexelsApiKey,
     edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',
-    edgeVoiceRate: process.env.WYR_EDGE_VOICE_RATE || '+0%',
+    edgeVoiceRate: process.env.WYR_EDGE_VOICE_RATE || '-10%',
   };
 };
 

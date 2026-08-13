@@ -2,16 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { addIllustrativePercentages, GroqContentProvider, validatePlan } from './content.js';
 
-test('validatePlan accepts and normalizes a complete unique plan', () => { const plan = validatePlan({ topic: '  Dream escapes ', questions: [{ optionA: { text: ' Mountain cabin ', searchQuery: 'snow mountain cabin' }, optionB: { text: 'Beach villa', searchQuery: 'tropical beach villa' } }] }, 1); assert.equal(plan.topic, 'Dream escapes'); assert.equal(plan.questions[0].optionA.text, 'Mountain cabin'); assert.equal(plan.percentages, null); });
-test('validatePlan rejects duplicate questions', () => { const question = { optionA: { text: 'Mountain cabin', searchQuery: 'mountain cabin' }, optionB: { text: 'Beach villa', searchQuery: 'beach villa' } }; assert.throws(() => validatePlan({ topic: 'Travel', questions: [question, question] }, 2), /duplicates/); });
-test('validatePlan leaves visual fit decisions to the renderer', () => { const plan = validatePlan({ topic: 'Travel', questions: [{ optionA: { text: 'x'.repeat(71), searchQuery: 'cabin' }, optionB: { text: 'Beach villa', searchQuery: 'beach villa' } }] }, 1); assert.equal(plan.questions[0].optionA.text.length, 71); });
-test('validatePlan retains a high defensive copy limit', () => { assert.throws(() => validatePlan({ topic: 'Travel', questions: [{ optionA: { text: 'x'.repeat(501), searchQuery: 'cabin' }, optionB: { text: 'Beach villa', searchQuery: 'beach villa' } }] }, 1), /3–500/); });
+const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
+const question = (optionA, optionB, category = 'travel') => ({ category, quality, optionA, optionB });
+test('validatePlan accepts and normalizes a complete unique plan', () => { const plan = validatePlan({ topic: '  Dream escapes ', questions: [question({ text: ' Mountain cabin ', searchQuery: 'snow mountain cabin' }, { text: 'Beach villa', searchQuery: 'tropical beach villa' })] }, 1); assert.equal(plan.topic, 'Dream escapes'); assert.equal(plan.questions[0].optionA.text, 'Mountain cabin'); assert.equal(plan.percentages, null); });
+test('validatePlan rejects duplicate questions', () => { const duplicate = question({ text: 'Mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' }); assert.throws(() => validatePlan({ topic: 'Travel', questions: [duplicate, duplicate] }, 2), /duplicates/); });
+test('validatePlan leaves visual fit decisions to the renderer', () => { const plan = validatePlan({ topic: 'Travel', questions: [question({ text: 'x'.repeat(71), searchQuery: 'remote mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1); assert.equal(plan.questions[0].optionA.text.length, 71); });
+test('validatePlan retains a high defensive copy limit', () => { assert.throws(() => validatePlan({ topic: 'Travel', questions: [question({ text: 'x'.repeat(501), searchQuery: 'remote mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1), /3–500/); });
 test('validatePlan rejects near-duplicate questions', () => { const questions = [
-  { optionA: { text: 'Live in a mountain cabin', searchQuery: 'mountain cabin' }, optionB: { text: 'Live in a beach villa', searchQuery: 'beach villa' } },
-  { optionA: { text: 'Own a mountain cabin', searchQuery: 'snow cabin' }, optionB: { text: 'Own a beach villa', searchQuery: 'tropical villa' } },
+  question({ text: 'Live in a mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Live in a beach villa', searchQuery: 'beach villa' }, 'dream homes'),
+  question({ text: 'Own a mountain cabin', searchQuery: 'snow cabin' }, { text: 'Own a beach villa', searchQuery: 'tropical villa' }, 'dream homes'),
 ]; assert.throws(() => validatePlan({ topic: 'Homes', questions }, 2), /too similar/); });
-test('illustrative percentages are deterministic and complementary', () => { const plan = validatePlan({ topic: 'Travel', questions: [{ optionA: { text: 'Mountain cabin', searchQuery: 'mountain cabin' }, optionB: { text: 'Beach villa', searchQuery: 'beach villa' } }] }, 1); const first = addIllustrativePercentages(plan); const second = addIllustrativePercentages(plan); assert.deepEqual(first, second); assert.equal(first.questions[0].optionA.percentage + first.questions[0].optionB.percentage, 100); assert.equal(first.percentages.mode, 'illustrative'); });
+test('illustrative percentages are deterministic and complementary', () => { const plan = validatePlan({ topic: 'Travel', questions: [question({ text: 'Mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1); const first = addIllustrativePercentages(plan); const second = addIllustrativePercentages(plan); assert.deepEqual(first, second); assert.equal(first.questions[0].optionA.percentage + first.questions[0].optionB.percentage, 100); assert.equal(first.percentages.mode, 'illustrative'); });
 
+const categories = ['dream homes', 'adventure', 'fantasy', 'luxury', 'ocean', 'impossible choices', 'fame', 'travel'];
 const generatedPlan = () => ({ topic: 'Dream adventures', questions: [
   { optionA: { text: 'Own a mountain cabin', searchQuery: 'snow mountain cabin' }, optionB: { text: 'Live in a beach villa', searchQuery: 'tropical beach villa' } },
   { optionA: { text: 'Ride a hot air balloon', searchQuery: 'hot air balloon' }, optionB: { text: 'Sail across the ocean', searchQuery: 'sailboat open ocean' } },
@@ -21,7 +24,7 @@ const generatedPlan = () => ({ topic: 'Dream adventures', questions: [
   { optionA: { text: 'See the northern lights', searchQuery: 'northern lights landscape' }, optionB: { text: 'Watch a volcano erupt', searchQuery: 'volcano eruption night' } },
   { optionA: { text: 'Cook with a famous chef', searchQuery: 'chef cooking kitchen' }, optionB: { text: 'Paint with an artist', searchQuery: 'artist painting studio' } },
   { optionA: { text: 'Camp in a forest', searchQuery: 'forest camping tent' }, optionB: { text: 'Sleep under desert stars', searchQuery: 'desert stars camping' } },
-] });
+].map((item, index) => ({ ...item, category: categories[index], quality })) });
 const successfulResponse = (plan = generatedPlan()) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
 const failedGenerationResponse = () => new Response(JSON.stringify({ error: { message: 'Failed to generate JSON', code: 'failed_generation', failed_generation: 'PRIVATE-GENERATION-DIAGNOSTIC' } }), { status: 400, headers: { 'content-type': 'application/json' } });
 const withMockedFetch = async (responses, operation) => {
@@ -36,7 +39,7 @@ test('Groq provider accepts a valid strict structured response', async () => wit
   const plan = await provider().generatePlan(8); const request = requests[0];
   assert.equal(request.url, 'https://api.groq.com/openai/v1/chat/completions');
   assert.equal(request.body.model, 'openai/gpt-oss-20b');
-  assert.equal(request.body.temperature, 0.1);
+  assert.equal(request.body.temperature, 0.8);
   assert.equal(request.body.response_format.type, 'json_schema');
   assert.equal(request.body.response_format.json_schema.strict, true);
   assert.equal(plan.questions.length, 8);

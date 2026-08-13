@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { EdgeTTS } from '@seepine/edge-tts';
 import { retry } from './utils.js';
 import { WYR_TEMPLATE } from './template.js';
-import { resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
+import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 
 const ffmpegPath = resolveFfmpegPath();
 const ffprobePath = resolveFfprobePath();
@@ -14,8 +14,11 @@ const run = (binary, args, label, captureStdout = false) => new Promise((resolve
   child.once('close', code => code === 0 ? resolve(stdout) : reject(new Error(`${label} exited with code ${code}: ${stderr.slice(-3000)}`)));
 });
 
-const narrationPart = text => String(text).replace(/[?.!,;:]+$/g, '').trim().replace(/^./, character => character.toLowerCase());
-export const buildNarration = question => `Would you rather ${narrationPart(question.optionA.text)}, or ${narrationPart(question.optionB.text)}?`;
+const narrationPart = (text, lowercaseFirst = false) => {
+  const cleaned = String(text).replace(/\bwould you rather\b/gi, '').replace(/\s+/g, ' ').replace(/[?.!,;:]+$/g, '').trim();
+  return cleaned.replace(/^./, character => lowercaseFirst ? character.toLowerCase() : character.toUpperCase());
+};
+export const buildNarration = question => `${narrationPart(question.optionA.text)}, or ${narrationPart(question.optionB.text, true)}?`;
 
 export const measureAudioDuration = async audioPath => {
   const output = await run(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath], 'measure narration duration', true);
@@ -47,13 +50,12 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
   let cursor = 0;
   const scenes = voiceovers.map((voiceover, index) => {
     const voiceStart = 0.3; const countdownStart = voiceStart + voiceover.duration + WYR_TEMPLATE.timing.countdownPauseAfterVoice;
-    const revealTime = countdownStart + WYR_TEMPLATE.timing.countdownInterval * 3;
-    const referenceTail = WYR_TEMPLATE.timing.defaultSceneDuration - WYR_TEMPLATE.timing.transitionOutStart;
-    const requiredDuration = revealTime + WYR_TEMPLATE.timing.percentageRevealDuration * 2 + referenceTail;
+    const revealTime = countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration;
+    const requiredDuration = revealTime + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
     const duration = frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
     if (duration > maximumSceneDuration) throw new Error(`Scene ${index + 1} narration is ${voiceover.duration.toFixed(2)}s and would exceed the ${maximumSceneDuration}s scene limit. Regenerate shorter option text.`);
-    const contentEnd = duration - referenceTail;
-    const countdown = [3, 2, 1].map((number, countdownIndex) => ({ number, time: countdownStart + countdownIndex * WYR_TEMPLATE.timing.countdownInterval }));
+    const contentEnd = duration - WYR_TEMPLATE.timing.transitionOutDuration;
+    const countdown = [3, 2, 1].map((number, countdownIndex) => ({ number, time: countdownStart + WYR_TEMPLATE.timing.countdownCueOffsets[countdownIndex] }));
     const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, countdownStart, countdown, revealTime, contentEnd, transitionOutDuration: WYR_TEMPLATE.timing.transitionOutDuration };
     cursor += duration; return scene;
   });
@@ -71,11 +73,12 @@ export const assertCompleteCountdownSchedule = ({ timeline, events }) => {
     for (let countdownIndex = 0; countdownIndex < COUNTDOWN_NUMBERS.length; countdownIndex += 1) {
       const number = COUNTDOWN_NUMBERS[countdownIndex]; const matching = sceneEvents.filter(event => event.number === number);
       if (matching.length !== 1) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain exactly one ${number}.`);
-      const expected = scene.start + scene.countdownStart + countdownIndex * WYR_TEMPLATE.timing.countdownInterval;
+      const expected = scene.start + scene.countdownStart + WYR_TEMPLATE.timing.countdownCueOffsets[countdownIndex];
       if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} number ${number} is mistimed.`);
     }
     const one = sceneEvents.find(event => event.number === 1);
-    if (Math.abs(scene.start + scene.revealTime - (one.timestamp + WYR_TEMPLATE.timing.countdownInterval)) > 0.000001) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} result does not reveal immediately after 1.`);
+    const expectedReveal = scene.start + scene.countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration;
+    if (Math.abs(scene.start + scene.revealTime - expectedReveal) > 0.000001 || scene.start + scene.revealTime <= one.timestamp) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} result does not reveal immediately after the countdown sequence.`);
   }
   if (events.length !== timeline.scenes.length * COUNTDOWN_NUMBERS.length) throw new Error('Countdown validation failed: the schedule contains unexpected extra events.');
   return true;
@@ -93,7 +96,7 @@ export const buildSfxSchedule = timeline => {
   const events = timeline.scenes.flatMap((scene, sceneIndex) => [
     { sceneIndex, type: 'entrance', sceneTime: 0, timestamp: scene.start },
     { sceneIndex, type: 'reveal', sceneTime: scene.revealTime, timestamp: scene.start + scene.revealTime },
-    { sceneIndex, type: 'transition', sceneTime: scene.contentEnd, timestamp: scene.start + scene.contentEnd },
+    { sceneIndex, type: 'transition', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead },
   ]).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
   assertCompleteSfxSchedule({ timeline, events });
   return { version: 1, eventsPerScene: SFX_EVENT_TYPES.length, eventCount: events.length, events };
@@ -107,7 +110,7 @@ export const assertCompleteSfxSchedule = ({ timeline, events }) => {
     for (const type of SFX_EVENT_TYPES) {
       const matching = sceneEvents.filter(event => event.type === type);
       if (matching.length !== 1) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain exactly one ${type} event.`);
-      const expected = type === 'entrance' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd);
+      const expected = type === 'entrance' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
       if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} ${type} event is not at its intended timestamp.`);
     }
   }
@@ -117,10 +120,22 @@ export const assertCompleteSfxSchedule = ({ timeline, events }) => {
 
 export const createLocalSfx = async ({ audioDir }) => {
   const sfxDir = path.join(audioDir, 'sfx'); fs.mkdirSync(sfxDir, { recursive: true });
-  const entrancePath = path.join(sfxDir, 'entrance.wav'); const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav'); const tickPath = path.join(sfxDir, 'countdown-tick.wav');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', "aevalsrc=0.11*sin(2*PI*(150-55*t)*t)*exp(-11*t)+0.035*sin(2*PI*1100*t)*exp(-18*t):s=48000:d=0.28", '-af', 'highpass=f=90,lowpass=f=3200,afade=t=out:st=0.06:d=0.22', '-ac', '2', '-c:a', 'pcm_s16le', entrancePath], 'create entrance SFX');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', "aevalsrc=0.10*sin(2*PI*(1450-1050*t)*t)*exp(-5*t):s=48000:d=0.38", '-af', 'highpass=f=180,lowpass=f=3600,afade=t=in:st=0:d=0.015,afade=t=out:st=0.10:d=0.28', '-ac', '2', '-c:a', 'pcm_s16le', transitionPath], 'create transition SFX');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', 'aevalsrc=0.09*sin(2*PI*660*t)+0.065*sin(2*PI*880*t):s=48000:d=0.44', '-af', 'afade=t=in:st=0:d=0.015,afade=t=out:st=0.09:d=0.35', '-ac', '2', '-c:a', 'pcm_s16le', revealPath], 'create reveal SFX');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', 'aevalsrc=0.08*sin(2*PI*920*t)*exp(-28*t)+0.035*sin(2*PI*1380*t)*exp(-34*t):s=48000:d=0.16', '-af', 'highpass=f=500,lowpass=f=2600,afade=t=out:st=0.035:d=0.125', '-ac', '2', '-c:a', 'pcm_s16le', tickPath], 'create countdown tick SFX');
-  return { provider: 'local-generated', entrance: { filename: path.basename(entrancePath), localPath: entrancePath, volume: 0.18 }, reveal: { filename: path.basename(revealPath), localPath: revealPath, volume: 0.22 }, transition: { filename: path.basename(transitionPath), localPath: transitionPath, volume: 0.16 }, tick: { filename: path.basename(tickPath), localPath: tickPath, volume: 0.18 } };
+  const entrancePath = path.join(sfxDir, 'entrance.wav'); const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav');
+  const countdownSequencePath = path.join(sfxDir, 'countdown-sequence.wav');
+  const sources = {
+    entrance: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-scene-entrance-impact.wav'),
+    reveal: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-result-reveal-sting.wav'),
+    transition: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-scene-transition-whoosh.wav'),
+    countdownSequence: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-countdown-sequence.wav'),
+  };
+  for (const source of [sources.entrance, sources.reveal, sources.transition, sources.countdownSequence]) if (!fs.existsSync(source) || fs.statSync(source).size <= 44) throw new Error(`Reusable reference SFX asset is missing: ${source}`);
+  fs.copyFileSync(sources.entrance, entrancePath); fs.copyFileSync(sources.reveal, revealPath); fs.copyFileSync(sources.transition, transitionPath);
+  fs.copyFileSync(sources.countdownSequence, countdownSequencePath);
+  return {
+    provider: 'licensed-reference-extract',
+    entrance: { filename: path.basename(sources.entrance), localPath: entrancePath, volume: 0.16 },
+    reveal: { filename: path.basename(sources.reveal), localPath: revealPath, volume: 0.21 },
+    transition: { filename: path.basename(sources.transition), localPath: transitionPath, volume: 0.125 },
+    countdownSequence: { filename: path.basename(sources.countdownSequence), localPath: countdownSequencePath, volume: 0.17, duration: WYR_TEMPLATE.timing.countdownSequenceDuration },
+  };
 };
