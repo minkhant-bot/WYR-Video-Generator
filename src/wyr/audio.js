@@ -57,10 +57,40 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
   return { version: 1, baseDuration, maximumSceneDuration, voicePaddingSeconds, totalDuration: cursor, scenes };
 };
 
+export const SFX_EVENT_TYPES = Object.freeze(['entrance', 'reveal', 'transition']);
+
+export const buildSfxSchedule = timeline => {
+  if (!Array.isArray(timeline?.scenes) || timeline.scenes.length === 0) throw new Error('A scene timeline is required to schedule SFX.');
+  const events = timeline.scenes.flatMap((scene, sceneIndex) => [
+    { sceneIndex, type: 'entrance', sceneTime: 0, timestamp: scene.start },
+    { sceneIndex, type: 'reveal', sceneTime: scene.revealTime, timestamp: scene.start + scene.revealTime },
+    { sceneIndex, type: 'transition', sceneTime: scene.contentEnd, timestamp: scene.start + scene.contentEnd },
+  ]).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
+  assertCompleteSfxSchedule({ timeline, events });
+  return { version: 1, eventsPerScene: SFX_EVENT_TYPES.length, eventCount: events.length, events };
+};
+
+export const assertCompleteSfxSchedule = ({ timeline, events }) => {
+  if (!Array.isArray(timeline?.scenes) || !Array.isArray(events)) throw new Error('Timeline and SFX events are required.');
+  for (let sceneIndex = 0; sceneIndex < timeline.scenes.length; sceneIndex += 1) {
+    const scene = timeline.scenes[sceneIndex]; const sceneEvents = events.filter(event => event.sceneIndex === sceneIndex);
+    if (sceneEvents.length !== SFX_EVENT_TYPES.length) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain ${SFX_EVENT_TYPES.length} events; found ${sceneEvents.length}.`);
+    for (const type of SFX_EVENT_TYPES) {
+      const matching = sceneEvents.filter(event => event.type === type);
+      if (matching.length !== 1) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain exactly one ${type} event.`);
+      const expected = type === 'entrance' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd);
+      if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} ${type} event is not at its intended timestamp.`);
+    }
+  }
+  if (events.length !== timeline.scenes.length * SFX_EVENT_TYPES.length) throw new Error('SFX validation failed: the schedule contains unexpected extra events.');
+  return true;
+};
+
 export const createLocalSfx = async ({ audioDir }) => {
   const sfxDir = path.join(audioDir, 'sfx'); fs.mkdirSync(sfxDir, { recursive: true });
-  const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', "aevalsrc=0.12*sin(2*PI*(240+1050*t)*t)*exp(-8*t):s=48000:d=0.34", '-af', 'highpass=f=180,lowpass=f=3600,afade=t=out:st=0.08:d=0.26', '-ac', '2', '-c:a', 'pcm_s16le', transitionPath], 'create transition SFX');
+  const entrancePath = path.join(sfxDir, 'entrance.wav'); const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav');
+  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', "aevalsrc=0.11*sin(2*PI*(150-55*t)*t)*exp(-11*t)+0.035*sin(2*PI*1100*t)*exp(-18*t):s=48000:d=0.28", '-af', 'highpass=f=90,lowpass=f=3200,afade=t=out:st=0.06:d=0.22', '-ac', '2', '-c:a', 'pcm_s16le', entrancePath], 'create entrance SFX');
+  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', "aevalsrc=0.10*sin(2*PI*(1450-1050*t)*t)*exp(-5*t):s=48000:d=0.38", '-af', 'highpass=f=180,lowpass=f=3600,afade=t=in:st=0:d=0.015,afade=t=out:st=0.10:d=0.28', '-ac', '2', '-c:a', 'pcm_s16le', transitionPath], 'create transition SFX');
   await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', 'aevalsrc=0.09*sin(2*PI*660*t)+0.065*sin(2*PI*880*t):s=48000:d=0.44', '-af', 'afade=t=in:st=0:d=0.015,afade=t=out:st=0.09:d=0.35', '-ac', '2', '-c:a', 'pcm_s16le', revealPath], 'create reveal SFX');
-  return { provider: 'local-generated', transition: { filename: path.basename(transitionPath), localPath: transitionPath, volume: 0.2 }, reveal: { filename: path.basename(revealPath), localPath: revealPath, volume: 0.24 } };
+  return { provider: 'local-generated', entrance: { filename: path.basename(entrancePath), localPath: entrancePath, volume: 0.18 }, reveal: { filename: path.basename(revealPath), localPath: revealPath, volume: 0.22 }, transition: { filename: path.basename(transitionPath), localPath: transitionPath, volume: 0.16 } };
 };

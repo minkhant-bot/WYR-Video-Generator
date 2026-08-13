@@ -4,7 +4,7 @@ import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
 import { PexelsImageProvider, findAndDownloadImages } from './images.js';
 import { buildComposition, renderVideo, verifyVideo } from './media.js';
-import { buildSceneTimeline, createLocalSfx, generateVoiceovers } from './audio.js';
+import { buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
@@ -31,13 +31,14 @@ export const runPipeline = async ({ job, store, config }) => {
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });
     const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds, maximumSceneDuration: config.maximumSceneDuration });
     const sfx = await createLocalSfx({ audioDir: path.join(job.workspace, 'audio') });
-    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) } });
+    const sfxSchedule = buildSfxSchedule(timeline);
+    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, entrance: { ...sfx.entrance, localPath: path.relative(job.workspace, sfx.entrance.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, schedule: sfxSchedule });
     buildComposition({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace });
 
     update({ status: 'rendering', stage: 'rendering', progress: 71 });
-    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
+    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, sfx, sfxSchedule, workspace: job.workspace, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
     update({ status: 'verifying', stage: 'verifying', progress: 95 });
-    const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render') });
+    const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
     update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); log('job.completed', { jobId: job.id, outputPath, verification });
   } catch (error) {

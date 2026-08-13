@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { writeJsonAtomic } from './utils.js';
 import { fitOptionText, WYR_TEMPLATE } from './template.js';
 import { assertFontAvailable, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
+import { assertCompleteSfxSchedule, buildSfxSchedule, SFX_EVENT_TYPES } from './audio.js';
 
 const ffmpegPath = resolveFfmpegPath();
 const ffprobePath = resolveFfprobePath();
@@ -75,10 +76,10 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   return output;
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, transition: sfx.transition.filename, reveal: sfx.reveal.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, entrance: sfx.entrance.filename, reveal: sfx.reveal.filename, transition: sfx.transition.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
-export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace, onProgress }) => {
+export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, workspace, onProgress }) => {
   const renderDir = path.join(workspace, 'render'); const segments = [];
   for (let index = 0; index < plan.questions.length; index += 1) {
     const scene = timeline?.scenes[index]; const sceneDuration = scene?.duration ?? duration;
@@ -88,19 +89,23 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
   if (voiceovers.length) {
-    if (voiceovers.length !== plan.questions.length || !timeline || !sfx) throw new Error('Narrated rendering requires one voice file per scene, a timeline, and both local SFX files.');
-    const inputs = ['-y', '-i', silentVideo]; for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath); inputs.push('-i', sfx.transition.localPath, '-i', sfx.reveal.localPath);
-    const transitionInput = voiceovers.length + 1; const revealInput = voiceovers.length + 2; const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`]; const mixLabels = ['[bed]'];
+    if (voiceovers.length !== plan.questions.length || !timeline || !sfx || SFX_EVENT_TYPES.some(type => !sfx[type]?.localPath)) throw new Error('Narrated rendering requires one voice file per scene, a timeline, and all local SFX files.');
+    const schedule = sfxSchedule || buildSfxSchedule(timeline); assertCompleteSfxSchedule({ timeline, events: schedule.events });
+    const inputs = ['-y', '-i', silentVideo]; for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
+    const sfxInputs = {}; for (const type of SFX_EVENT_TYPES) { sfxInputs[type] = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx[type].localPath); }
+    const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`]; const mixLabels = ['[bed]'];
     for (let index = 0; index < voiceovers.length; index += 1) {
       const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].voiceStart) * 1000); filters.push(`[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,volume=1,adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
     }
-    filters.push(`[${transitionInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.transition.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[tr${index}raw]`).join('')}`);
-    filters.push(`[${revealInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.reveal.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[rv${index}raw]`).join('')}`);
-    for (let index = 0; index < timeline.scenes.length; index += 1) {
-      const transitionDelay = Math.round(timeline.scenes[index].start * 1000); const revealDelay = Math.round((timeline.scenes[index].start + timeline.scenes[index].revealTime) * 1000);
-      filters.push(`[tr${index}raw]adelay=delays=${transitionDelay}:all=1[tr${index}]`); filters.push(`[rv${index}raw]adelay=delays=${revealDelay}:all=1[rv${index}]`); mixLabels.push(`[tr${index}]`, `[rv${index}]`);
+    for (const type of SFX_EVENT_TYPES) {
+      const typeEvents = schedule.events.filter(event => event.type === type);
+      filters.push(`[${sfxInputs[type]}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
+      for (let index = 0; index < typeEvents.length; index += 1) {
+        const label = `${type}${index}`; const delay = Math.round(typeEvents[index].timestamp * 1000);
+        filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
+      }
     }
-    filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.95,atrim=duration=${totalDuration}[aout]`);
+    filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
     await run(ffmpegPath, [...inputs, '-filter_complex', filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', String(totalDuration), '-movflags', '+faststart', output], 'mix narration and SFX');
   } else {
     const music = `aevalsrc=0.020*sin(2*PI*174.61*t)+0.014*sin(2*PI*220*t)+0.010*sin(2*PI*261.63*t):s=48000:d=${totalDuration}`;
@@ -109,7 +114,7 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   return output;
 };
 const rate = value => { const [numerator, denominator] = String(value || '').split('/').map(Number); return denominator ? numerator / denominator : Number(value); };
-export const verifyVideo = async (output, { expectedSceneCount, expectedDuration, renderDir } = {}) => {
+export const verifyVideo = async (output, { expectedSceneCount, expectedDuration, renderDir, timeline, sfxSchedule } = {}) => {
   const stat = fs.statSync(output); if (!stat.isFile() || stat.size <= 0) throw new Error('Output is not a non-empty regular file.'); let stdout = '';
   await new Promise((resolve, reject) => { const child = spawn(ffprobePath, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', output], { stdio: ['ignore', 'pipe', 'pipe'] }); let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(new Error(`FFprobe exited with code ${code}: ${stderr}`))); });
   const metadata = JSON.parse(stdout); const video = metadata.streams?.find(stream => stream.codec_type === 'video'); const audio = metadata.streams?.find(stream => stream.codec_type === 'audio'); const duration = Number(metadata.format?.duration);
@@ -120,5 +125,11 @@ export const verifyVideo = async (output, { expectedSceneCount, expectedDuration
     if (!renderDir) throw new Error('Verification failed: render directory is required to verify scene inclusion.');
     for (let index = 0; index < expectedSceneCount; index += 1) { const segment = path.join(renderDir, `segment-${String(index).padStart(2, '0')}.mp4`); if (!fs.existsSync(segment) || fs.statSync(segment).size <= 0) throw new Error(`Verification failed: rendered scene ${index + 1} is missing.`); }
   }
-  return { fileSize: stat.size, duration, width: video.width, height: video.height, fps: rate(video.avg_frame_rate || video.r_frame_rate), pixelFormat: video.pix_fmt, videoCodec: video.codec_name, audioCodec: audio.codec_name, hasVideo: true, hasAudio: true, sceneCount: expectedSceneCount ?? null };
+  let sfx = null;
+  if (timeline || sfxSchedule) {
+    if (!timeline || !sfxSchedule) throw new Error('Verification failed: both timeline and SFX schedule are required for SFX verification.');
+    assertCompleteSfxSchedule({ timeline, events: sfxSchedule.events });
+    sfx = { eventCount: sfxSchedule.events.length, eventsPerScene: SFX_EVENT_TYPES.length, events: sfxSchedule.events };
+  }
+  return { fileSize: stat.size, duration, width: video.width, height: video.height, fps: rate(video.avg_frame_rate || video.r_frame_rate), pixelFormat: video.pix_fmt, videoCodec: video.codec_name, audioCodec: audio.codec_name, hasVideo: true, hasAudio: true, sceneCount: expectedSceneCount ?? null, sfx };
 };
