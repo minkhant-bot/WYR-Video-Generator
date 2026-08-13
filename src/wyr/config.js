@@ -29,7 +29,7 @@ export const getConfig = () => {
     groqApiKey: credentials.groqApiKey,
     groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
     pexelsApiKey: credentials.pexelsApiKey,
-    edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AriaNeural',
+    edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',
     edgeVoiceRate: process.env.WYR_EDGE_VOICE_RATE || '+0%',
   };
 };

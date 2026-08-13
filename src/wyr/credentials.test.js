@@ -60,3 +60,9 @@ test('pipeline configuration transparently uses saved keys and environment prece
     for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
   }
 }));
+
+test('pipeline defaults to a natural English male Edge voice', () => {
+  const original = process.env.WYR_EDGE_VOICE;
+  try { delete process.env.WYR_EDGE_VOICE; assert.equal(getConfig().edgeVoice, 'en-US-AndrewNeural'); }
+  finally { original === undefined ? delete process.env.WYR_EDGE_VOICE : process.env.WYR_EDGE_VOICE = original; }
+});

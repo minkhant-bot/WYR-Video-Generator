@@ -10,6 +10,9 @@ export const WYR_TEMPLATE = Object.freeze({
     orEntranceDuration: 0.01,
     percentageReveal: 4.72,
     percentageRevealDuration: 0.12,
+    countdownPauseAfterVoice: 0.08,
+    countdownInterval: 0.42,
+    countdownFadeDuration: 0.06,
     transitionOutStart: 6.18,
     transitionOutDuration: 0.28,
   }),
@@ -40,6 +43,7 @@ export const WYR_TEMPLATE = Object.freeze({
     lineHeightRatio: 1.05,
     lineSpacing: 4,
     percentageSize: 82,
+    countdownSize: 190,
     orSize: 60,
   }),
 });

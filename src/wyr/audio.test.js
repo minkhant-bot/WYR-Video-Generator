@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertCompleteSfxSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, generateVoiceovers } from './audio.js';
+import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, generateVoiceovers } from './audio.js';
 
 const plan = { questions: [{ optionA: { text: 'Own a mountain cabin' }, optionB: { text: 'Travel first class every month' } }] };
 test('narration reads both choices but no percentages', () => { assert.equal(buildNarration(plan.questions[0]), 'Would you rather own a mountain cabin, or travel first class every month?'); });
@@ -30,4 +30,21 @@ test('SFX validation rejects duplicate and mistimed events', () => {
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events: [...schedule.events, schedule.events[0]] }), /scene 1 must contain 3 events; found 4/);
   const mistimed = schedule.events.map(event => event.type === 'reveal' ? { ...event, timestamp: event.timestamp + 0.1 } : event);
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events: mistimed }), /reveal event is not at its intended timestamp/);
+});
+test('countdown schedules 3, 2, and 1 after narration and reveals immediately afterward in all eight scenes', () => {
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7, maximumSceneDuration: 11 });
+  const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 24);
+  for (const scene of timeline.scenes) {
+    const events = schedule.events.filter(event => event.sceneIndex === scene.index);
+    assert.deepEqual(events.map(event => event.number), [3, 2, 1]);
+    assert.ok(events[0].sceneTime > scene.voiceStart + scene.voiceDuration);
+    assert.equal(Number((events[2].sceneTime + 0.42).toFixed(6)), Number(scene.revealTime.toFixed(6)));
+  }
+});
+test('countdown validation fails when any scene is missing 3, 2, or 1', () => {
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
+  for (const number of [3, 2, 1]) {
+    const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.number === number));
+    assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 3, 2, and 1/);
+  }
 });
