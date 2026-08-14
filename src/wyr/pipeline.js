@@ -89,7 +89,7 @@ export const prepareImageSelection = async ({ job, store, config }) => {
     const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
-    update({ status: 'selecting_images', stage: 'selecting_images', progress: 35, selection });
+    update({ status: 'reviewing_images', stage: 'reviewing_images', progress: 35, selection });
   } catch (error) {
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }

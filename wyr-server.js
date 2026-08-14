@@ -4,7 +4,7 @@ import path from 'node:path';
 import { getConfig } from './src/wyr/config.js';
 import { createJobStore } from './src/wyr/jobs.js';
 import { prepareImageSelection, runFixturePipeline, runPipeline } from './src/wyr/pipeline.js';
-import { expandImageSelection, selectImageCandidate } from './src/wyr/image-picker.js';
+import { expandImageSelection, replaceImageSelection, selectImageCandidate } from './src/wyr/image-picker.js';
 import { publicJob, log } from './src/wyr/utils.js';
 import { PUBLIC_DIR } from './src/wyr/runtime.js';
 import { CredentialInputError, getCredentialStatus, saveLocalCredentials } from './src/wyr/credentials.js';
@@ -55,6 +55,26 @@ const server = http.createServer(async (req, res) => {
       if (job.status !== 'selecting_images' || !job.selection) return json(res, 409, { error: 'Image selection is not available for this job.' });
       const selection = await expandImageSelection({ selection: job.selection, slotKey: moreMatch[2].toUpperCase(), config: getConfig() }); store.update(job.id, { selection }); return json(res, 200, publicJob(store.get(job.id)));
     }
+    const replaceMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})\/images\/(Q[1-8][AB])\/replace$/i);
+    if (req.method === 'POST' && replaceMatch) {
+      const job = store.get(replaceMatch[1]);
+      if (!job) return json(res, 404, { error: 'Job not found.' });
+      if (!['reviewing_images', 'selecting_images'].includes(job.status) || !job.selection) {
+        return json(res, 409, { error: 'Image review is not available for this job.' });
+      }
+      try {
+        const selection = await replaceImageSelection({
+          selection: job.selection,
+          slotKey: replaceMatch[2].toUpperCase(),
+          config: getConfig(),
+        });
+        store.update(job.id, { selection });
+        return json(res, 200, publicJob(store.get(job.id)));
+      } catch (error) {
+        store.update(job.id, { selection: job.selection });
+        return json(res, 422, { error: error.message || 'No replacement image was found.' });
+      }
+    }
     const selectMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})\/images\/(Q[1-8][AB])\/select$/i);
     if (req.method === 'POST' && selectMatch) {
       const job = store.get(selectMatch[1]); if (!job) return json(res, 404, { error: 'Job not found.' });
@@ -64,7 +84,7 @@ const server = http.createServer(async (req, res) => {
     const generateMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})\/generate$/i);
     if (req.method === 'POST' && generateMatch) {
       const job = store.get(generateMatch[1]); if (!job) return json(res, 404, { error: 'Job not found.' });
-      if (job.status !== 'selecting_images' || !job.selection || job.selection.selectedCount !== 16) return json(res, 409, { error: `Select all 16 images before generation; selected ${job.selection?.selectedCount || 0}/16.` });
+      if (!['reviewing_images', 'selecting_images'].includes(job.status) || !job.selection || job.selection.selectedCount !== 16) return json(res, 409, { error: `All 16 images must be ready before generation; ready ${job.selection?.selectedCount || 0}/16.` });
       const plan = JSON.parse(fs.readFileSync(path.join(job.workspace, 'plan.json'), 'utf8')); const config = getConfig(); store.update(job.id, { status: 'generating', stage: 'generating', progress: 40 }); setImmediate(() => void runPipeline({ job, store, config, preparedPlan: plan, selectionState: job.selection })); return json(res, 202, publicJob(store.get(job.id)));
     }
     const match = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})(?:\/(video|download|credits))?$/i);

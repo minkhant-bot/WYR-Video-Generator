@@ -66,6 +66,6 @@ export const getConfig = () => {
 export const assertProviderConfig = config => {
   const missing = [];
   if (!config.groqApiKey) missing.push('GROQ_API_KEY');
-  if (!config.pexelsApiKey) missing.push('PEXELS_API_KEY');
+  if (!config.pixabayApiKey && !config.pexelsApiKey) missing.push('PIXABAY_API_KEY or PEXELS_API_KEY');
   if (missing.length) throw new Error(`Missing required API key configuration: ${missing.join(', ')}`);
 };
