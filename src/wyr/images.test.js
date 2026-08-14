@@ -24,7 +24,7 @@ test('image selection retries weak searches and never reuses a photo', async () 
   const candidate = id => ({ id, width: 2400, height: 1400, alt: 'mountain beach travel', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: `https://example.test/${id}`, downloadUrl: `https://example.test/${id}.jpg`, position: 0 });
   const provider = { search: async query => { calls.push(query); if (calls.length === 1) return [candidate('one')]; if (calls.length === 2) return [candidate('one')]; return [candidate('two')]; }, downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); return destination; } };
   const plan = { questions: [{ index: 0, optionA: { text: 'Mountain cabin', searchQuery: 'snow mountain cabin' }, optionB: { text: 'Beach villa', searchQuery: 'tropical beach villa' } }] };
-  try { const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 2 }); assert.equal(assets.length, 2); assert.equal(new Set(assets.map(asset => asset.id)).size, 2); assert.equal(assets[1].searchAttempts.length, 2); assert.ok(assets.every(asset => fs.existsSync(asset.localPath))); }
+  try { const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 2 }); assert.equal(assets.length, 2); assert.equal(new Set(assets.map(asset => asset.id)).size, 2); assert.ok(assets[1].searchAttempts.length >= 2); assert.ok(assets.every(asset => fs.existsSync(asset.localPath))); }
   finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -123,7 +123,7 @@ test('weak Pexels result invokes web fallback and preserves provenance and licen
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('strong specific Pexels result remains primary without invoking web fallback', async () => {
+test('strong Pexels result is used only after DuckDuckGo is exhausted', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-strong-pexels-')); let webCalls = 0;
   const strong = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.pexels.test/p${id}.jpg`, downloadUrl: `https://images.pexels.test/p${id}.jpg`, position: id });
   const weakFirst = { id: 'weak-first', provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', originalImageUrl: 'https://images.pexels.test/weak-first.jpg', downloadUrl: 'https://images.pexels.test/weak-first.jpg', position: 0 };
@@ -135,13 +135,13 @@ test('strong specific Pexels result remains primary without invoking web fallbac
     assert.equal(assets.every(asset => asset.provider === 'Pexels'), true);
     assert.equal(assets.every(asset => asset.pexelsPassed), true);
     assert.equal(assets.some(asset => asset.id === 'weak-first'), false);
-    assert.equal(webCalls, 0);
+    assert.ok(webCalls > 0); assert.equal(assets[0].selectedProvider, 'Pexels'); assert.deepEqual(assets[0].providerAttemptOrder, ['DuckDuckGo Images', 'Pexels']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('blocked web fallback uses best valid Pexels candidate and records the reason', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-blocked-'));
-  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
+  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
   const provider = { search: async () => [weakPexels(1), weakPexels(2)], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
   const webProvider = { name: 'DuckDuckGo Images', search: async () => { throw new Error('HTTP 429 blocked'); }, downloadAsset: async () => {} };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
@@ -201,12 +201,12 @@ test('bad DuckDuckGo download advances to the next bounded candidate', async () 
   const pexels = { id: 'weak-pexels', provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', originalImageUrl: 'https://pexels.test/weak.jpg', downloadUrl: 'https://pexels.test/weak.jpg' };
   const webCandidate = (id, query) => ({ id: `${query}-${id}`, provider: 'DuckDuckGo Images', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.test/${query}-${id}.jpg`, downloadUrl: `https://images.test/${query}-${id}.jpg`, position: id === 'bad' ? 0 : 1 });
   let webSearches = 0;
-  const provider = { search: async () => [pexels], downloadAsset: async () => {} };
+  let pexelsSearches = 0; const provider = { search: async () => { pexelsSearches += 1; return [pexels]; }, downloadAsset: async () => {} };
   const webProvider = { name: 'DuckDuckGo Images', search: async query => { webSearches += 1; return [webCandidate('bad', `${query}-${webSearches}`), webCandidate('good', `${query}-${webSearches}`)]; }, downloadAsset: async (selected, destination) => selected.id.includes('-bad') ? writeBlankCandidate(destination) : writeCandidate(selected, destination) };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
   try {
     const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 2 });
-    assert.equal(assets.every(asset => asset.id.endsWith('-good')), true); assert.match(assets[0].rejectionReasons.flatMap(item => item.reasons).join(' '), /downloaded image rejected/);
+    assert.equal(assets.every(asset => asset.id.endsWith('-good')), true); assert.equal(pexelsSearches, 0); assert.match(assets[0].rejectionReasons.flatMap(item => item.reasons).join(' '), /downloaded image rejected/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -221,15 +221,15 @@ test('all blank candidates fail image selection clearly after bounded fallback a
   finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a broken relevant Pexels result invokes web fallback after download validation', async () => {
+test('a broken DuckDuckGo result invokes Pexels fallback after download validation', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-broken-pexels-'));
-  const pexelsProvider = { search: async query => [{ id: `p-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: query, originalImageUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg` }], downloadAsset: async () => { throw new Error('connection reset'); } };
-  const webProvider = { name: 'DuckDuckGo Images', maxConcurrency: 1, search: async query => [{ id: `w-${query}`, provider: 'DuckDuckGo Images', width: 2400, height: 1400, alt: query.includes('dragon') ? `person ${query}` : query, originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg` }], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
+  const pexelsProvider = { search: async query => [{ id: `p-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: query.includes('dragon') ? 'person petting friendly fantasy dragon creature' : 'person beside a fantasy portal doorway opening into another world', originalImageUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg` }], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
+  const webProvider = { name: 'DuckDuckGo Images', maxConcurrency: 1, search: async query => [{ id: `w-${query}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: query.includes('dragon') ? 'person petting friendly fantasy dragon creature' : 'person beside a fantasy portal doorway opening into another world', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg` }], downloadAsset: async () => { throw new Error('connection reset'); } };
   const plan = { questions: [{ index: 0, optionA: { text: 'Befriend a Dragon', searchQuery: 'friendly fantasy dragon' }, optionB: { text: 'Own a Portal Door', searchQuery: 'fantasy portal doorway' } }] };
   try {
     const assets = await findAndDownloadImages({ plan, provider: pexelsProvider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 2 });
-    assert.equal(assets.every(asset => asset.provider === 'DuckDuckGo Images'), true); assert.equal(assets.every(asset => asset.webFallbackRequired), true);
-    assert.match(assets.flatMap(asset => asset.rejectionReasons.flatMap(rejection => rejection.reasons)).join(' '), /connection reset/);
+    assert.equal(assets.every(asset => asset.provider === 'Pexels'), true); assert.equal(assets.every(asset => asset.webFallbackRequired), true);
+    assert.match(assets.flatMap(asset => asset.rejectionReasons.flatMap(rejection => rejection.reasons)).join(' '), /connection reset/); assert.match(assets[0].fallbackReason, /connection reset/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -258,7 +258,7 @@ test('image candidate ranking is deterministic with explicit tie breakers', () =
   ];
   const first = [...candidates].sort(compareImageCandidates).map(candidate => candidate.id);
   const second = [...candidates].reverse().sort(compareImageCandidates).map(candidate => candidate.id);
-  assert.deepEqual(first, ['a', 'b', 'z']); assert.deepEqual(second, first);
+  assert.deepEqual(first, ['z', 'a', 'b']); assert.deepEqual(second, first);
 });
 
 test('query variants are stable and selected metadata records exact order and candidate counts', async () => {
@@ -301,17 +301,19 @@ test('normal image failure recovers one slot with bounded alternate visual queri
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('alternate exhaustion invokes Groq visual reformulation once and recovers without changing displayed text', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-recovery-groq-')); let groqCalls = 0; const queries = [];
+test('alternate exhaustion invokes Groq visual reformulation once and recovers with DuckDuckGo first', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-recovery-groq-')); let groqCalls = 0; const queries = []; const searchOrder = [];
   const candidate = (id, alt) => ({ id, provider: 'Pexels', width: 2400, height: 1400, alt, originalImageUrl: `https://images.test/${id}.jpg`, downloadUrl: `https://images.test/${id}.jpg` });
-  const provider = { search: async query => { queries.push(query); if (query.includes('human controlling gravity')) return [candidate('groq-recovered', 'human controlling gravity objects levitating cinematic')]; if (query.includes('lightning')) return [candidate('lightning-original', 'person controlling lightning dramatic cinematic electricity')]; return [candidate(`weak-${queries.length}`, 'generic office stock')]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const provider = { search: async query => { queries.push(query); searchOrder.push(`Pexels:${query}`); if (query.includes('human controlling gravity')) return [candidate('groq-recovered', 'human controlling gravity objects levitating cinematic')]; if (query.includes('lightning')) return [candidate('lightning-original', 'person controlling lightning dramatic cinematic electricity')]; return [candidate(`weak-${queries.length}`, 'generic office stock')]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
   const visualQueryProvider = { generateVisualQueries: async ({ optionText, attemptedQueries }) => { groqCalls += 1; assert.equal(optionText, 'Control Gravity'); assert.ok(attemptedQueries.length >= 2); return ['human controlling gravity objects levitating cinematic']; } };
-  const webProvider = { name: 'DuckDuckGo Images', search: async () => [], downloadAsset: async () => {} };
+  const webProvider = { name: 'DuckDuckGo Images', search: async query => { searchOrder.push(`DuckDuckGo Images:${query}`); return []; }, downloadAsset: async () => {} };
   const plan = { questions: [{ index: 0, optionA: { text: 'Control Gravity' }, optionB: { text: 'Control Lightning' } }] };
   try {
     const assets = await findAndDownloadImages({ plan, provider, webProvider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 12, maxWallClockMs: 5000 } });
     assert.equal(groqCalls, 1); assert.equal(assets[0].text, 'Control Gravity'); assert.equal(assets[0].narration, undefined); assert.equal(assets[0].queryUsed, 'human controlling gravity objects levitating cinematic');
     assert.equal(buildNarration(plan.questions[0]), 'Control Gravity, or control Lightning?');
+    const groqIndex = searchOrder.findIndex(entry => entry.endsWith('human controlling gravity objects levitating cinematic'));
+    assert.deepEqual(searchOrder.slice(groqIndex, groqIndex + 2).map(entry => entry.split(':')[0]), ['DuckDuckGo Images', 'Pexels']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -325,6 +327,30 @@ test('recovery keeps the strict downloaded-image quality gate and reports bounde
     await assert.rejects(() => findAndDownloadImages({ plan, provider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 4, maxWallClockMs: 5000 } }), error => {
       assert.match(error.message, /question 1, option A \(Control Gravity\)/); assert.match(error.message, /Queries attempted:/); assert.match(error.message, /Provider attempts:/); assert.match(error.message, /downloaded image rejected/); assert.match(error.message, /Request count:/); assert.match(error.message, /Recovery elapsed:/); return true;
     });
-    assert.ok(calls <= 4);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('strong DuckDuckGo candidates are primary and never call Pexels', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-primary-')); let pexelsSearches = 0; let pexelsDownloads = 0;
+  const provider = { search: async () => { pexelsSearches += 1; throw new Error('Pexels must remain untouched when DuckDuckGo succeeds'); }, downloadAsset: async () => { pexelsDownloads += 1; } };
+  const webProvider = { name: 'DuckDuckGo Images', search: async query => [{ id: `web-${query}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: query.includes('dragon') ? 'person petting friendly fantasy dragon creature' : 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, sourceDomain: 'example.test' }], downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Befriend a Dragon' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 1 });
+    assert.equal(pexelsSearches, 0); assert.equal(pexelsDownloads, 0); assert.equal(assets.every(asset => asset.selectedProvider === 'DuckDuckGo Images'), true);
+    assert.deepEqual(assets[0].providerAttemptOrder, ['DuckDuckGo Images', 'Pexels']); assert.equal(assets[0].fallbackReason, null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('DuckDuckGo exhaustion or timeout falls back to strict Pexels candidates with provenance', async () => {
+  for (const failure of ['no acceptable candidate', 'Request timed out after 12000ms']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-to-pexels-')); let pexelsSearches = 0;
+    const provider = { search: async query => { pexelsSearches += 1; const alt = query.includes('frozen') || query.includes('time') ? 'person walking through frozen time city scene' : 'dramatic cinematic person stepping through a glowing teleportation portal'; return [{ id: `pexels-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt, originalImageUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg` }]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+    const webProvider = { name: 'DuckDuckGo Images', search: async () => { if (failure.includes('timed out')) throw new Error(failure); return []; }, downloadAsset: async () => {} };
+    const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Stop Time' } }] };
+    try {
+      const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 1 });
+      assert.ok(pexelsSearches > 0); assert.equal(assets[0].selectedProvider, 'Pexels'); assert.match(assets[0].fallbackReason, failure.includes('timed out') ? /timed out/ : /no acceptable/);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
 });

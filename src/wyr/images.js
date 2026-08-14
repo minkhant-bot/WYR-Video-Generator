@@ -83,7 +83,7 @@ const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|busine
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
 export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
-export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['Pexels', 'DuckDuckGo Images'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES });
+export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['DuckDuckGo Images', 'Pexels'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES });
 export const IMAGE_RECOVERY_DEFAULTS = Object.freeze({ alternateQueryRounds: 3, maxProviderRequests: 24, maxWallClockMs: 45_000 });
 const candidateKeys = candidate => uniqueWords([candidate.provider && candidate.id ? `id:${candidate.provider}:${candidate.id}` : '', candidate.originalImageUrl ? `url:${candidate.originalImageUrl}` : '', candidate.downloadUrl ? `url:${candidate.downloadUrl.split('?')[0]}` : '', candidate.sha256 ? `sha256:${candidate.sha256}` : ''].filter(Boolean));
 const fileHash = filename => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
@@ -242,36 +242,41 @@ const choose = (state, used) => state.pool.find(candidate => !state.failedKeys.h
 export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
   const recoveryConfig = { ...IMAGE_RECOVERY_DEFAULTS, ...recovery };
-  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [] }));
-  await collectCandidates({ states, provider, providerLabel: 'Pexels', concurrency, retrySearch: true });
+  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [], providerAttemptOrder: [...IMAGE_SELECTION_DEFAULTS.providerOrder], webProviderAttempted: false, fallbackReason: null }));
+  const used = new Set();
+  const webLabel = webProvider?.name || 'DuckDuckGo Images';
+  if (webProvider) {
+    await collectCandidates({ states, provider: webProvider, providerLabel: webLabel, concurrency, retrySearch: false, progressive: true });
+    for (const state of states) { state.webProviderAttempted = true; state.webCandidates = rankedUnique(state.candidates.filter(candidate => candidate.provider !== 'Pexels')).slice(0, MAX_RANKED_CANDIDATES); }
+  }
   for (const state of states) {
+    const strongWeb = state.webCandidates?.find(candidate => !conflicts(candidate, used));
+    if (strongWeb) { state.selected = strongWeb; reserve(strongWeb, used); }
+  }
+  const needsPexels = states.filter(state => !state.selected);
+  const selectPexelsCandidates = state => {
     const rankedPexels = rankedUnique(state.candidates.filter(candidate => candidate.provider === 'Pexels')).slice(0, MAX_RANKED_CANDIDATES);
     state.pexelsBestCandidate = rankedPexels[0] || null;
     state.pexelsCandidates = rankedPexels.filter(candidate => candidate.pexelsQualityPassed);
     state.pexelsFallbackCandidates = rankedPexels;
     state.pexelsGatePassed = state.pexelsCandidates.length > 0;
+    state.pool = state.pexelsCandidates;
+    const strongPexels = state.pexelsCandidates.find(candidate => !conflicts(candidate, used));
+    if (strongPexels) { state.selected = strongPexels; reserve(strongPexels, used); }
+    state.pexelsSearched = true;
+  };
+  if (needsPexels.length) {
+    await collectCandidates({ states: needsPexels, provider, providerLabel: 'Pexels', concurrency, retrySearch: true });
+    for (const state of needsPexels) selectPexelsCandidates(state);
   }
-
-  const used = new Set();
-  for (const state of states) {
-    const strong = state.pexelsCandidates.find(candidate => !conflicts(candidate, used));
-    if (strong) { state.selected = strong; reserve(strong, used); }
+  for (const state of needsPexels) {
+    if (state.selected?.provider === 'Pexels') {
+      const fallbackReason = !webProvider ? 'DuckDuckGo Images provider unavailable' : state.webProviderErrors.length ? state.webProviderErrors.join('; ') : state.webCandidates?.length ? 'DuckDuckGo Images candidates were unavailable for selection' : 'DuckDuckGo Images returned no acceptable candidate';
+      state.fallbackReason = fallbackReason;
+      log('image.web_fallback_unavailable', { question: state.option.questionIndex + 1, slot: state.option.slot, reason: fallbackReason, usingPexels: true });
+    }
   }
-  const needsWeb = states.filter(state => !state.selected);
-  for (const state of needsWeb) state.webFallbackRequired = true;
-  if (webProvider && needsWeb.length) {
-    for (const state of needsWeb) { state.candidates = []; state.validCandidates = []; }
-    await collectCandidates({ states: needsWeb, provider: webProvider, providerLabel: webProvider.name || 'Web image search', concurrency, retrySearch: false, progressive: true });
-    for (const state of needsWeb) state.webCandidates = rankedUnique(state.candidates.filter(candidate => candidate.provider !== 'Pexels')).slice(0, MAX_RANKED_CANDIDATES);
-  }
-  for (const state of needsWeb) {
-    state.pool = rankedUnique([...state.webCandidates, ...state.pexelsFallbackCandidates]);
-    const selected = choose(state, used);
-    if (selected) { state.selected = selected; reserve(selected, used); }
-    const fallbackReason = state.webProviderErrors.length ? state.webProviderErrors.join('; ') : state.webCandidates.length ? null : 'web image search returned no relevant usable candidates';
-    if (fallbackReason) log('image.web_fallback_unavailable', { question: state.option.questionIndex + 1, slot: state.option.slot, reason: fallbackReason, usingPexels: state.selected?.provider === 'Pexels' });
-  }
-  for (const state of states.filter(state => state.selected)) if (!state.pool.length) state.pool = state.pexelsFallbackCandidates;
+  for (const state of states.filter(state => state.selected && !state.pool.length)) state.pool = state.webCandidates?.length ? state.webCandidates : [state.selected];
 
   let completed = 0; const usedContentHashes = new Set();
   const downloadSelections = async initialStates => {
@@ -303,12 +308,20 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     }
   };
   await downloadSelections(states);
-  const brokenPexelsStates = states.filter(state => !state.localPath && !state.webFallbackRequired && webProvider);
-  if (brokenPexelsStates.length) {
-    for (const state of brokenPexelsStates) { state.webFallbackRequired = true; state.candidates = []; state.validCandidates = []; }
-    await collectCandidates({ states: brokenPexelsStates, provider: webProvider, providerLabel: webProvider.name || 'Web image search', concurrency, retrySearch: false, progressive: true });
-    for (const state of brokenPexelsStates) { state.webCandidates = rankedUnique(state.candidates).slice(0, MAX_RANKED_CANDIDATES); state.pool = state.webCandidates; state.selected = choose(state, used); if (state.selected) reserve(state.selected, used); }
-    await downloadSelections(brokenPexelsStates);
+  const brokenWebStates = states.filter(state => !state.localPath && !state.pexelsSearched && webProvider);
+  if (brokenWebStates.length) {
+    for (const state of brokenWebStates) { state.candidates = []; state.validCandidates = []; }
+    await collectCandidates({ states: brokenWebStates, provider, providerLabel: 'Pexels', concurrency, retrySearch: true });
+    for (const state of brokenWebStates) {
+      state.candidates = state.candidates.filter(candidate => candidate.provider === 'Pexels');
+      selectPexelsCandidates(state);
+      if (state.selected) state.pool = state.pexelsCandidates;
+      if (state.selected?.provider === 'Pexels') {
+        const failedWebDownload = state.rejections.find(rejection => rejection.provider === 'DuckDuckGo Images');
+        state.fallbackReason = failedWebDownload ? `DuckDuckGo Images candidate failed: ${failedWebDownload.reasons.join('; ')}` : 'DuckDuckGo Images candidate failed during download';
+      }
+    }
+    await downloadSelections(brokenWebStates);
   }
   const failedStates = states.filter(state => !state.localPath);
   for (const state of failedStates) {
@@ -321,7 +334,11 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     };
     const tryRecoveryCandidates = async () => {
       if (Date.now() >= deadline) return false;
-      state.pool = rankedUnique([...state.candidates, ...state.pexelsFallbackCandidates]);
+      const rankedRecovery = rankedUnique([...state.candidates, ...state.pexelsFallbackCandidates]);
+      state.pool = [
+        ...rankedRecovery.filter(candidate => candidate.provider === 'DuckDuckGo Images'),
+        ...rankedRecovery.filter(candidate => candidate.provider === 'Pexels'),
+      ];
       state.selected = choose(state, used);
       if (state.selected) reserve(state.selected, used);
       await downloadSelections([state]);
@@ -331,8 +348,8 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     for (const query of alternateQueries) {
       if (!canRecover()) break;
       state.recoveryQueries.push(query);
-      await searchRecoveryProvider(query, provider, 'Pexels (recovery)');
       await searchRecoveryProvider(query, webProvider, webProvider?.name ? `${webProvider.name} (recovery)` : 'Web image search (recovery)');
+      await searchRecoveryProvider(query, provider, 'Pexels (recovery)');
     }
     if (await tryRecoveryCandidates()) continue;
     if (visualQueryProvider && typeof visualQueryProvider.generateVisualQueries === 'function' && canRecover()) {
@@ -344,8 +361,8 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
         for (const query of reformulated) {
           if (!canRecover()) break;
           state.recoveryQueries.push(query);
-          await searchRecoveryProvider(query, provider, 'Pexels (Groq recovery)');
           await searchRecoveryProvider(query, webProvider, webProvider?.name ? `${webProvider.name} (Groq recovery)` : 'Web image search (Groq recovery)');
+          await searchRecoveryProvider(query, provider, 'Pexels (Groq recovery)');
         }
       } catch (error) {
         state.searchAttempts.push({ phase: 'recovery', provider: 'Groq visual reformulation', query: groqQuery, candidateCount: 0, error: error.message });
@@ -364,9 +381,10 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
   const selections = states.map(state => ({
     ...state.option, ...state.selected, queryUsed: state.selected.query, searchAttempts: state.searchAttempts, rejectionReasons: state.rejections, candidateDiagnostics: state.candidateDiagnostics,
     queryOrder: state.queries, recoveryQueries: state.recoveryQueries, candidateCount: state.searchAttempts.reduce((sum, attempt) => sum + attempt.candidateCount, 0), providerRequestCount: state.providerRequestCount, recoveryElapsedMs: state.recoveryElapsedMs || 0,
-    webFallbackRequired: Boolean(state.webFallbackRequired), pexelsPassed: state.pexelsGatePassed,
+    providerAttemptOrder: state.providerAttemptOrder, selectedProvider: state.selected.provider, selectedQuery: state.selected.query, fallbackReason: state.fallbackReason,
+    webFallbackRequired: state.webProviderAttempted, pexelsPassed: Boolean(state.pexelsGatePassed),
     pexelsBestCandidate: state.pexelsBestCandidate ? { id: state.pexelsBestCandidate.id, query: state.pexelsBestCandidate.query, alt: state.pexelsBestCandidate.alt, qualityScore: state.pexelsBestCandidate.qualityScore, conceptClarity: state.pexelsBestCandidate.conceptClarity, specificity: state.pexelsBestCandidate.specificity, visualImpact: state.pexelsBestCandidate.visualImpact, wyrSuitability: state.pexelsBestCandidate.wyrSuitability, passed: state.pexelsBestCandidate.pexelsQualityPassed, reasons: state.pexelsBestCandidate.pexelsQualityReasons } : null,
-    fallbackReason: state.selected.provider === 'Pexels' && state.webFallbackRequired ? (state.webProviderErrors.join('; ') || 'web image search returned no relevant downloadable candidate') : null, localPath: state.localPath, filename: state.filename,
+    localPath: state.localPath, filename: state.filename,
   }));
   const identities = selections.flatMap(candidateKeys);
   if (new Set(identities).size !== identities.length) throw new Error('Image selection produced duplicate provider IDs, URLs, or content hashes.');
