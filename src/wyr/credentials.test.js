@@ -132,3 +132,12 @@ test('production concurrency controls reject invalid, zero, and negative values'
     for (const [name, value] of Object.entries(original)) value === undefined ? delete process.env[name] : process.env[name] = value;
   }
 });
+
+test('web image fallback defaults on and can be disabled explicitly', () => {
+  const original = process.env.WYR_WEB_IMAGE_FALLBACK;
+  try {
+    delete process.env.WYR_WEB_IMAGE_FALLBACK; assert.equal(getConfig().webImageFallbackEnabled, true);
+    process.env.WYR_WEB_IMAGE_FALLBACK = 'false'; assert.equal(getConfig().webImageFallbackEnabled, false);
+    process.env.WYR_WEB_IMAGE_FALLBACK = 'invalid'; assert.throws(() => getConfig(), /WYR_WEB_IMAGE_FALLBACK must be true or false/);
+  } finally { original === undefined ? delete process.env.WYR_WEB_IMAGE_FALLBACK : process.env.WYR_WEB_IMAGE_FALLBACK = original; }
+});

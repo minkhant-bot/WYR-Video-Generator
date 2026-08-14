@@ -20,6 +20,14 @@ const positiveInteger = (name, fallback) => {
   return value;
 };
 
+const boolean = (name, fallback) => {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`${name} must be true or false.`);
+};
+
 export const getConfig = () => {
   const credentials = resolveApiKeys();
   const contentHistoryDir = process.env.WYR_CONTENT_HISTORY_DIR ? resolveProjectPath(process.env.WYR_CONTENT_HISTORY_DIR) : path.join(DEFAULT_DATA_DIR, 'content-history');
@@ -36,6 +44,7 @@ export const getConfig = () => {
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     pexelsConcurrency: positiveInteger('WYR_PEXELS_CONCURRENCY', 4),
+    webImageFallbackEnabled: boolean('WYR_WEB_IMAGE_FALLBACK', true),
     ttsConcurrency: positiveInteger('WYR_TTS_CONCURRENCY', 4),
     sceneRenderConcurrency: positiveInteger('WYR_SCENE_RENDER_CONCURRENCY', 2),
     ffmpegThreads: positiveInteger('WYR_FFMPEG_THREADS', 4),

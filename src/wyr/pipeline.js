@@ -4,6 +4,7 @@ import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
 import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages } from './images.js';
+import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
@@ -13,7 +14,7 @@ const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, loc
 export const runPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   try {
-    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
+    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
@@ -22,10 +23,13 @@ export const runPipeline = async ({ job, store, config }) => {
 
     update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
     const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
-    const assets = await findAndDownloadImages({ plan, provider: imageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
-    if (assets.length !== plan.questions.length * 2 || new Set(assets.map(asset => asset.id)).size !== assets.length) throw new Error(`Expected ${plan.questions.length * 2} unique Pexels photos; received ${assets.length}.`);
+    const webImageProvider = config.webImageFallbackEnabled ? new DuckDuckGoImageProvider({ timeoutMs: Math.min(config.timeoutMs, 12_000) }) : null;
+    const assets = await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    const providerIds = assets.map(asset => `${asset.provider}:${asset.id}`); const sourceUrls = assets.map(asset => asset.originalImageUrl || asset.downloadUrl);
+    if (assets.length !== plan.questions.length * 2 || new Set(providerIds).size !== assets.length || new Set(sourceUrls).size !== assets.length) throw new Error(`Expected ${plan.questions.length * 2} unique images; received ${assets.length}.`);
     writeJsonAtomic(path.join(job.workspace, 'assets.json'), relativeMetadata(assets, job.workspace));
-    writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: 'Pexels', providerUrl: 'https://www.pexels.com', photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.photoUrl, queryUsed: asset.queryUsed })) });
+    const providers = [...new Set(assets.map(asset => asset.provider))];
+    writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: providers.length === 1 ? providers[0] : 'Mixed', providers, photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, provider: asset.provider, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.sourcePageUrl || asset.photoUrl, sourcePageUrl: asset.sourcePageUrl, originalImageUrl: asset.originalImageUrl, sourceDomain: asset.sourceDomain, width: asset.width, height: asset.height, license: asset.license || 'unknown', licenseUrl: asset.licenseUrl || null, usageRights: asset.usageRights || 'unknown', sha256: asset.sha256, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
     const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });

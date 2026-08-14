@@ -38,6 +38,8 @@ For isolated testing, `WYR_SECRET_CONFIG_PATH` can select another local credenti
 
 Railway production concurrency is bounded and configurable with `WYR_PEXELS_CONCURRENCY` (default 4), `WYR_TTS_CONCURRENCY` (default 4), `WYR_SCENE_RENDER_CONCURRENCY` (default 2), and `WYR_FFMPEG_THREADS` (default 4). Pexels selection remains centrally deduplicated, voiceovers and rendered scenes retain source order, and the FFmpeg thread limit applies only to H.264 scene encoding.
 
+Pexels remains the primary image source. When its candidates fail the relevance gate, the optional `WYR_WEB_IMAGE_FALLBACK=true` path uses the free DuckDuckGo Images web-wide index with bounded, serial requests. If DuckDuckGo is blocked or has no usable result, the selector falls back to the best valid Pexels candidate. DuckDuckGo Images is an unofficial fallback and may be unavailable from Railway datacenter IPs. Web results are not assumed to be copyright-free: their source page and domain are retained, and unavailable rights metadata is recorded as `unknown` for review before reuse.
+
 ## Visual reference
 
 `reference/would-you-rather-reference.mp4` is retained as the visual source of truth. Runtime rendering uses the encoded template configuration and does not read the reference file.
