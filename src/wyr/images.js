@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { fetchWithTimeout, log, mapWithConcurrency, retry } from './utils.js';
+import { spawn } from 'node:child_process';
+import { fetchWithTimeout, log, mapWithConcurrency, retry, writeJsonAtomic } from './utils.js';
+import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
@@ -63,10 +65,13 @@ const UNSUITABLE_SOURCE_HOST_PATTERN = /(^|\.)(youtube\.com|rivalskins\.com)$/i;
 const UI_OR_TEXT_PATTERN = /\b(screenshot|user interface|dashboard|webpage|mobile app|social media post|meme|template|infographic|quote poster|text banner|logo design|typography)\b/i;
 const MISLEADING_CONTEXT_PATTERN = /\b(camera|lens|olympus|t-?shirt|merchandise|product mockup|for sale|shop now|phone case|coffee mug|costume|toy|figurine|rageon|metaverse|second life|bargain center|grunge sign)\b/i;
 const INAPPROPRIATE_PATTERN = /\b(nude|nudity|nsfw|porn|erotic|fetish|lingerie|bikini|sexualized|sexy)\b/i;
+const SOURCE_QUALITY_PATTERN = /\b(meme(?:generator)?|quote(?:s)?|infographic|diagram|chart|screenshot|template|mockup|product(?:[ -]?listing)?|ui|user[ -]?interface|advertisement|advertising|poster|presentation|slide)\b/i;
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
+const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation)\b/i;
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
-const PEXELS_MINIMUM_QUALITY = 72;
+export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
+export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['Pexels', 'DuckDuckGo Images'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES });
 const candidateKeys = candidate => uniqueWords([candidate.provider && candidate.id ? `id:${candidate.provider}:${candidate.id}` : '', candidate.originalImageUrl ? `url:${candidate.originalImageUrl}` : '', candidate.downloadUrl ? `url:${candidate.downloadUrl.split('?')[0]}` : '', candidate.sha256 ? `sha256:${candidate.sha256}` : ''].filter(Boolean));
 const fileHash = filename => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
 const optionConcepts = option => uniqueWords(normalizeWords(option.text).flatMap(word => [word, ...(VISUAL_EXPANSIONS[word] || [])]));
@@ -94,7 +99,7 @@ export const assessImageCandidate = (candidate, option) => {
   const searchableText = `${candidateText(candidate)} ${candidate.keywords || ''} ${candidate.downloadUrl || ''} ${candidate.originalImageUrl || ''} ${candidate.sourcePageUrl || ''}`;
   if (WATERMARK_PATTERN.test(searchableText) || WATERMARK_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('obvious stock or website watermark risk detected');
   if (UNSUITABLE_SOURCE_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('candidate source is likely a UI thumbnail or merchandise result');
-  if (UI_OR_TEXT_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears to be a screenshot, meme, UI, or text-dominated graphic');
+  if (UI_OR_TEXT_PATTERN.test(searchableText) || SOURCE_QUALITY_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears to be a meme, infographic, screenshot, UI, ad, template, or text-dominated graphic');
   if (MISLEADING_CONTEXT_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate describes merchandise or a misleading unrelated context');
   if (INAPPROPRIATE_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears inappropriate or sexualized');
   rejectionReasons.push(...assetRejectionReasons);
@@ -108,12 +113,12 @@ export const assessImageCandidate = (candidate, option) => {
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
   const resolution = Math.min(1, Math.min(candidate.width / 1600, candidate.height / 900));
   const relevanceScore = Math.round((coreCoverage * 60 + relevance * 20 + cropFit * 10 + resolution * 8 + Math.max(0, 2 - Number(candidate.position || 0) * 0.08)) * 10) / 10;
-  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText); const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
+  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText); const corporateWeak = CORPORATE_WEAK_PATTERN.test(searchableText); const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
   const optionWords = normalizeWords(option.text); const bankGrowthRequired = optionWords.includes('double') && (optionWords.includes('bank') || optionWords.includes('balance'));
   const bankGrowthDepicted = !bankGrowthRequired || containsAny(allTokens, ['big', 'double', 'doubled', 'doubling', 'multiply', 'multiplying', 'increase', 'increasing', 'growth', 'growing', 'overflowing', 'surrounded', 'endless', 'abundance', 'raining', 'falling', 'pile', 'stacks']);
   const conceptClarity = clampScore(coreCoverage * 40 + intentCoverage * 60 - (bankGrowthDepicted ? 0 : 18));
-  const specificity = clampScore(intentCoverage * 65 + Math.min(25, matched.length * 6) + coreCoverage * 10 - (weakVisual ? 22 : 0) - (bankGrowthDepicted ? 0 : 28));
-  const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 30 : 0));
+  const specificity = clampScore(intentCoverage * 65 + Math.min(25, matched.length * 6) + coreCoverage * 10 - (weakVisual ? 22 : 0) - (corporateWeak ? 14 : 0) - (bankGrowthDepicted ? 0 : 28));
+  const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 30 : 0) - (corporateWeak ? 18 : 0));
   const wyrSuitability = clampScore(conceptClarity * 0.42 + specificity * 0.28 + visualImpact * 0.2 + cropFit * 10);
   const qualityScore = clampScore(conceptClarity * 0.34 + specificity * 0.28 + visualImpact * 0.2 + wyrSuitability * 0.18);
   if (!explicitVisualIntent(option, allTokens)) rejectionReasons.push('candidate does not explicitly represent the option visually');
@@ -126,7 +131,35 @@ export const assessImageCandidate = (candidate, option) => {
   if (qualityScore < PEXELS_MINIMUM_QUALITY) pexelsQualityReasons.push(`visual quality ${qualityScore.toFixed(1)} is below ${PEXELS_MINIMUM_QUALITY.toFixed(1)}`);
   if (!bankGrowthDepicted) pexelsQualityReasons.push('candidate does not depict money or wealth increasing, multiplying, or in dramatic abundance');
   if (weakVisual) pexelsQualityReasons.push('candidate is generic, object-only, clip-art-like, or stock-like');
+  if (corporateWeak) pexelsQualityReasons.push('candidate is generic corporate or finance stock imagery for a concept needing a stronger visual');
   return { accepted, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
+};
+
+const runImageProbe = (binary, args) => new Promise((resolve, reject) => {
+  const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] }); let output = ''; let stderr = '';
+  child.stdout.on('data', chunk => { output += String(chunk); }); child.stderr.on('data', chunk => { stderr += String(chunk); }); child.once('error', reject);
+  child.once('close', code => code === 0 ? resolve(`${output}\n${stderr}`) : reject(new Error(`FFmpeg image validation exited with code ${code}: ${stderr.slice(-1000)}`)));
+});
+const statValue = (output, name) => { const match = output.match(new RegExp(`lavfi\\.signalstats\\.${name}=(-?[0-9.]+)`)); return match ? Number(match[1]) : NaN; };
+const probeDimensions = output => { const match = output.match(/\bs:(\d+)x(\d+)\b/); return match ? { width: Number(match[1]), height: Number(match[2]) } : null; };
+export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev }) => {
+  const reasons = [];
+  if (!Number.isFinite(width) || !Number.isFinite(height)) reasons.push('decoded dimensions were unavailable');
+  else if (width < 750 || height < 450) reasons.push('decoded image is too small for the 750x450 slot');
+  if (![yMin, yMax, yAvg, edgeYAvg].every(Number.isFinite)) reasons.push('decoded image statistics were unavailable');
+  else {
+    const range = yMax - yMin;
+    if (range <= 6 || (yMax < 24 && yAvg < 8) || (yMin > 247 && yAvg > 248)) reasons.push('image is blank, near-black, near-white, or overwhelmingly uniform');
+    if (Number.isFinite(stdev) && stdev < 2.5 && range < 24) reasons.push('image has near-zero contrast and appears to be a placeholder');
+    if (edgeYAvg < 0.15 && range < 48) reasons.push('image has no meaningful edge/detail structure');
+  }
+  return { valid: reasons.length === 0, reasons, width, height, yMin, yMax, yAvg, edgeYAvg, stdev };
+};
+export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpegPath() } = {}) => {
+  const rawOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'info', '-i', localPath, '-vf', 'signalstats,metadata=print:file=-,showinfo', '-frames:v', '1', '-f', 'null', '-']);
+  const edgeOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', 'edgedetect=low=0.1:high=0.4,signalstats,metadata=print:file=-', '-frames:v', '1', '-f', 'null', '-']);
+  const dimensions = probeDimensions(rawOutput) || {};
+  return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]) });
 };
 
 const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch }) => {
@@ -147,6 +180,7 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
     for (const candidate of candidates) {
       const assessment = assessImageCandidate(candidate, state.option);
       const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
+      state.candidateDiagnostics.push({ provider: enriched.provider, id: enriched.id, query, sourceDomain: enriched.sourceDomain, width: enriched.width, height: enriched.height, qualityScore: enriched.qualityScore, relevanceScore: enriched.relevanceScore, accepted: assessment.accepted, validAsset: assessment.validAsset, reasons: assessment.rejectionReasons });
       if (assessment.validAsset) state.validCandidates.push(enriched);
       if (!assessment.accepted) state.rejections.push({ provider: enriched.provider, id: enriched.id, query, reasons: assessment.rejectionReasons });
       else state.candidates.push(enriched);
@@ -167,23 +201,34 @@ const collectCandidates = async ({ states, provider, providerLabel, concurrency,
   }
 };
 
+const providerRank = provider => IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider) < 0 ? IMAGE_SELECTION_DEFAULTS.providerOrder.length : IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider);
+const sizeScore = candidate => Math.min(1, Math.min(Number(candidate.width) / 1600, Number(candidate.height) / 900));
+export const compareImageCandidates = (left, right) => {
+  const quality = Number(right.qualityScore || 0) - Number(left.qualityScore || 0); if (quality) return quality;
+  const relevance = Number(right.relevanceScore || 0) - Number(left.relevanceScore || 0); if (relevance) return relevance;
+  const size = sizeScore(right) - sizeScore(left); if (size) return size;
+  const provider = providerRank(left.provider) - providerRank(right.provider); if (provider) return provider;
+  const leftKey = `${left.originalImageUrl || left.downloadUrl || ''}\u0000${left.provider || ''}\u0000${left.id || ''}`;
+  const rightKey = `${right.originalImageUrl || right.downloadUrl || ''}\u0000${right.provider || ''}\u0000${right.id || ''}`;
+  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+};
 const rankedUnique = candidates => {
   const byIdentity = new Map();
   for (const candidate of candidates) {
     const identity = candidate.originalImageUrl || candidate.downloadUrl || `${candidate.provider}:${candidate.id}`;
     const current = byIdentity.get(identity);
-    if (!current || candidate.qualityScore > current.qualityScore || (candidate.qualityScore === current.qualityScore && candidate.relevanceScore > current.relevanceScore)) byIdentity.set(identity, candidate);
+    if (!current || compareImageCandidates(candidate, current) < 0) byIdentity.set(identity, candidate);
   }
-  return [...byIdentity.values()].sort((left, right) => right.qualityScore - left.qualityScore || right.relevanceScore - left.relevanceScore || left.position - right.position);
+  return [...byIdentity.values()].sort(compareImageCandidates);
 };
 const conflicts = (candidate, used) => candidateKeys(candidate).some(key => used.has(key));
 const reserve = (candidate, used) => candidateKeys(candidate).forEach(key => used.add(key));
 const release = (candidate, used) => candidateKeys(candidate).forEach(key => used.delete(key));
 const choose = (state, used) => state.pool.find(candidate => !state.failedKeys.has(candidateKeys(candidate).join('|')) && !conflicts(candidate, used));
 
-export const findAndDownloadImages = async ({ plan, provider, webProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress }) => {
+export const findAndDownloadImages = async ({ plan, provider, webProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage }) => {
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
-  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [] }));
+  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [] }));
   await collectCandidates({ states, provider, providerLabel: 'Pexels', concurrency, retrySearch: true });
   for (const state of states) {
     const rankedPexels = rankedUnique(state.candidates.filter(candidate => candidate.provider === 'Pexels')).slice(0, MAX_RANKED_CANDIDATES);
@@ -222,7 +267,14 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
         const selected = state.selected; const downloader = selected.provider === 'Pexels' ? provider : webProvider;
         const safeId = String(selected.id).replace(/[^a-z0-9_-]/gi, '_');
         const filename = `q${String(state.option.questionIndex + 1).padStart(2, '0')}-${state.option.slot.toLowerCase()}-${selected.provider === 'Pexels' ? 'pexels' : 'web'}-${safeId}.jpg`; const localPath = path.join(assetsDir, filename);
-        try { await downloader.downloadAsset(selected, localPath); return { ok: true, state, filename, localPath, contentHash: fileHash(localPath) }; }
+        try {
+          await downloader.downloadAsset(selected, localPath);
+          const inspection = await imageInspector(localPath, selected);
+          if (!inspection?.valid) throw new Error(`downloaded image rejected: ${inspection?.reasons?.join('; ') || 'image failed visual-content validation'}`);
+          if (Number.isFinite(inspection.width)) selected.width = inspection.width;
+          if (Number.isFinite(inspection.height)) selected.height = inspection.height;
+          return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection };
+        }
         catch (error) { fs.rmSync(localPath, { force: true }); return { ok: false, state, error }; }
       });
       pending = [];
@@ -247,7 +299,8 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
   const missing = states.find(state => !state.localPath);
   if (missing) throw new Error(`No downloadable relevant image found for question ${missing.option.questionIndex + 1}, option ${missing.option.slot}. Pexels and optional web fallback were exhausted.`);
   const selections = states.map(state => ({
-    ...state.option, ...state.selected, queryUsed: state.selected.query, searchAttempts: state.searchAttempts, rejectionReasons: state.rejections,
+    ...state.option, ...state.selected, queryUsed: state.selected.query, searchAttempts: state.searchAttempts, rejectionReasons: state.rejections, candidateDiagnostics: state.candidateDiagnostics,
+    queryOrder: state.queries, candidateCount: state.searchAttempts.reduce((sum, attempt) => sum + attempt.candidateCount, 0),
     webFallbackRequired: Boolean(state.webFallbackRequired), pexelsPassed: state.pexelsGatePassed,
     pexelsBestCandidate: state.pexelsBestCandidate ? { id: state.pexelsBestCandidate.id, query: state.pexelsBestCandidate.query, alt: state.pexelsBestCandidate.alt, qualityScore: state.pexelsBestCandidate.qualityScore, conceptClarity: state.pexelsBestCandidate.conceptClarity, specificity: state.pexelsBestCandidate.specificity, visualImpact: state.pexelsBestCandidate.visualImpact, wyrSuitability: state.pexelsBestCandidate.wyrSuitability, passed: state.pexelsBestCandidate.pexelsQualityPassed, reasons: state.pexelsBestCandidate.pexelsQualityReasons } : null,
     fallbackReason: state.selected.provider === 'Pexels' && state.webFallbackRequired ? (state.webProviderErrors.join('; ') || 'web image search returned no relevant downloadable candidate') : null, localPath: state.localPath, filename: state.filename,
@@ -255,4 +308,51 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
   const identities = selections.flatMap(candidateKeys);
   if (new Set(identities).size !== identities.length) throw new Error('Image selection produced duplicate provider IDs, URLs, or content hashes.');
   return selections;
+};
+
+const copyAndVerify = (source, destination, expectedHash) => {
+  if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error(`Selected image is missing: ${source}`);
+  const actualHash = fileHash(source); if (expectedHash && actualHash !== expectedHash) throw new Error(`Selected image hash mismatch before render: ${source}`);
+  fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(source, destination);
+  const copiedHash = fileHash(destination); if (copiedHash !== actualHash) throw new Error(`Selected image hash mismatch after locking: ${destination}`);
+  return copiedHash;
+};
+
+export const lockSelectedImageAssets = ({ assets, workspace }) => {
+  if (!Array.isArray(assets) || !assets.length) throw new Error('Cannot lock an empty image selection.');
+  const selectedDir = path.join(workspace, 'review', 'selected-images');
+  const locked = assets.map(asset => {
+    const filename = path.basename(asset.localPath || asset.filename || `${asset.questionIndex}-${asset.slot}.jpg`);
+    const localPath = path.join(selectedDir, filename);
+    const sha256 = copyAndVerify(asset.localPath, localPath, asset.sha256);
+    return { ...asset, localPath, filename, sha256, locked: true };
+  });
+  writeJsonAtomic(path.join(workspace, 'review', 'selected-images.json'), locked.map(asset => ({ ...asset, localPath: path.relative(workspace, asset.localPath) })));
+  return locked;
+};
+
+const runReviewCommand = (binary, args) => new Promise((resolve, reject) => {
+  const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] }); let stderr = '';
+  child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-4000); }); child.once('error', reject);
+  child.once('close', code => code === 0 ? resolve() : reject(new Error(`Image review contact sheet command failed (${code}): ${stderr}`)));
+});
+const reviewFilterPath = file => file.replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "'\\''");
+export const createImageReviewArtifacts = async ({ assets, workspace, ffmpeg = resolveFfmpegPath() }) => {
+  const selectedDir = path.join(workspace, 'review', 'selected-images'); const contactPath = path.join(workspace, 'review', 'contact-sheet.jpg'); fs.mkdirSync(selectedDir, { recursive: true });
+  const font = assertFontAvailable();
+  const tilePaths = [];
+  try {
+    for (let index = 0; index < assets.length; index += 1) {
+      const asset = assets[index]; const tile = path.join(workspace, 'review', `.tile-${index}.jpg`); const text = path.join(workspace, 'review', `.tile-${index}.txt`);
+      fs.writeFileSync(text, `${asset.optionText || asset.text || `Question ${asset.questionIndex + 1} ${asset.slot}`}\nProvider: ${asset.provider}\nQuery: ${asset.queryUsed}\nSource: ${asset.sourceDomain || 'unknown'}`);
+      const filter = `scale=360:230:force_original_aspect_ratio=increase,crop=360:230,pad=360:360:0:0:black,drawtext=fontfile=${reviewFilterPath(font)}:textfile='${reviewFilterPath(text)}':fontcolor=white:fontsize=16:line_spacing=3:x=8:y=240`;
+      await runReviewCommand(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', asset.localPath, '-vf', filter, '-frames:v', '1', tile]); tilePaths.push(tile);
+    }
+    const args = []; for (const tile of tilePaths) args.push('-i', tile);
+    const layout = assets.map((_, index) => `${(index % 4) * 360}_${Math.floor(index / 4) * 360}`).join('|');
+    await runReviewCommand(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', ...args, '-filter_complex', `xstack=inputs=${assets.length}:layout=${layout}:fill=black`, '-q:v', '2', contactPath]);
+  } finally {
+    for (let index = 0; index < assets.length; index += 1) { fs.rmSync(path.join(workspace, 'review', `.tile-${index}.jpg`), { force: true }); fs.rmSync(path.join(workspace, 'review', `.tile-${index}.txt`), { force: true }); }
+  }
+  return { selectedImagesDir: selectedDir, contactSheetPath: contactPath };
 };

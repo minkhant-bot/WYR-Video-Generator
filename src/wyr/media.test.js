@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildStillImageInputArgs, renderSceneSegments } from './media.js';
+import { assertLockedImageAssets, buildStillImageInputArgs, renderSceneSegments } from './media.js';
 import { resolveFfmpegPath } from './runtime.js';
 
 test('scene rendering enforces concurrency and preserves concat order', async () => {
@@ -48,4 +48,19 @@ test('production scene renderer accepts every Pexels/web still-image ordering', 
       assert.ok(fs.statSync(segment).size > 0, `${providerA}/${providerB} render is empty`);
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('scene rendering verifies locked image hashes before using local assets', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-locked-assets-')); const ffmpeg = resolveFfmpegPath(); const image = path.join(root, 'locked.jpg');
+  const result = spawnSync(ffmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=red:s=900x600', '-frames:v', '1', image], { encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
+  const crypto = await import('node:crypto'); const hash = crypto.createHash('sha256').update(fs.readFileSync(image)).digest('hex');
+  const asset = { localPath: image, filename: 'locked.jpg', locked: true, sha256: hash };
+  try { assert.equal(assertLockedImageAssets([asset]), true); fs.appendFileSync(image, 'changed'); assert.throws(() => assertLockedImageAssets([asset]), /hash mismatch/); }
+  finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('rendering consumes locked local assets without image-provider calls', async () => {
+  let providerCalls = 0; const provider = { search: () => { providerCalls += 1; throw new Error('provider must not be called during rendering'); }, downloadAsset: () => { providerCalls += 1; throw new Error('provider must not be called during rendering'); } };
+  const segments = await renderSceneSegments({ plan: { questions: [{ index: 0 }] }, assets: [], duration: 1, renderDir: '/tmp/wyr-no-provider-render', sceneConcurrency: 1, ffmpegThreads: 1, renderScene: async () => 'locked-local-segment.mp4' });
+  assert.deepEqual(segments, ['locked-local-segment.mp4']); assert.equal(providerCalls, 0); assert.equal(typeof provider.search, 'function');
 });

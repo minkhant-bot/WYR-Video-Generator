@@ -16,6 +16,18 @@ const run = (binary, args, label) => new Promise((resolve, reject) => {
   child.once('close', code => code === 0 ? resolve(stderr) : reject(new Error(`${label} exited with code ${code}: ${stderr.slice(-4000)}`)));
 });
 const filterPath = file => file.replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "'\\''");
+export const assertLockedImageAssets = assets => {
+  if (!Array.isArray(assets) || !assets.length) return true;
+  const locked = assets.filter(asset => asset.locked);
+  if (locked.length === 0) return true;
+  if (locked.length !== assets.length) throw new Error('Rendering cannot mix locked and unlocked image assets.');
+  for (const asset of locked) {
+    if (!asset.localPath || !fs.existsSync(asset.localPath)) throw new Error(`Locked image asset is missing: ${asset.localPath || asset.filename}`);
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(asset.localPath)).digest('hex');
+    if (!asset.sha256 || hash !== asset.sha256) throw new Error(`Locked image asset hash mismatch: ${asset.localPath}`);
+  }
+  return true;
+};
 const createTextMeasurer = ({ renderDir, font, namespace }) => {
   const cache = new Map(); const measureDir = path.join(renderDir, 'measure', namespace); fs.mkdirSync(measureDir, { recursive: true });
   return async (text, fontSize) => {
@@ -98,6 +110,7 @@ export const assertProductionAudioInputs = ({ plan, voiceovers = [], timeline, s
 };
 export const renderSceneSegments = async ({ plan, assets, duration, timeline, renderDir, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, renderScene = renderSegment }) => {
   if (!Number.isInteger(ffmpegThreads) || ffmpegThreads < 1) throw new TypeError('FFmpeg threads must be a positive integer.');
+  assertLockedImageAssets(assets);
   let completed = 0;
   return mapWithConcurrency(plan.questions, sceneConcurrency, async (question, index) => {
     const scene = timeline?.scenes[index]; const sceneDuration = scene?.duration ?? duration;
@@ -106,6 +119,7 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
   });
 };
 export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress }) => {
+  assertLockedImageAssets(assets);
   const renderDir = path.join(workspace, 'render');
   const segments = await renderSceneSegments({ plan, assets, duration, timeline, renderDir, sceneConcurrency, ffmpegThreads, onProgress });
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${segments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);

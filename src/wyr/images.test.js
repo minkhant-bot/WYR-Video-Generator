@@ -3,9 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assessImageCandidate, buildImageQueries, findAndDownloadImages } from './images.js';
+import { spawnSync } from 'node:child_process';
+import { assessImageCandidate, buildImageQueries, classifyImageStats, compareImageCandidates, createImageReviewArtifacts, findAndDownloadImages, lockSelectedImageAssets } from './images.js';
+import { resolveFfmpegPath } from './runtime.js';
 
-const writeCandidate = (candidate, destination) => fs.writeFileSync(destination, Buffer.alloc(12000, [...String(candidate.id)].reduce((sum, character) => sum + character.charCodeAt(0), 1) % 255));
+const fixtureFfmpeg = resolveFfmpegPath();
+const writeCandidate = (candidate, destination) => {
+  const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=size=800x480:rate=1', '-frames:v', '1', destination], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Could not create fixture image: ${result.stderr}`);
+  fs.appendFileSync(destination, Buffer.from(String(candidate.id)));
+};
+const writeBlankCandidate = (destination) => {
+  const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=white:size=800x480:rate=1', '-frames:v', '1', destination], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Could not create blank fixture image: ${result.stderr}`);
+};
 
 test('image selection retries weak searches and never reuses a photo', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-images-')); const calls = [];
@@ -75,6 +86,25 @@ test('candidate relevance gate rejects weak, undersized, and watermarked results
   assert.match(screenshot.rejectionReasons.join(' '), /screenshot/);
   const sexualized = assessImageCandidate({ id: 'adult', width: 2400, height: 1400, alt: 'sexy woman petting a dragon', downloadUrl: 'https://images.test/dragon.jpg' }, option);
   assert.match(sexualized.rejectionReasons.join(' '), /inappropriate/);
+});
+
+test('final image filter rejects memes, infographics, screenshots, and generic corporate finance art', () => {
+  const option = { text: 'Read Minds at Will' };
+  for (const alt of ['read minds meme quote poster', 'mind reading infographic diagram chart', 'read minds mobile app screenshot UI dashboard']) {
+    const result = assessImageCandidate({ id: alt, width: 2400, height: 1400, alt, downloadUrl: `https://images.test/${encodeURIComponent(alt)}.jpg` }, option);
+    assert.equal(result.accepted, false); assert.match(result.rejectionReasons.join(' '), /meme|infographic|screenshot/);
+  }
+  const corporate = assessImageCandidate({ id: 'corporate', width: 2400, height: 1400, alt: 'generic corporate finance illustration businessman at desk', downloadUrl: 'https://images.test/corporate.jpg' }, { text: 'Lifetime of Wealth No Effort' });
+  assert.equal(corporate.accepted, false); assert.equal(corporate.pexelsQualityPassed, false); assert.match(corporate.pexelsQualityReasons.join(' '), /corporate|quality/);
+});
+
+test('final image filter accepts cinematic fantasy and rejects blank image statistics', () => {
+  const fantasy = assessImageCandidate({ id: 'fantasy', width: 2400, height: 1400, alt: 'cinematic person riding a dragon flying through glowing storm clouds fantasy action', downloadUrl: 'https://images.test/dragon-rider.jpg' }, { text: 'Dragon Rider' });
+  assert.equal(fantasy.accepted, true); assert.equal(fantasy.pexelsQualityPassed, true);
+  const blank = classifyImageStats({ width: 800, height: 480, yMin: 255, yMax: 255, yAvg: 255, edgeYAvg: 0, stdev: 0 });
+  assert.equal(blank.valid, false); assert.match(blank.reasons.join(' '), /blank|uniform|placeholder/);
+  const detailed = classifyImageStats({ width: 800, height: 480, yMin: 0, yMax: 255, yAvg: 60, edgeYAvg: 3, stdev: 50 });
+  assert.equal(detailed.valid, true);
 });
 
 test('weak Pexels result invokes web fallback and preserves provenance and license metadata', async () => {
@@ -165,6 +195,31 @@ test('web fallback searches progressively and honors the provider request cap', 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('bad DuckDuckGo download advances to the next bounded candidate', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-bad-first-'));
+  const pexels = { id: 'weak-pexels', provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', originalImageUrl: 'https://pexels.test/weak.jpg', downloadUrl: 'https://pexels.test/weak.jpg' };
+  const webCandidate = (id, query) => ({ id: `${query}-${id}`, provider: 'DuckDuckGo Images', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.test/${query}-${id}.jpg`, downloadUrl: `https://images.test/${query}-${id}.jpg`, position: id === 'bad' ? 0 : 1 });
+  let webSearches = 0;
+  const provider = { search: async () => [pexels], downloadAsset: async () => {} };
+  const webProvider = { name: 'DuckDuckGo Images', search: async query => { webSearches += 1; return [webCandidate('bad', `${query}-${webSearches}`), webCandidate('good', `${query}-${webSearches}`)]; }, downloadAsset: async (selected, destination) => selected.id.includes('-bad') ? writeBlankCandidate(destination) : writeCandidate(selected, destination) };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 2 });
+    assert.equal(assets.every(asset => asset.id.endsWith('-good')), true); assert.match(assets[0].rejectionReasons.flatMap(item => item.reasons).join(' '), /downloaded image rejected/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('all blank candidates fail image selection clearly after bounded fallback attempts', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-all-blank-'));
+  const pexels = { id: 'weak-pexels', provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', originalImageUrl: 'https://pexels.test/weak.jpg', downloadUrl: 'https://pexels.test/weak.jpg' };
+  const web = id => ({ id, provider: 'DuckDuckGo Images', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.test/${id}.jpg`, downloadUrl: `https://images.test/${id}.jpg`, position: id });
+  const provider = { search: async () => [pexels], downloadAsset: async (_selected, destination) => writeBlankCandidate(destination) };
+  const webProvider = { name: 'DuckDuckGo Images', search: async () => [web(0), web(1)], downloadAsset: async (_selected, destination) => writeBlankCandidate(destination) };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
+  try { await assert.rejects(findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 2 }), /No downloadable relevant image found/); }
+  finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a broken relevant Pexels result invokes web fallback after download validation', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-broken-pexels-'));
   const pexelsProvider = { search: async query => [{ id: `p-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: query, originalImageUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://pexels.test/${encodeURIComponent(query)}.jpg` }], downloadAsset: async () => { throw new Error('connection reset'); } };
@@ -182,8 +237,7 @@ test('byte-identical downloads from different IDs and URLs are never selected tw
   const provider = {
     search: async query => ['shared', 'unique'].map((kind, position) => ({ id: `${query}-${kind}`, provider: 'Pexels', width: 2400, height: 1400, alt: query, originalImageUrl: `https://images.test/${encodeURIComponent(query)}-${kind}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}-${kind}.jpg`, position })),
     downloadAsset: async (selected, destination) => {
-      if (selected.id.endsWith('-shared')) fs.writeFileSync(destination, Buffer.alloc(12000, 7));
-      else { const bytes = Buffer.alloc(12000, 9); bytes.write(selected.id); fs.writeFileSync(destination, bytes); }
+      writeCandidate({ id: selected.id.endsWith('-shared') ? 'shared' : selected.id }, destination);
     },
   };
   const plan = { questions: [{ index: 0, optionA: { text: 'Befriend a Dragon', searchQuery: 'friendly fantasy dragon' }, optionB: { text: 'Own a Portal Door', searchQuery: 'fantasy portal doorway' } }] };
@@ -192,4 +246,39 @@ test('byte-identical downloads from different IDs and URLs are never selected tw
     assert.equal(new Set(assets.map(asset => asset.sha256)).size, 2);
     assert.match(assets.flatMap(asset => asset.rejectionReasons.flatMap(rejection => rejection.reasons)).join(' '), /duplicate an image already selected/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('image candidate ranking is deterministic with explicit tie breakers', () => {
+  const base = { qualityScore: 80, relevanceScore: 70, width: 1600, height: 900 };
+  const candidates = [
+    { ...base, provider: 'DuckDuckGo Images', id: 'z', originalImageUrl: 'https://z.test/image.jpg' },
+    { ...base, provider: 'Pexels', id: 'b', originalImageUrl: 'https://b.test/image.jpg' },
+    { ...base, provider: 'Pexels', id: 'a', originalImageUrl: 'https://a.test/image.jpg' },
+  ];
+  const first = [...candidates].sort(compareImageCandidates).map(candidate => candidate.id);
+  const second = [...candidates].reverse().sort(compareImageCandidates).map(candidate => candidate.id);
+  assert.deepEqual(first, ['a', 'b', 'z']); assert.deepEqual(second, first);
+});
+
+test('query variants are stable and selected metadata records exact order and candidate counts', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-deterministic-queries-')); const queries = [];
+  const provider = { search: async query => { queries.push(query); return [{ id: `p-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person entering glowing teleportation portal', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg` }]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Teleport Anywhere' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 2, concurrency: 1 });
+    assert.deepEqual(assets[0].queryOrder, ['person entering glowing teleportation portal', 'person stepping through portal cinematic', 'teleportation gateway person dramatic']);
+    assert.equal(assets[0].candidateCount, 3); assert.deepEqual(queries, assets.flatMap(asset => asset.queryOrder));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('selected image files are hash-locked and review contact sheet uses the locked copies', async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-lock-')); const sourceDir = path.join(workspace, 'assets'); fs.mkdirSync(sourceDir, { recursive: true });
+  const sourceA = path.join(sourceDir, 'a.jpg'); const sourceB = path.join(sourceDir, 'b.jpg'); writeCandidate({ id: 'a' }, sourceA); writeCandidate({ id: 'b' }, sourceB);
+  const crypto = await import('node:crypto'); const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const assets = [{ questionIndex: 0, slot: 'A', text: 'Teleport Anywhere', provider: 'Pexels', id: 'a', queryUsed: 'portal', sourceDomain: 'pexels.com', localPath: sourceA, sha256: hash(sourceA) }, { questionIndex: 0, slot: 'B', text: 'Stop Time', provider: 'DuckDuckGo Images', id: 'b', queryUsed: 'frozen time', sourceDomain: 'example.test', localPath: sourceB, sha256: hash(sourceB) }];
+  try {
+    const locked = lockSelectedImageAssets({ assets, workspace }); assert.equal(locked.every(asset => asset.locked), true); assert.ok(locked.every(asset => fs.existsSync(asset.localPath)));
+    const review = await createImageReviewArtifacts({ assets: locked, workspace }); assert.ok(fs.statSync(review.contactSheetPath).size > 0); assert.equal(path.basename(review.selectedImagesDir), 'selected-images');
+    const manifest = JSON.parse(fs.readFileSync(path.join(workspace, 'review', 'selected-images.json'))); assert.deepEqual(manifest.map(asset => asset.sha256), locked.map(asset => asset.sha256));
+  } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 });

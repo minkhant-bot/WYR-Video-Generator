@@ -3,7 +3,7 @@ import { writeJsonAtomic, log } from './utils.js';
 import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
 import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
-import { PexelsImageProvider, findAndDownloadImages } from './images.js';
+import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
@@ -14,7 +14,7 @@ const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, loc
 export const runPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   try {
-    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
+    assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', providerOrder: IMAGE_SELECTION_DEFAULTS.providerOrder, imageRequestTimeoutMs: config.timeoutMs, imageSearchRetries: config.imageSearchRetries, imageCandidateLimit: IMAGE_SELECTION_DEFAULTS.maxRankedCandidates, imageQualityThreshold: IMAGE_SELECTION_DEFAULTS.pexelsQualityThreshold, imageMinimumResolution: `${IMAGE_SELECTION_DEFAULTS.minimumWidth}x${IMAGE_SELECTION_DEFAULTS.minimumHeight}`, voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
@@ -24,7 +24,14 @@ export const runPipeline = async ({ job, store, config }) => {
     update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
     const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
     const webImageProvider = config.webImageFallbackEnabled ? new DuckDuckGoImageProvider({ timeoutMs: Math.min(config.timeoutMs, 12_000) }) : null;
-    const assets = await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    const imageSelectionStarted = Date.now();
+    const selectedAssets = await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    const imageSelectionMs = Date.now() - imageSelectionStarted;
+    if (selectedAssets.length !== plan.questions.length * 2) throw new Error(`Expected ${plan.questions.length * 2} selected images before locking; received ${selectedAssets.length}.`);
+    const assets = lockSelectedImageAssets({ assets: selectedAssets, workspace: job.workspace });
+    await createImageReviewArtifacts({ assets, workspace: job.workspace });
+    log('image.selection.completed', { jobId: job.id, durationMs: imageSelectionMs, selectedCount: assets.length, providerOrder: IMAGE_SELECTION_DEFAULTS.providerOrder, candidateLimits: { maxRankedCandidates: IMAGE_SELECTION_DEFAULTS.maxRankedCandidates, maxSearchQueries: config.imageSearchRetries + 1 }, qualityThreshold: IMAGE_SELECTION_DEFAULTS.pexelsQualityThreshold, minimumResolution: `${IMAGE_SELECTION_DEFAULTS.minimumWidth}x${IMAGE_SELECTION_DEFAULTS.minimumHeight}`, requestTimeoutMs: config.timeoutMs, webFallbackEnabled: config.webImageFallbackEnabled });
+    for (const asset of assets) log('image.selected', { jobId: job.id, question: asset.questionIndex + 1, slot: asset.slot, option: asset.text, provider: asset.provider, query: asset.queryUsed, sourceDomain: asset.sourceDomain, candidateCount: asset.candidateCount, fallbackReason: asset.fallbackReason, sha256: asset.sha256 });
     const providerIds = assets.map(asset => `${asset.provider}:${asset.id}`); const sourceUrls = assets.map(asset => asset.originalImageUrl || asset.downloadUrl);
     if (assets.length !== plan.questions.length * 2 || new Set(providerIds).size !== assets.length || new Set(sourceUrls).size !== assets.length) throw new Error(`Expected ${plan.questions.length * 2} unique images; received ${assets.length}.`);
     writeJsonAtomic(path.join(job.workspace, 'assets.json'), relativeMetadata(assets, job.workspace));
