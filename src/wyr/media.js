@@ -28,6 +28,11 @@ const createTextMeasurer = ({ renderDir, font, namespace }) => {
   };
 };
 const activeAlpha = ({ start, fadeIn, end, fadeOut }) => `'clip((t-${start})/${fadeIn},0,1)*clip((${end}-t)/${fadeOut},0,1)'`;
+export const buildStillImageInputArgs = (localPath, fps = WYR_TEMPLATE.canvas.fps) => {
+  if (typeof localPath !== 'string' || !localPath) throw new TypeError('Still-image input requires a local file path.');
+  if (!Number.isFinite(fps) || fps <= 0) throw new TypeError('Still-image input requires a positive frame rate.');
+  return ['-i', localPath];
+};
 const renderSegment = async ({ question, assets, index, duration, timeline, renderDir, ffmpegThreads }) => {
   const a = assets.find(asset => asset.questionIndex === index && asset.slot === 'A'); const b = assets.find(asset => asset.questionIndex === index && asset.slot === 'B');
   if (!a || !b) throw new Error(`Missing render assets for question ${index + 1}.`);
@@ -63,8 +68,8 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   ];
   const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
   const filter = [
-    `[0:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[aimg]`,
-    `[1:v]scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[bimg]`,
+    `[0:v]loop=loop=-1:size=1:start=0,setpts=N/${canvas.fps}/TB,scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[aimg]`,
+    `[1:v]loop=loop=-1:size=1:start=0,setpts=N/${canvas.fps}/TB,scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[bimg]`,
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
@@ -79,7 +84,8 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
       'setrange=limited,format=yuv420p[out]',
     ].join(',')}`,
   ].join(';');
-  await run(ffmpegPath, ['-y', '-loop', '1', '-t', String(duration), '-i', a.localPath, '-loop', '1', '-t', String(duration), '-i', b.localPath, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'ultrafast', '-crf', '24', '-t', String(duration), output], `render segment ${index + 1}`);
+  const stillInputs = [a, b].flatMap(asset => buildStillImageInputArgs(asset.localPath, canvas.fps));
+  await run(ffmpegPath, ['-y', ...stillInputs, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'ultrafast', '-crf', '24', '-t', String(duration), output], `render segment ${index + 1}`);
   return output;
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
