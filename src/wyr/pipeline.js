@@ -8,6 +8,7 @@ import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
+import { createImageSelection, downloadSelectedCandidates } from './image-picker.js';
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
 const plainLogValue = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
@@ -26,21 +27,23 @@ const logSelectedImageDiagnostics = (assets, jobId) => {
   console.info(`WYR_IMAGE_JOB_SUMMARY | jobId=${plainLogValue(jobId)} | selected=${assets.length} | DuckDuckGo=${selectedCounts.DuckDuckGo} | Pexels=${selectedCounts.Pexels} | rejected=${rejected}`);
 };
 
-export const runPipeline = async ({ job, store, config }) => {
+export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null }) => {
   const update = changes => store.update(job.id, changes);
   try {
     assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'DuckDuckGo Images', imageFallbackProvider: 'Pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', providerOrder: IMAGE_SELECTION_DEFAULTS.providerOrder, imageRequestTimeoutMs: config.timeoutMs, imageSearchRetries: config.imageSearchRetries, imageCandidateLimit: IMAGE_SELECTION_DEFAULTS.maxRankedCandidates, imageQualityThreshold: IMAGE_SELECTION_DEFAULTS.pexelsQualityThreshold, imageMinimumResolution: `${IMAGE_SELECTION_DEFAULTS.minimumWidth}x${IMAGE_SELECTION_DEFAULTS.minimumHeight}`, imageRecoveryQueryRounds: config.imageRecoveryQueryRounds, imageRecoveryMaxRequests: config.imageRecoveryMaxRequests, imageRecoveryMaxMs: config.imageRecoveryMaxMs, voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
-    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
-    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
+    const generated = preparedPlan ? null : await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
+    const plan = preparedPlan || addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
 
     update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
+    const imageSelectionStarted = Date.now();
     const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
     const webImageProvider = config.webImageFallbackEnabled ? new DuckDuckGoImageProvider({ timeoutMs: Math.min(config.timeoutMs, 12_000) }) : null;
-    const imageSelectionStarted = Date.now();
-    const selectedAssets = await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, visualQueryProvider: provider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, recovery: { alternateQueryRounds: config.imageRecoveryQueryRounds, maxProviderRequests: config.imageRecoveryMaxRequests, maxWallClockMs: config.imageRecoveryMaxMs }, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    const selectedAssets = selectionState
+      ? await downloadSelectedCandidates({ selection: selectionState, assetsDir: path.join(job.workspace, 'assets'), config })
+      : await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, visualQueryProvider: provider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, recovery: { alternateQueryRounds: config.imageRecoveryQueryRounds, maxProviderRequests: config.imageRecoveryMaxRequests, maxWallClockMs: config.imageRecoveryMaxMs }, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
     const imageSelectionMs = Date.now() - imageSelectionStarted;
     if (selectedAssets.length !== plan.questions.length * 2) throw new Error(`Expected ${plan.questions.length * 2} selected images before locking; received ${selectedAssets.length}.`);
     const assets = lockSelectedImageAssets({ assets: selectedAssets, workspace: job.workspace });
@@ -70,6 +73,23 @@ export const runPipeline = async ({ job, store, config }) => {
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
     update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); logSelectedImageDiagnostics(assets, job.id); log('job.completed', { jobId: job.id, outputPath, verification });
+  } catch (error) {
+    log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
+  }
+};
+
+export const prepareImageSelection = async ({ job, store, config }) => {
+  const update = changes => store.update(job.id, changes);
+  try {
+    assertProviderConfig(config);
+    update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
+    const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
+    const historyStore = new ContentHistoryStore(config.contentHistoryPath);
+    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
+    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+    update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
+    const selection = await createImageSelection({ plan, config });
+    update({ status: 'selecting_images', stage: 'selecting_images', progress: 35, selection });
   } catch (error) {
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }

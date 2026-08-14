@@ -147,11 +147,11 @@ test('production concurrency controls reject invalid, zero, and negative values'
   }
 });
 
-test('web image fallback defaults on and can be disabled explicitly', () => {
-  const original = process.env.WYR_WEB_IMAGE_FALLBACK;
+test('web image fallback defaults off and requires explicit opt-in', () => {
+  const original = process.env.WYR_ALLOW_WEB_IMAGES;
   try {
-    delete process.env.WYR_WEB_IMAGE_FALLBACK; assert.equal(getConfig().webImageFallbackEnabled, true);
-    process.env.WYR_WEB_IMAGE_FALLBACK = 'false'; assert.equal(getConfig().webImageFallbackEnabled, false);
-    process.env.WYR_WEB_IMAGE_FALLBACK = 'invalid'; assert.throws(() => getConfig(), /WYR_WEB_IMAGE_FALLBACK must be true or false/);
-  } finally { original === undefined ? delete process.env.WYR_WEB_IMAGE_FALLBACK : process.env.WYR_WEB_IMAGE_FALLBACK = original; }
+    delete process.env.WYR_ALLOW_WEB_IMAGES; assert.equal(getConfig().webImageFallbackEnabled, false);
+    process.env.WYR_ALLOW_WEB_IMAGES = 'true'; assert.equal(getConfig().webImageFallbackEnabled, true);
+    process.env.WYR_ALLOW_WEB_IMAGES = 'invalid'; assert.throws(() => getConfig(), /WYR_ALLOW_WEB_IMAGES must be true or false/);
+  } finally { original === undefined ? delete process.env.WYR_ALLOW_WEB_IMAGES : process.env.WYR_ALLOW_WEB_IMAGES = original; }
 });

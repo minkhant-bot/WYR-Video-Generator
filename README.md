@@ -1,12 +1,12 @@
 # WYR Video Generator
 
-A standalone single-user web app that creates 8-scene, 1080×1920 Would You Rather videos with Groq-generated content, Pexels photos, Edge TTS narration, local sound effects, and FFmpeg rendering.
+A standalone single-user web app that creates 8-scene, 1080×1920 Would You Rather videos with Groq-generated content, human-selected licensed-provider images, Edge TTS narration, local sound effects, and FFmpeg rendering.
 
 ## Requirements
 
 - Node.js 20 or newer
 - Network access for Groq, Pexels, Edge TTS, and npm installation
-- `GROQ_API_KEY` and `PEXELS_API_KEY` for real generation, supplied through the Settings UI or environment variables
+- `GROQ_API_KEY` and `PEXELS_API_KEY` for real generation, supplied through environment variables
 
 The app prefers system `ffmpeg` and `ffprobe`. The npm dependencies provide portable fallbacks. You may explicitly set `FFMPEG_PATH` and `FFPROBE_PATH`. The project bundles GNU FreeFont Bold under its GPLv3 font exception; `WYR_FONT_PATH` can select another compatible font file.
 
@@ -17,7 +17,7 @@ npm ci
 cp .env.example .env.local
 ```
 
-Open the Settings section in the web UI to save both API keys locally. They are written atomically to the ignored `.wyr-secrets.json` file with restrictive permissions. The browser receives configuration status only, never the saved values. `GROQ_API_KEY` and `PEXELS_API_KEY` environment variables remain supported and take precedence over saved values. The app does not automatically load `.env.local`; export those variables or use a process manager that loads the file.
+Export `GROQ_API_KEY`, `PEXELS_API_KEY`, and optionally `PIXABAY_API_KEY` server-side. Provider secrets never reach the browser. The app does not automatically load `.env.local`; export those variables or use a process manager that loads the file.
 
 ## Commands
 
@@ -38,7 +38,7 @@ For isolated testing, `WYR_SECRET_CONFIG_PATH` can select another local credenti
 
 Railway production concurrency is bounded and configurable with `WYR_PEXELS_CONCURRENCY` (default 4), `WYR_TTS_CONCURRENCY` (default 4), `WYR_SCENE_RENDER_CONCURRENCY` (default 2), and `WYR_FFMPEG_THREADS` (default 4). Pexels selection remains centrally deduplicated, voiceovers and rendered scenes retain source order, and the FFmpeg thread limit applies only to H.264 scene encoding.
 
-Pexels remains the primary image source. When its candidates fail the relevance gate, the optional `WYR_WEB_IMAGE_FALLBACK=true` path uses the free DuckDuckGo Images web-wide index with bounded, serial requests. If DuckDuckGo is blocked or has no usable result, the selector falls back to the best valid Pexels candidate. DuckDuckGo Images is an unofficial fallback and may be unavailable from Railway datacenter IPs. Web results are not assumed to be copyright-free: their source page and domain are retained, and unavailable rights metadata is recorded as `unknown` for review before reuse.
+The web UI searches Pexels, Pixabay, and public-domain/CC0 Openverse results, then pauses for the user to select one candidate per option. Six previews are shown per slot initially; “More images” expands only that slot and preserves prior selections. The Generate Video action is unavailable until all 16 slots are selected. Exact selected assets are downloaded, decoded, hash-locked, provenance-recorded, and rendered only after server-side validation. DuckDuckGo Images remains disabled unless `WYR_ALLOW_WEB_IMAGES=1` is explicitly set; web candidates are clearly marked and never silently treated as licensed.
 
 ## Visual reference
 

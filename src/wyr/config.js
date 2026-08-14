@@ -27,6 +27,7 @@ const boolean = (name, fallback) => {
   if (value === 'false') return false;
   throw new Error(`${name} must be true or false.`);
 };
+const webImages = () => { const value = process.env.WYR_ALLOW_WEB_IMAGES; if (value === undefined) return false; if (value === '1' || value === 'true') return true; if (value === '0' || value === 'false') return false; throw new Error('WYR_ALLOW_WEB_IMAGES must be true or false.'); };
 
 export const getConfig = () => {
   const credentials = resolveApiKeys();
@@ -47,7 +48,7 @@ export const getConfig = () => {
     imageRecoveryMaxRequests: integer('WYR_IMAGE_RECOVERY_MAX_REQUESTS', 24, 1, 32),
     imageRecoveryMaxMs: integer('WYR_IMAGE_RECOVERY_MAX_MS', 45_000, 1_000, 120_000),
     pexelsConcurrency: positiveInteger('WYR_PEXELS_CONCURRENCY', 4),
-    webImageFallbackEnabled: boolean('WYR_WEB_IMAGE_FALLBACK', true),
+    webImageFallbackEnabled: webImages(),
     ttsConcurrency: positiveInteger('WYR_TTS_CONCURRENCY', 4),
     sceneRenderConcurrency: positiveInteger('WYR_SCENE_RENDER_CONCURRENCY', 2),
     ffmpegThreads: positiveInteger('WYR_FFMPEG_THREADS', 4),
@@ -56,6 +57,7 @@ export const getConfig = () => {
     groqApiKey: credentials.groqApiKey,
     groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
     pexelsApiKey: credentials.pexelsApiKey,
+    pixabayApiKey: process.env.PIXABAY_API_KEY || '',
     edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',
     edgeVoiceRate: process.env.WYR_EDGE_VOICE_RATE || '-10%',
   };
