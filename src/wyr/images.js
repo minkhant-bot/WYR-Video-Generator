@@ -50,11 +50,17 @@ export const buildImageQueries = option => {
   else if (has('travel') && has('time')) visualQueries = ['person entering time portal', 'time traveler cinematic portal', 'person walking through temporal vortex'];
   else if (has('dragon')) visualQueries = ['person petting friendly dragon fantasy', 'human befriending cinematic dragon', 'person interacting with gentle dragon'];
   else if (has('portal') && has('door')) visualQueries = ['doorway opening into another world', 'person beside magical portal door', 'fantasy door to another dimension'];
+  const intentPack = visualIntentGroups(option).length ? [
+    `${optionWords.slice(0, 5).join(' ')} cinematic visual scene`,
+    `${optionWords.slice(0, 5).join(' ')} literal scene photograph`,
+    `person experiencing ${optionWords.slice(0, 5).join(' ')} cinematic`,
+  ] : [];
   return [...new Set([
     ...visualQueries,
     supplied.slice(0, 7).join(' '),
     optionWords.slice(0, 5).join(' '),
     expanded.slice(0, 7).join(' '),
+    ...intentPack,
   ].filter(query => query.length >= 3))];
 };
 
@@ -86,7 +92,7 @@ const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|busine
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
 export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
-export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['DuckDuckGo Images', 'Pexels'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES });
+export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['DuckDuckGo Images', 'Pexels'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES, minimumFinalScore: 62, minimumCandidateMargin: 4 });
 export const IMAGE_RECOVERY_DEFAULTS = Object.freeze({ alternateQueryRounds: 3, maxProviderRequests: 24, maxWallClockMs: 45_000 });
 const candidateKeys = candidate => uniqueWords([candidate.provider && candidate.id ? `id:${candidate.provider}:${candidate.id}` : '', candidate.originalImageUrl ? `url:${candidate.originalImageUrl}` : '', candidate.downloadUrl ? `url:${candidate.downloadUrl.split('?')[0]}` : '', candidate.sha256 ? `sha256:${candidate.sha256}` : ''].filter(Boolean));
 const fileHash = filename => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
@@ -104,9 +110,16 @@ const visualIntentGroups = option => {
   else if (has('travel') && has('time')) groups.push(['person', 'people', 'traveler', 'man', 'woman', 'figure', 'machine'], ['time', 'temporal', 'portal', 'vortex']);
   else if (has('dragon')) groups.push(['person', 'people', 'human', 'girl', 'boy', 'man', 'woman', 'princess', 'knight'], ['dragon', 'dragons']);
   else if (has('portal') && has('door')) groups.push(['door', 'doorway', 'gate', 'entrance'], ['world', 'portal', 'dimension', 'realm', 'landscape']);
+  else if (has('jet')) groups.push(['jet', 'airplane', 'aircraft', 'plane'], ['sky', 'clouds', 'flight', 'flying']);
+  else if (has('yacht')) groups.push(['yacht', 'boat', 'ship', 'vessel'], ['ocean', 'sea', 'water', 'sailing']);
+  else if (has('treehouse')) groups.push(['treehouse', 'treehouse', 'house'], ['forest', 'trees', 'canopy', 'village']);
+  else if (has('mars')) groups.push(['mars', 'planet', 'space', 'astronaut'], ['red', 'landscape', 'surface', 'planet']);
+  else if (has('ocean') || has('whale') || has('trench')) groups.push(['ocean', 'sea', 'underwater', 'whale', 'submarine'], ['deep', 'trench', 'marine', 'water', 'dive']);
+  else if (has('unicorn')) groups.push(['unicorn', 'horse', 'creature'], ['wish', 'magic', 'fantasy', 'person', 'people']);
   return groups;
 };
 const explicitVisualIntent = (option, tokens) => visualIntentGroups(option).every(group => containsAny(tokens, group));
+const visualIntentCoverage = (option, tokens) => { const groups = visualIntentGroups(option); return groups.length ? groups.filter(group => containsAny(tokens, group)).length / groups.length : 1; };
 const clampScore = value => Math.max(0, Math.min(100, Math.round(value * 10) / 10));
 export const assessImageCandidate = (candidate, option) => {
   const rejectionReasons = []; const assetRejectionReasons = [];
@@ -116,12 +129,14 @@ export const assessImageCandidate = (candidate, option) => {
   const sourceDomain = String(candidate.sourceDomain || '').toLowerCase();
   const hardFormatEvidence = `${searchableText} ${sourceDomain}`;
   const hardRejectionReasons = [];
+  if (!Number.isFinite(candidate?.width) || !Number.isFinite(candidate?.height) || candidate.width < 750 || candidate.height < 450) hardRejectionReasons.push('hard-rejected: low-resolution or corrupt candidate (too small for the 750x450 slot)');
   const hardFormatMatches = [...hardFormatEvidence.matchAll(HARD_FORMAT_PATTERN)].map(match => match[0].toLowerCase());
   const hardLayoutMatch = hardFormatEvidence.match(HARD_LAYOUT_PATTERN)?.[0]?.toLowerCase();
   if (hardFormatMatches.length || hardLayoutMatch) hardRejectionReasons.push(`hard-rejected: candidate metadata indicates ${[...new Set([...hardFormatMatches, hardLayoutMatch].filter(Boolean))].join(', ')} / text-heavy or promotional format`);
   if (HARD_DOMAIN_PATTERN.test(sourceDomain)) hardRejectionReasons.push(`hard-rejected: high-risk source domain ${sourceDomain}`);
+  if (WATERMARK_PATTERN.test(hardFormatEvidence) || WATERMARK_HOST_PATTERN.test(sourceDomain)) hardRejectionReasons.push('hard-rejected: obvious watermark or stock-preview source');
   rejectionReasons.push(...hardRejectionReasons);
-  if (hardRejectionReasons.length) return { accepted: false, hardRejected: true, hardRejectionReasons, validAsset: assetRejectionReasons.length === 0, relevanceScore: 0, qualityScore: 0, conceptClarity: 0, specificity: 0, visualImpact: 0, wyrSuitability: 0, pexelsQualityPassed: false, pexelsQualityReasons: hardRejectionReasons, rejectionReasons, matchedConcepts: [] };
+  if (hardRejectionReasons.length) return { accepted: false, hardRejected: true, hardRejectionReasons, formatPass: false, validAsset: assetRejectionReasons.length === 0, relevanceScore: 0, qualityScore: 0, finalScore: 0, conceptClarity: 0, specificity: 0, visualImpact: 0, wyrSuitability: 0, pexelsQualityPassed: false, pexelsQualityReasons: hardRejectionReasons, rejectionReasons, matchedConcepts: [] };
   if (WATERMARK_PATTERN.test(searchableText) || WATERMARK_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('obvious stock or website watermark risk detected');
   if (UNSUITABLE_SOURCE_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('candidate source is likely a UI thumbnail or merchandise result');
   if (UI_OR_TEXT_PATTERN.test(searchableText) || SOURCE_QUALITY_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears to be a meme, infographic, screenshot, UI, ad, template, or text-dominated graphic');
@@ -133,7 +148,7 @@ export const assessImageCandidate = (candidate, option) => {
   const core = normalizeWords(option.text); const coreMatched = core.filter(concept => textTokens.has(concept) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
   const relevance = concepts.length ? matched.length / concepts.length : 0;
   const coreCoverage = core.length ? coreMatched.length / core.length : 0;
-  const intentGroups = visualIntentGroups(option); const intentCoverage = intentGroups.length ? intentGroups.filter(group => containsAny(allTokens, group)).length / intentGroups.length : coreCoverage;
+  const intentGroups = visualIntentGroups(option); const intentCoverage = intentGroups.length ? visualIntentCoverage(option, allTokens) : 1;
   const targetRatio = 750 / 450; const ratio = candidate.width / candidate.height;
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
   const resolution = Math.min(1, Math.min(candidate.width / 1600, candidate.height / 900));
@@ -146,7 +161,8 @@ export const assessImageCandidate = (candidate, option) => {
   const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 30 : 0) - (corporateWeak ? 18 : 0));
   const wyrSuitability = clampScore(conceptClarity * 0.42 + specificity * 0.28 + visualImpact * 0.2 + cropFit * 10);
   const qualityScore = clampScore(conceptClarity * 0.34 + specificity * 0.28 + visualImpact * 0.2 + wyrSuitability * 0.18);
-  if (!explicitVisualIntent(option, allTokens)) rejectionReasons.push('candidate does not explicitly represent the option visually');
+  const finalScore = clampScore(qualityScore * 0.45 + relevanceScore * 0.35 + conceptClarity * 0.2);
+  if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 38) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 38.0`);
   const accepted = rejectionReasons.length === 0;
   const pexelsQualityReasons = [];
@@ -157,7 +173,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (!bankGrowthDepicted) pexelsQualityReasons.push('candidate does not depict money or wealth increasing, multiplying, or in dramatic abundance');
   if (weakVisual) pexelsQualityReasons.push('candidate is generic, object-only, clip-art-like, or stock-like');
   if (corporateWeak) pexelsQualityReasons.push('candidate is generic corporate or finance stock imagery for a concept needing a stronger visual');
-  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
+  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, formatPass: assetRejectionReasons.length === 0, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, finalScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
 };
 
 const runImageProbe = (binary, args) => new Promise((resolve, reject) => {
@@ -169,13 +185,13 @@ const statValue = (output, name) => { const match = output.match(new RegExp(`lav
 const probeDimensions = output => { const match = output.match(/\bs:(\d+)x(\d+)\b/); return match ? { width: Number(match[1]), height: Number(match[2]) } : null; };
 export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev }) => {
   const reasons = [];
-  if (!Number.isFinite(width) || !Number.isFinite(height)) reasons.push('decoded dimensions were unavailable');
-  else if (width < 750 || height < 450) reasons.push('decoded image is too small for the 750x450 slot');
+  if (!Number.isFinite(width) || !Number.isFinite(height)) reasons.push('hard-rejected: decoded dimensions were unavailable (corrupt image)');
+  else if (width < 750 || height < 450) reasons.push('hard-rejected: decoded image is too small for the 750x450 slot');
   if (![yMin, yMax, yAvg, edgeYAvg].every(Number.isFinite)) reasons.push('decoded image statistics were unavailable');
   else {
     const range = yMax - yMin;
-    if (range <= 6 || (yMax < 24 && yAvg < 8) || (yMin > 247 && yAvg > 248)) reasons.push('image is blank, near-black, near-white, or overwhelmingly uniform');
-    if (Number.isFinite(stdev) && stdev < 2.5 && range < 24) reasons.push('image has near-zero contrast and appears to be a placeholder');
+    if (range <= 6 || (yMax < 24 && yAvg < 8) || (yMin > 247 && yAvg > 248)) reasons.push('hard-rejected: image is blank, near-black, near-white, or overwhelmingly uniform');
+    if (Number.isFinite(stdev) && stdev < 2.5 && range < 24) reasons.push('hard-rejected: image has near-zero contrast and appears to be a placeholder');
     if (edgeYAvg < 0.15 && range < 48) reasons.push('image has no meaningful edge/detail structure');
     const aspectRatio = width / height;
     if (aspectRatio >= 2.2 && edgeYAvg > 18) reasons.push('hard-rejected: pixel layout resembles a dense text/banner graphic');
@@ -207,8 +223,8 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
     state.searchAttempts.push({ phase, provider: providerLabel, query, candidateCount: candidates.length, error: null });
     for (const candidate of candidates) {
       const assessment = assessImageCandidate(candidate, state.option);
-      const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
-      state.candidateDiagnostics.push({ provider: enriched.provider, id: enriched.id, query, sourceDomain: enriched.sourceDomain, width: enriched.width, height: enriched.height, qualityScore: enriched.qualityScore, relevanceScore: enriched.relevanceScore, accepted: assessment.accepted, validAsset: assessment.validAsset, reasons: assessment.rejectionReasons });
+      const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, finalScore: assessment.finalScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
+      state.candidateDiagnostics.push({ provider: enriched.provider, id: enriched.id, query, sourceDomain: enriched.sourceDomain, width: enriched.width, height: enriched.height, formatPass: assessment.formatPass, qualityScore: enriched.qualityScore, relevanceScore: enriched.relevanceScore, finalScore: enriched.finalScore, accepted: assessment.accepted, validAsset: assessment.validAsset, reasons: assessment.rejectionReasons });
       if (assessment.hardRejected) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${enriched.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : enriched.provider} | domain=${enriched.sourceDomain || 'unknown'} | query="${String(query).replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${assessment.hardRejectionReasons.join('; ')}"`);
       if (assessment.validAsset) state.validCandidates.push(enriched);
       if (!assessment.accepted) state.rejections.push({ provider: enriched.provider, id: enriched.id, query, reasons: assessment.rejectionReasons });
@@ -233,6 +249,7 @@ const collectCandidates = async ({ states, provider, providerLabel, concurrency,
 const providerRank = provider => IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider) < 0 ? IMAGE_SELECTION_DEFAULTS.providerOrder.length : IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider);
 const sizeScore = candidate => Math.min(1, Math.min(Number(candidate.width) / 1600, Number(candidate.height) / 900));
 export const compareImageCandidates = (left, right) => {
+  const finalScore = Number(right.finalScore || 0) - Number(left.finalScore || 0); if (finalScore) return finalScore;
   const quality = Number(right.qualityScore || 0) - Number(left.qualityScore || 0); if (quality) return quality;
   const relevance = Number(right.relevanceScore || 0) - Number(left.relevanceScore || 0); if (relevance) return relevance;
   const size = sizeScore(right) - sizeScore(left); if (size) return size;
@@ -254,11 +271,18 @@ const conflicts = (candidate, used) => candidateKeys(candidate).some(key => used
 const reserve = (candidate, used) => candidateKeys(candidate).forEach(key => used.add(key));
 const release = (candidate, used) => candidateKeys(candidate).forEach(key => used.delete(key));
 const choose = (state, used) => state.pool.find(candidate => !state.failedKeys.has(candidateKeys(candidate).join('|')) && !conflicts(candidate, used));
+const chooseStrongCandidate = (state, candidates, used) => {
+  const ranked = rankedUnique(candidates).filter(candidate => !conflicts(candidate, used));
+  const [top, second] = ranked;
+  if (!top || Number(top.finalScore || 0) < IMAGE_SELECTION_DEFAULTS.minimumFinalScore) return null;
+  if (second && Number(top.finalScore || 0) - Number(second.finalScore || 0) < IMAGE_SELECTION_DEFAULTS.minimumCandidateMargin && Number(second.finalScore || 0) < 78) return null;
+  return top;
+};
 
 export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
   const recoveryConfig = { ...IMAGE_RECOVERY_DEFAULTS, ...recovery };
-  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [], providerAttemptOrder: [...IMAGE_SELECTION_DEFAULTS.providerOrder], webProviderAttempted: false, fallbackReason: null }));
+  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, Math.max(4, maxRetries + 1)), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [], providerAttemptOrder: [...IMAGE_SELECTION_DEFAULTS.providerOrder], webProviderAttempted: false, fallbackReason: null }));
   const used = new Set();
   const webLabel = webProvider?.name || 'DuckDuckGo Images';
   if (webProvider) {
@@ -266,7 +290,7 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     for (const state of states) { state.webProviderAttempted = true; state.webCandidates = rankedUnique(state.candidates.filter(candidate => candidate.provider !== 'Pexels')).slice(0, MAX_RANKED_CANDIDATES); }
   }
   for (const state of states) {
-    const strongWeb = state.webCandidates?.find(candidate => !conflicts(candidate, used));
+    const strongWeb = chooseStrongCandidate(state, state.webCandidates || [], used);
     if (strongWeb) { state.selected = strongWeb; reserve(strongWeb, used); }
   }
   const needsPexels = states.filter(state => !state.selected);
@@ -277,7 +301,7 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     state.pexelsFallbackCandidates = rankedPexels;
     state.pexelsGatePassed = state.pexelsCandidates.length > 0;
     state.pool = state.pexelsCandidates;
-    const strongPexels = state.pexelsCandidates.find(candidate => !conflicts(candidate, used));
+    const strongPexels = chooseStrongCandidate(state, state.pexelsCandidates, used);
     if (strongPexels) { state.selected = strongPexels; reserve(strongPexels, used); }
     state.pexelsSearched = true;
   };
@@ -402,6 +426,10 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     pexelsBestCandidate: state.pexelsBestCandidate ? { id: state.pexelsBestCandidate.id, query: state.pexelsBestCandidate.query, alt: state.pexelsBestCandidate.alt, qualityScore: state.pexelsBestCandidate.qualityScore, conceptClarity: state.pexelsBestCandidate.conceptClarity, specificity: state.pexelsBestCandidate.specificity, visualImpact: state.pexelsBestCandidate.visualImpact, wyrSuitability: state.pexelsBestCandidate.wyrSuitability, passed: state.pexelsBestCandidate.pexelsQualityPassed, reasons: state.pexelsBestCandidate.pexelsQualityReasons } : null,
     localPath: state.localPath, filename: state.filename,
   }));
+  for (const state of states) {
+    const topCandidates = [...state.candidateDiagnostics].sort((left, right) => Number(right.finalScore || 0) - Number(left.finalScore || 0)).slice(0, 3);
+    for (const candidate of topCandidates) console.info(`WYR_IMAGE_CANDIDATE_SCORE | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${candidate.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : candidate.provider} | domain=${candidate.sourceDomain || 'unknown'} | query="${String(candidate.query || '').replaceAll('"', '\\"')}" | formatPass=${candidate.formatPass} | relevanceScore=${candidate.relevanceScore} | qualityScore=${candidate.qualityScore} | finalScore=${candidate.finalScore} | rejectionReason="${(candidate.reasons || []).join('; ').replaceAll('"', '\\"')}"`);
+  }
   const identities = selections.flatMap(candidateKeys);
   if (new Set(identities).size !== identities.length) throw new Error('Image selection produced duplicate provider IDs, URLs, or content hashes.');
   return selections;

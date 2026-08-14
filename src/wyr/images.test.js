@@ -297,14 +297,25 @@ test('image candidate ranking is deterministic with explicit tie breakers', () =
   assert.deepEqual(first, ['z', 'a', 'b']); assert.deepEqual(second, first);
 });
 
+test('selection ranks the full accepted pool instead of taking the first acceptable candidate', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-ranked-pool-'));
+  const candidate = (id, alt, position) => ({ id, provider: 'Pexels', width: 2400, height: 1400, alt, originalImageUrl: `https://images.test/${id}.jpg`, downloadUrl: `https://images.test/${id}.jpg`, position });
+  const provider = { search: async () => [candidate('weak', 'person near a glowing portal doorway', 0), candidate('strong', 'dramatic cinematic person stepping through a glowing teleportation portal', 1)], downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Teleport Anywhere' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 0, concurrency: 1 });
+    assert.equal(assets[0].id, 'strong');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('query variants are stable and selected metadata records exact order and candidate counts', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-deterministic-queries-')); const queries = [];
   const provider = { search: async query => { queries.push(query); return [{ id: `p-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person entering glowing teleportation portal', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg` }]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Teleport Anywhere' } }] };
   try {
     const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 2, concurrency: 1 });
-    assert.deepEqual(assets[0].queryOrder, ['person entering glowing teleportation portal', 'person stepping through portal cinematic', 'teleportation gateway person dramatic']);
-    assert.equal(assets[0].candidateCount, 3); assert.deepEqual(queries, assets.flatMap(asset => asset.queryOrder));
+    assert.deepEqual(assets[0].queryOrder, ['person entering glowing teleportation portal', 'person stepping through portal cinematic', 'teleportation gateway person dramatic', 'teleport']);
+    assert.equal(assets[0].candidateCount, 4); assert.deepEqual(queries, assets.flatMap(asset => asset.queryOrder));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
