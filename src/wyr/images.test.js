@@ -108,6 +108,42 @@ test('final image filter accepts cinematic fantasy and rejects blank image stati
   assert.equal(detailed.valid, true);
 });
 
+test('hard format and risky-source rules reject the observed Railway image failures before scores can rescue them', () => {
+  const cases = [
+    ['Read everyone\'s mind', 'eww.etsy.com', 'telepathy person reading thoughts text-heavy graphic poster'],
+    ['$1M monthly forever', 'scale.jobs', 'million dollars monthly wealth promotional article thumbnail'],
+    ['Save the world, lose memories', 'auctions.yahoo.co.jp', 'save the world memory auction listing image'],
+    ['Wear neural interface to erase past', '01net.com', 'neural interface product UI article screenshot'],
+    ['Be a unicorn that grants wishes', 'cbs8.com', 'unicorn wishes news video thumbnail screenshot'],
+  ];
+  for (const [text, sourceDomain, alt] of cases) {
+    const result = assessImageCandidate({ id: sourceDomain, width: 2400, height: 1400, alt, title: alt, sourceDomain, sourcePageUrl: `https://${sourceDomain}/article`, downloadUrl: `https://cdn.example.test/${sourceDomain}.jpg` }, { text });
+    assert.equal(result.accepted, false); assert.equal(result.hardRejected, true); assert.match(result.hardRejectionReasons.join(' '), /hard-rejected/);
+  }
+});
+
+test('hard format rules preserve strong cinematic production visuals', () => {
+  const strong = [
+    ['Teleport instantly anywhere', 'person stepping through a glowing teleportation portal cinematic', 'images.example.test'],
+    ['Own a private jet', 'cinematic private jet flying above clouds at sunset', 'images.example.test'],
+    ['Own a private yacht', 'luxury private yacht sailing open ocean dramatic cinematic', 'images.example.test'],
+    ['Live in a treehouse village', 'lush cinematic treehouse village in a forest canopy', 'images.example.test'],
+    ['Fly to Mars', 'astronaut walking on dramatic red Mars landscape', 'images.example.test'],
+    ['Explore the deepest ocean trench', 'deep ocean trench submarine cinematic underwater landscape', 'images.example.test'],
+  ];
+  for (const [text, alt, sourceDomain] of strong) {
+    const result = assessImageCandidate({ id: text, width: 2400, height: 1400, alt, title: alt, sourceDomain, downloadUrl: `https://cdn.example.test/${encodeURIComponent(text)}.jpg` }, { text });
+    assert.equal(result.hardRejected, false); assert.equal(result.accepted, true);
+  }
+});
+
+test('pixel layout heuristics reject dense banner-like and text-foreground images', () => {
+  const banner = classifyImageStats({ width: 2400, height: 900, yMin: 5, yMax: 250, yAvg: 120, edgeYAvg: 22, stdev: 40 });
+  assert.equal(banner.valid, false); assert.match(banner.reasons.join(' '), /banner|text/);
+  const textForeground = classifyImageStats({ width: 1200, height: 800, yMin: 20, yMax: 230, yAvg: 110, edgeYAvg: 12, stdev: 12 });
+  assert.equal(textForeground.valid, false); assert.match(textForeground.reasons.join(' '), /text-like/);
+});
+
 test('weak Pexels result invokes web fallback and preserves provenance and license metadata', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-fallback-'));
   const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person near dragon generic illustration', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });

@@ -78,6 +78,9 @@ const UI_OR_TEXT_PATTERN = /\b(screenshot|user interface|dashboard|webpage|mobil
 const MISLEADING_CONTEXT_PATTERN = /\b(camera|lens|olympus|t-?shirt|merchandise|product mockup|for sale|shop now|phone case|coffee mug|costume|toy|figurine|rageon|metaverse|second life|bargain center|grunge sign)\b/i;
 const INAPPROPRIATE_PATTERN = /\b(nude|nudity|nsfw|porn|erotic|fetish|lingerie|bikini|sexualized|sexy)\b/i;
 const SOURCE_QUALITY_PATTERN = /\b(meme(?:generator)?|quote(?:s)?|infographic|diagram|chart|screenshot|template|mockup|product(?:[ -]?listing)?|ui|user[ -]?interface|advertisement|advertising|poster|presentation|slide)\b/i;
+const HARD_FORMAT_PATTERN = /\b(article|news|blog|thumbnail|video|youtube|watch|screenshot|website|browser|app|user interface|dashboard|infographic|poster|banner|ad|advertisement|promotional?|promo|quote card|quote poster|meme|template|job listing|careers?|marketplace|auction|product listing|product page|shop|listing|play button|stream)\b/gi;
+const HARD_DOMAIN_PATTERN = /(^|\.)(etsy|scale\.jobs|jobs|careers|marketplace|auction|auctions|01net|cbs8)(\.|$)|(^|\.)(auctions\.)?yahoo\.co\.jp$/i;
+const HARD_LAYOUT_PATTERN = /\b(card layout|text graphic|text-heavy|text heavy|graphic design|social post|press release|promo image|article image)\b/i;
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
 const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation)\b/i;
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
@@ -110,6 +113,15 @@ export const assessImageCandidate = (candidate, option) => {
   if (!candidate?.id || !candidate.downloadUrl) assetRejectionReasons.push('missing provider ID or image URL');
   if (!Number.isFinite(candidate?.width) || !Number.isFinite(candidate?.height) || candidate.width < 750 || candidate.height < 450) assetRejectionReasons.push('image is too small for the 750x450 slot');
   const searchableText = `${candidateText(candidate)} ${candidate.keywords || ''} ${candidate.downloadUrl || ''} ${candidate.originalImageUrl || ''} ${candidate.sourcePageUrl || ''}`;
+  const sourceDomain = String(candidate.sourceDomain || '').toLowerCase();
+  const hardFormatEvidence = `${searchableText} ${sourceDomain}`;
+  const hardRejectionReasons = [];
+  const hardFormatMatches = [...hardFormatEvidence.matchAll(HARD_FORMAT_PATTERN)].map(match => match[0].toLowerCase());
+  const hardLayoutMatch = hardFormatEvidence.match(HARD_LAYOUT_PATTERN)?.[0]?.toLowerCase();
+  if (hardFormatMatches.length || hardLayoutMatch) hardRejectionReasons.push(`hard-rejected: candidate metadata indicates ${[...new Set([...hardFormatMatches, hardLayoutMatch].filter(Boolean))].join(', ')} / text-heavy or promotional format`);
+  if (HARD_DOMAIN_PATTERN.test(sourceDomain)) hardRejectionReasons.push(`hard-rejected: high-risk source domain ${sourceDomain}`);
+  rejectionReasons.push(...hardRejectionReasons);
+  if (hardRejectionReasons.length) return { accepted: false, hardRejected: true, hardRejectionReasons, validAsset: assetRejectionReasons.length === 0, relevanceScore: 0, qualityScore: 0, conceptClarity: 0, specificity: 0, visualImpact: 0, wyrSuitability: 0, pexelsQualityPassed: false, pexelsQualityReasons: hardRejectionReasons, rejectionReasons, matchedConcepts: [] };
   if (WATERMARK_PATTERN.test(searchableText) || WATERMARK_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('obvious stock or website watermark risk detected');
   if (UNSUITABLE_SOURCE_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('candidate source is likely a UI thumbnail or merchandise result');
   if (UI_OR_TEXT_PATTERN.test(searchableText) || SOURCE_QUALITY_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears to be a meme, infographic, screenshot, UI, ad, template, or text-dominated graphic');
@@ -145,7 +157,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (!bankGrowthDepicted) pexelsQualityReasons.push('candidate does not depict money or wealth increasing, multiplying, or in dramatic abundance');
   if (weakVisual) pexelsQualityReasons.push('candidate is generic, object-only, clip-art-like, or stock-like');
   if (corporateWeak) pexelsQualityReasons.push('candidate is generic corporate or finance stock imagery for a concept needing a stronger visual');
-  return { accepted, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
+  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
 };
 
 const runImageProbe = (binary, args) => new Promise((resolve, reject) => {
@@ -165,6 +177,9 @@ export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, 
     if (range <= 6 || (yMax < 24 && yAvg < 8) || (yMin > 247 && yAvg > 248)) reasons.push('image is blank, near-black, near-white, or overwhelmingly uniform');
     if (Number.isFinite(stdev) && stdev < 2.5 && range < 24) reasons.push('image has near-zero contrast and appears to be a placeholder');
     if (edgeYAvg < 0.15 && range < 48) reasons.push('image has no meaningful edge/detail structure');
+    const aspectRatio = width / height;
+    if (aspectRatio >= 2.2 && edgeYAvg > 18) reasons.push('hard-rejected: pixel layout resembles a dense text/banner graphic');
+    if (Number.isFinite(stdev) && stdev < 18 && edgeYAvg > 10) reasons.push('hard-rejected: near-uniform background with text-like high-contrast foreground');
   }
   return { valid: reasons.length === 0, reasons, width, height, yMin, yMax, yAvg, edgeYAvg, stdev };
 };
@@ -194,6 +209,7 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
       const assessment = assessImageCandidate(candidate, state.option);
       const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
       state.candidateDiagnostics.push({ provider: enriched.provider, id: enriched.id, query, sourceDomain: enriched.sourceDomain, width: enriched.width, height: enriched.height, qualityScore: enriched.qualityScore, relevanceScore: enriched.relevanceScore, accepted: assessment.accepted, validAsset: assessment.validAsset, reasons: assessment.rejectionReasons });
+      if (assessment.hardRejected) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${enriched.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : enriched.provider} | domain=${enriched.sourceDomain || 'unknown'} | query="${String(query).replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${assessment.hardRejectionReasons.join('; ')}"`);
       if (assessment.validAsset) state.validCandidates.push(enriched);
       if (!assessment.accepted) state.rejections.push({ provider: enriched.provider, id: enriched.id, query, reasons: assessment.rejectionReasons });
       else state.candidates.push(enriched);
@@ -294,7 +310,7 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
           if (Number.isFinite(inspection.height)) selected.height = inspection.height;
           return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection };
         }
-        catch (error) { fs.rmSync(localPath, { force: true }); return { ok: false, state, error }; }
+        catch (error) { fs.rmSync(localPath, { force: true }); if (/hard-rejected/i.test(error.message)) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${selected.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : selected.provider} | domain=${selected.sourceDomain || 'unknown'} | query="${String(selected.query || '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${error.message.replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}"`); return { ok: false, state, error }; }
       });
       pending = [];
       for (const result of results) {
@@ -425,7 +441,7 @@ export const createImageReviewArtifacts = async ({ assets, workspace, ffmpeg = r
   try {
     for (let index = 0; index < assets.length; index += 1) {
       const asset = assets[index]; const tile = path.join(workspace, 'review', `.tile-${index}.jpg`); const text = path.join(workspace, 'review', `.tile-${index}.txt`);
-      fs.writeFileSync(text, `${asset.optionText || asset.text || `Question ${asset.questionIndex + 1} ${asset.slot}`}\nProvider: ${asset.provider}\nQuery: ${asset.queryUsed}\nSource: ${asset.sourceDomain || 'unknown'}`);
+      fs.writeFileSync(text, `${asset.optionText || asset.text || `Question ${asset.questionIndex + 1} ${asset.slot}`}\nProvider: ${asset.provider}\nQuery: ${asset.queryUsed}\nSource: ${asset.sourceDomain || 'unknown'}${asset.hardRejectionReason ? `\nHard reject: ${asset.hardRejectionReason}` : ''}`);
       const filter = `scale=360:230:force_original_aspect_ratio=increase,crop=360:230,pad=360:360:0:0:black,drawtext=fontfile=${reviewFilterPath(font)}:textfile='${reviewFilterPath(text)}':fontcolor=white:fontsize=16:line_spacing=3:x=8:y=240`;
       await runReviewCommand(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', asset.localPath, '-vf', filter, '-frames:v', '1', tile]); tilePaths.push(tile);
     }
