@@ -10,6 +10,21 @@ import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLoc
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
+const plainLogValue = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
+const logSelectedImageDiagnostics = (assets, jobId) => {
+  for (const asset of assets) {
+    const provider = asset.selectedProvider === 'DuckDuckGo Images' ? 'DuckDuckGo' : asset.selectedProvider || asset.provider || 'unknown';
+    console.info(`WYR_SELECTED_IMAGE | Q${asset.questionIndex + 1}${asset.slot} | provider=${provider} | domain=${plainLogValue(asset.sourceDomain || 'unknown')} | option="${plainLogValue(asset.text)}" | query="${plainLogValue(asset.selectedQuery || asset.queryUsed)}" | quality=${asset.qualityScore ?? 'unknown'} | relevance=${asset.relevanceScore ?? 'unknown'} | fallback="${plainLogValue(asset.fallbackReason || '')}"`);
+  }
+  const selectedCounts = assets.reduce((counts, asset) => {
+    const provider = asset.selectedProvider || asset.provider;
+    if (provider === 'DuckDuckGo Images') counts.DuckDuckGo += 1;
+    if (provider === 'Pexels') counts.Pexels += 1;
+    return counts;
+  }, { DuckDuckGo: 0, Pexels: 0 });
+  const rejected = assets.reduce((count, asset) => count + (asset.candidateDiagnostics?.filter(candidate => !candidate.accepted || !candidate.validAsset).length || 0) + (asset.rejectionReasons?.length || 0), 0);
+  console.info(`WYR_IMAGE_JOB_SUMMARY | jobId=${plainLogValue(jobId)} | selected=${assets.length} | DuckDuckGo=${selectedCounts.DuckDuckGo} | Pexels=${selectedCounts.Pexels} | rejected=${rejected}`);
+};
 
 export const runPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
@@ -54,7 +69,7 @@ export const runPipeline = async ({ job, store, config }) => {
     update({ status: 'verifying', stage: 'verifying', progress: 95 });
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
-    update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); log('job.completed', { jobId: job.id, outputPath, verification });
+    update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); logSelectedImageDiagnostics(assets, job.id); log('job.completed', { jobId: job.id, outputPath, verification });
   } catch (error) {
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }
