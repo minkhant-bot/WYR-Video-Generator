@@ -35,8 +35,28 @@ test('Pexels search and download concurrency is bounded while output order stays
 
 test('image queries expand difficult concepts into several concise visual searches', () => {
   const queries = buildImageQueries({ text: 'Read Minds', searchQuery: 'telepathy mind reading' });
-  assert.ok(queries.length >= 2); assert.ok(queries.some(query => /telepathy|brain|thoughts/.test(query)));
+  assert.ok(queries.length >= 3); assert.ok(queries.includes('telepathy person reading thoughts')); assert.ok(queries.includes('two people psychic mind connection'));
   assert.equal(queries.every(query => query.split(' ').length <= 8), true);
+});
+
+test('weak generic Pexels visual fails the strong short-form quality gate', () => {
+  const assessment = assessImageCandidate({ id: 'weak', width: 2400, height: 1400, alt: 'two people holding a brain model generic illustration', downloadUrl: 'https://images.test/brain.jpg' }, { text: 'Read Minds' });
+  assert.equal(assessment.accepted, true);
+  assert.equal(assessment.pexelsQualityPassed, false);
+  assert.match(assessment.pexelsQualityReasons.join(' '), /generic|visual impact|visual quality/);
+
+  const wallet = assessImageCandidate({ id: 'wallet', width: 2400, height: 1400, alt: 'generic wallet and bank card finance illustration', downloadUrl: 'https://images.test/wallet.jpg' }, { text: 'Double Bank Balance Instantly' });
+  assert.equal(wallet.pexelsQualityPassed, false);
+  assert.match(wallet.pexelsQualityReasons.join(' '), /generic|increasing|multiplying|abundance/);
+  const abundance = assessImageCandidate({ id: 'abundance', width: 2400, height: 1400, alt: 'dramatic person surrounded by massive stacks of money and growing wealth', downloadUrl: 'https://images.test/wealth.jpg' }, { text: 'Double Bank Balance Instantly' });
+  assert.equal(abundance.pexelsQualityPassed, true);
+});
+
+test('strong specific Pexels visual passes and a specific photograph is not rejected merely for being stock photography', () => {
+  const assessment = assessImageCandidate({ id: 'strong', width: 2400, height: 1400, alt: 'dramatic photograph of a person stepping through a glowing teleportation portal', downloadUrl: 'https://images.test/portal.jpg' }, { text: 'Teleport Anywhere' });
+  assert.equal(assessment.accepted, true);
+  assert.equal(assessment.pexelsQualityPassed, true);
+  assert.ok(assessment.qualityScore >= 72);
 });
 
 test('candidate relevance gate rejects weak, undersized, and watermarked results', () => {
@@ -59,7 +79,7 @@ test('candidate relevance gate rejects weak, undersized, and watermarked results
 
 test('weak Pexels result invokes web fallback and preserves provenance and license metadata', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-fallback-'));
-  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'office coworkers', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
+  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person near dragon generic illustration', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
   const web = id => ({ id: `w${id}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: 'person petting friendly fantasy dragon creature', sourcePageUrl: `https://example.test/photos/dragon-${id}`, sourceDomain: 'example.test', originalImageUrl: `https://images.example.test/dragon-${id}-original.jpg`, downloadUrl: `https://images.example.test/dragon-${id}.jpg`, license: 'unknown', usageRights: 'unknown — verify with the source owner before reuse', position: id });
   const provider = { search: async () => [weakPexels(1), weakPexels(2)], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
   const webProvider = { name: 'DuckDuckGo Images', search: async () => [web(1), web(2)], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
@@ -72,9 +92,25 @@ test('weak Pexels result invokes web fallback and preserves provenance and licen
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('strong specific Pexels result remains primary without invoking web fallback', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-strong-pexels-')); let webCalls = 0;
+  const strong = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.pexels.test/p${id}.jpg`, downloadUrl: `https://images.pexels.test/p${id}.jpg`, position: id });
+  const weakFirst = { id: 'weak-first', provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', originalImageUrl: 'https://images.pexels.test/weak-first.jpg', downloadUrl: 'https://images.pexels.test/weak-first.jpg', position: 0 };
+  const provider = { search: async () => [weakFirst, strong(1), strong(2)], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
+  const webProvider = { name: 'DuckDuckGo Images', search: async () => { webCalls += 1; return []; }, downloadAsset: async () => {} };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 2, concurrency: 2 });
+    assert.equal(assets.every(asset => asset.provider === 'Pexels'), true);
+    assert.equal(assets.every(asset => asset.pexelsPassed), true);
+    assert.equal(assets.some(asset => asset.id === 'weak-first'), false);
+    assert.equal(webCalls, 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('blocked web fallback uses best valid Pexels candidate and records the reason', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-blocked-'));
-  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'abstract light', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
+  const weakPexels = id => ({ id: `p${id}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'person beside glowing teleportation portal generic illustration', sourcePageUrl: `https://pexels.com/photo/p${id}`, originalImageUrl: `https://images.pexels.com/p${id}.jpg`, downloadUrl: `https://images.pexels.com/p${id}.jpg`, position: id });
   const provider = { search: async () => [weakPexels(1), weakPexels(2)], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
   const webProvider = { name: 'DuckDuckGo Images', search: async () => { throw new Error('HTTP 429 blocked'); }, downloadAsset: async () => {} };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' } }] };
@@ -104,7 +140,7 @@ test('selection rejects the same underlying image across provider IDs and URLs',
 
 test('broken web candidates fall back to a downloadable valid Pexels image', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-broken-'));
-  const provider = { search: async query => [{ id: `pexels-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'abstract glowing light', originalImageUrl: `https://images.pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.pexels.test/${encodeURIComponent(query)}.jpg`, position: 0 }], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
+  const provider = { search: async query => [{ id: `pexels-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: query.includes('frozen') ? 'person holding a frozen clock generic illustration' : 'person beside glowing teleportation portal generic illustration', originalImageUrl: `https://images.pexels.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.pexels.test/${encodeURIComponent(query)}.jpg`, position: 0 }], downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); } };
   const webProvider = { name: 'DuckDuckGo Images', search: async query => [{ id: `web-${query}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: `person entering ${query}`, originalImageUrl: `https://images.example.test/${encodeURIComponent(query)}-original.jpg`, downloadUrl: `https://images.example.test/${encodeURIComponent(query)}.jpg`, position: 0 }], downloadAsset: async () => { throw new Error('HTTP 404'); } };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Stop Time', searchQuery: 'frozen clock time' } }] };
   try {
