@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assessImageCandidate, buildImageQueries, classifyImageStats, compareImageCandidates, createImageReviewArtifacts, findAndDownloadImages, lockSelectedImageAssets } from './images.js';
+import { assessImageCandidate, buildAlternateImageQueries, buildImageQueries, classifyImageStats, compareImageCandidates, createImageReviewArtifacts, findAndDownloadImages, lockSelectedImageAssets } from './images.js';
 import { resolveFfmpegPath } from './runtime.js';
+import { buildNarration } from './audio.js';
 
 const fixtureFfmpeg = resolveFfmpegPath();
 const writeCandidate = (candidate, destination) => {
@@ -281,4 +282,49 @@ test('selected image files are hash-locked and review contact sheet uses the loc
     const review = await createImageReviewArtifacts({ assets: locked, workspace }); assert.ok(fs.statSync(review.contactSheetPath).size > 0); assert.equal(path.basename(review.selectedImagesDir), 'selected-images');
     const manifest = JSON.parse(fs.readFileSync(path.join(workspace, 'review', 'selected-images.json'))); assert.deepEqual(manifest.map(asset => asset.sha256), locked.map(asset => asset.sha256));
   } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('normal image failure recovers one slot with bounded alternate visual queries and preserves accepted slots', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-recovery-alt-')); const downloads = []; const searches = [];
+  const good = (id, alt) => ({ id, provider: 'Pexels', width: 2400, height: 1400, alt, originalImageUrl: `https://images.test/${id}.jpg`, downloadUrl: `https://images.test/${id}.jpg` });
+  const provider = {
+    search: async query => { searches.push(query); if (query.includes('levitating')) return [good('gravity-recovered', 'person controlling gravity objects levitating cinematic')]; if (query.includes('teleport')) return [good('teleport-original', 'dramatic cinematic person stepping through a glowing teleportation portal')]; return [{ id: `weak-${query}`, provider: 'Pexels', width: 2400, height: 1400, alt: 'generic office stock', originalImageUrl: `https://images.test/weak-${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/weak-${encodeURIComponent(query)}.jpg` }]; },
+    downloadAsset: async (selected, destination) => { downloads.push(selected.id); writeCandidate(selected, destination); },
+  };
+  const webProvider = { name: 'DuckDuckGo Images', search: async () => [], downloadAsset: async () => {} };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Control Gravity' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 3, maxProviderRequests: 20, maxWallClockMs: 5000 } });
+    assert.equal(assets[0].id, 'teleport-original'); assert.equal(assets[0].text, 'Teleport Anywhere'); assert.equal(assets[1].id, 'gravity-recovered'); assert.equal(assets[1].text, 'Control Gravity');
+    assert.equal(downloads.filter(id => id === 'teleport-original').length, 1); assert.ok(searches.some(query => query.includes('levitating')));
+    assert.deepEqual(buildAlternateImageQueries({ text: 'Control Gravity' }).length, 3);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('alternate exhaustion invokes Groq visual reformulation once and recovers without changing displayed text', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-recovery-groq-')); let groqCalls = 0; const queries = [];
+  const candidate = (id, alt) => ({ id, provider: 'Pexels', width: 2400, height: 1400, alt, originalImageUrl: `https://images.test/${id}.jpg`, downloadUrl: `https://images.test/${id}.jpg` });
+  const provider = { search: async query => { queries.push(query); if (query.includes('human controlling gravity')) return [candidate('groq-recovered', 'human controlling gravity objects levitating cinematic')]; if (query.includes('lightning')) return [candidate('lightning-original', 'person controlling lightning dramatic cinematic electricity')]; return [candidate(`weak-${queries.length}`, 'generic office stock')]; }, downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const visualQueryProvider = { generateVisualQueries: async ({ optionText, attemptedQueries }) => { groqCalls += 1; assert.equal(optionText, 'Control Gravity'); assert.ok(attemptedQueries.length >= 2); return ['human controlling gravity objects levitating cinematic']; } };
+  const webProvider = { name: 'DuckDuckGo Images', search: async () => [], downloadAsset: async () => {} };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Control Gravity' }, optionB: { text: 'Control Lightning' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 12, maxWallClockMs: 5000 } });
+    assert.equal(groqCalls, 1); assert.equal(assets[0].text, 'Control Gravity'); assert.equal(assets[0].narration, undefined); assert.equal(assets[0].queryUsed, 'human controlling gravity objects levitating cinematic');
+    assert.equal(buildNarration(plan.questions[0]), 'Control Gravity, or control Lightning?');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovery keeps the strict downloaded-image quality gate and reports bounded exhaustion details', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-image-recovery-bounded-')); let calls = 0;
+  const blankCandidate = query => ({ id: `blank-${calls}`, provider: 'Pexels', width: 2400, height: 1400, alt: query.includes('gravity') ? 'person controlling gravity objects levitating cinematic' : 'generic office stock', originalImageUrl: `https://images.test/blank-${calls}.jpg`, downloadUrl: `https://images.test/blank-${calls}.jpg` });
+  const provider = { search: async query => { calls += 1; return query.includes('lightning') ? [{ id: 'keep-lightning', provider: 'Pexels', width: 2400, height: 1400, alt: 'person controlling lightning dramatic cinematic electricity', originalImageUrl: 'https://images.test/keep-lightning.jpg', downloadUrl: 'https://images.test/keep-lightning.jpg' }] : [blankCandidate(query)]; }, downloadAsset: async (selected, destination) => selected.id === 'keep-lightning' ? writeCandidate(selected, destination) : writeBlankCandidate(destination) };
+  const visualQueryProvider = { generateVisualQueries: async () => { calls += 1; throw Object.assign(new Error('HTTP 429 blocked'), { status: 429, code: 'rate_limit_exceeded' }); } };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Control Gravity' }, optionB: { text: 'Control Lightning' } }] };
+  try {
+    await assert.rejects(() => findAndDownloadImages({ plan, provider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 4, maxWallClockMs: 5000 } }), error => {
+      assert.match(error.message, /question 1, option A \(Control Gravity\)/); assert.match(error.message, /Queries attempted:/); assert.match(error.message, /Provider attempts:/); assert.match(error.message, /downloaded image rejected/); assert.match(error.message, /Request count:/); assert.match(error.message, /Recovery elapsed:/); return true;
+    });
+    assert.ok(calls <= 4);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

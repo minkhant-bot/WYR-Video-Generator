@@ -103,6 +103,20 @@ test('Groq rate-limit recovery has bounded production defaults', () => {
   }
 });
 
+test('image recovery has bounded production defaults and rejects unsafe bounds', () => {
+  const names = ['WYR_IMAGE_RECOVERY_QUERY_ROUNDS', 'WYR_IMAGE_RECOVERY_MAX_REQUESTS', 'WYR_IMAGE_RECOVERY_MAX_MS'];
+  const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    for (const name of names) delete process.env[name];
+    const defaults = getConfig(); assert.deepEqual([defaults.imageRecoveryQueryRounds, defaults.imageRecoveryMaxRequests, defaults.imageRecoveryMaxMs], [3, 24, 45_000]);
+    for (const [name, value] of [['WYR_IMAGE_RECOVERY_QUERY_ROUNDS', '4'], ['WYR_IMAGE_RECOVERY_MAX_REQUESTS', '0'], ['WYR_IMAGE_RECOVERY_MAX_MS', '999']]) {
+      for (const resetName of names) delete process.env[resetName]; process.env[name] = value; assert.throws(() => getConfig(), new RegExp(`${name} must be`));
+    }
+  } finally {
+    for (const [name, value] of Object.entries(original)) value === undefined ? delete process.env[name] : process.env[name] = value;
+  }
+});
+
 test('production concurrency controls have safe defaults and accept environment overrides', () => {
   const variables = { WYR_PEXELS_CONCURRENCY: 4, WYR_TTS_CONCURRENCY: 4, WYR_SCENE_RENDER_CONCURRENCY: 2, WYR_FFMPEG_THREADS: 4 };
   const original = Object.fromEntries(Object.keys(variables).map(name => [name, process.env[name]]));

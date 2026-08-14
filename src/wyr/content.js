@@ -168,6 +168,35 @@ export class GroqContentProvider extends ContentProvider {
       throw new Error(`Groq content generation failed after ${STRUCTURED_ATTEMPTS} structured attempt(s) and one JSON-object fallback: ${error.message}`, { cause: error });
     }
   }
+  async generateVisualQueries({ optionText, attemptedQueries = [], maxQueries = 3 }) {
+    const response = await fetchWithTimeout(GROQ_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0.3,
+        max_completion_tokens: 300,
+        messages: [
+          { role: 'system', content: 'Return only JSON with a queries array. Do not rewrite the choice or dilemma.' },
+          { role: 'user', content: `Create up to ${maxQueries} short, ordered image-search phrases for the same Would You Rather option. The phrases must describe concrete visible scenes, people, objects, actions, or environments that would depict this exact concept. Do not change the option, invent a different ability, add text-heavy graphics, or include explanations. Avoid these already-tried queries: ${attemptedQueries.join(' | ') || 'none'}. Option text: ${optionText}` },
+        ],
+        response_format: { type: 'json_object' },
+      }),
+    }, this.timeoutMs);
+    if (!response.ok) throw await groqErrorFromResponse(response);
+    let payload;
+    try { payload = await response.json(); } catch { throw new GroqGenerationError('Groq returned an invalid visual-query response.', 'invalid_generation'); }
+    const message = payload?.choices?.[0]?.message;
+    if (message?.refusal) throw new GroqGenerationError('Groq refused visual-query generation.', 'refusal');
+    let parsed;
+    try { parsed = JSON.parse(message?.content || ''); } catch { throw new GroqGenerationError('Groq returned invalid visual-query JSON.', 'invalid_generation'); }
+    const queries = Array.isArray(parsed) ? parsed : parsed?.queries;
+    if (!Array.isArray(queries)) throw new GroqGenerationError('Groq visual-query response did not include a queries array.', 'invalid_generation');
+    const attempted = new Set(attemptedQueries.map(query => normalize(query).toLowerCase()));
+    const normalized = [...new Set(queries.map(normalize).filter(query => query.length >= 3 && query.length <= 120 && !attempted.has(query.toLowerCase())))].slice(0, maxQueries);
+    if (!normalized.length) throw new GroqGenerationError('Groq returned no new visual-search queries.', 'invalid_generation');
+    return normalized;
+  }
 }
 
 export const addIllustrativePercentages = plan => ({

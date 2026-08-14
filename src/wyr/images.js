@@ -58,6 +58,18 @@ export const buildImageQueries = option => {
   ].filter(query => query.length >= 3))];
 };
 
+const CONTROL_WORDS = new Set(['control', 'command', 'create', 'make', 'become', 'have', 'own', 'read', 'see', 'stop', 'travel', 'befriend', 'ride', 'live', 'walk', 'fly', 'turn', 'change']);
+export const buildAlternateImageQueries = option => {
+  const words = normalizeWords(option.text); const nouns = words.filter(word => !CONTROL_WORDS.has(word));
+  const primary = nouns.length ? nouns.join(' ') : words.join(' ');
+  const controlling = words.some(word => ['control', 'command', 'create', 'make', 'change'].includes(word));
+  return [...new Set([
+    controlling ? `person controlling ${primary} objects levitating cinematic` : `person interacting with ${primary} cinematic`,
+    `human surrounded by ${primary} dramatic scene`,
+    `person using ${primary}${controlling ? ' power' : ''} science fiction cinematic`,
+  ].map(query => query.trim()).filter(query => query.length >= 3))];
+};
+
 const candidateText = candidate => `${candidate.alt || ''} ${candidate.title || ''} ${candidate.credit || ''}`.toLowerCase();
 const WATERMARK_PATTERN = /\b(watermark|watermarked|shutterstock|alamy|i\s*stock|dreamstime|depositphotos|123rf|getty images?|adobe stock|stock photo|freepik premium|impossible images)\b/i;
 const WATERMARK_HOST_PATTERN = /(^|\.)(shutterstock\.com|alamy\.com|istockphoto\.com|dreamstime\.com|depositphotos\.com|123rf\.com|gettyimages\.com|stock\.adobe\.com|freepik\.com|vectorstock\.com|vecteezy\.com|craiyon\.com|impossibleimages\.ai|stablediffusionweb\.com)$/i;
@@ -72,6 +84,7 @@ const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fanta
 export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
 export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['Pexels', 'DuckDuckGo Images'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES });
+export const IMAGE_RECOVERY_DEFAULTS = Object.freeze({ alternateQueryRounds: 3, maxProviderRequests: 24, maxWallClockMs: 45_000 });
 const candidateKeys = candidate => uniqueWords([candidate.provider && candidate.id ? `id:${candidate.provider}:${candidate.id}` : '', candidate.originalImageUrl ? `url:${candidate.originalImageUrl}` : '', candidate.downloadUrl ? `url:${candidate.downloadUrl.split('?')[0]}` : '', candidate.sha256 ? `sha256:${candidate.sha256}` : ''].filter(Boolean));
 const fileHash = filename => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
 const optionConcepts = option => uniqueWords(normalizeWords(option.text).flatMap(word => [word, ...(VISUAL_EXPANSIONS[word] || [])]));
@@ -162,10 +175,10 @@ export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpeg
   return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]) });
 };
 
-const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch }) => {
+const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch, phase = 'normal' }) => {
   const results = await mapWithConcurrency(jobs, Math.min(concurrency, provider.maxConcurrency || concurrency), async job => {
     try {
-      const operation = () => provider.search(job.query);
+      const operation = () => { job.state.providerRequestCount += 1; return provider.search(job.query); };
       const candidates = retrySearch ? await retry(operation, { attempts: 2, label: `${providerLabel} image search for "${job.query}"` }) : await operation();
       return { ...job, candidates, error: null };
     } catch (error) { return { ...job, candidates: [], error }; }
@@ -173,10 +186,10 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
   for (const result of results) {
     const { state, query, candidates, error } = result;
     if (error) {
-      state.searchAttempts.push({ provider: providerLabel, query, candidateCount: 0, error: error.message });
+      state.searchAttempts.push({ phase, provider: providerLabel, query, candidateCount: 0, error: error.message });
       state.providerErrors.push(`${providerLabel}: ${error.message}`); if (providerLabel !== 'Pexels') state.webProviderErrors.push(error.message); continue;
     }
-    state.searchAttempts.push({ provider: providerLabel, query, candidateCount: candidates.length, error: null });
+    state.searchAttempts.push({ phase, provider: providerLabel, query, candidateCount: candidates.length, error: null });
     for (const candidate of candidates) {
       const assessment = assessImageCandidate(candidate, state.option);
       const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
@@ -188,16 +201,16 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
   }
 };
 
-const collectCandidates = async ({ states, provider, providerLabel, concurrency, retrySearch, progressive = false }) => {
+const collectCandidates = async ({ states, provider, providerLabel, concurrency, retrySearch, progressive = false, phase = 'normal' }) => {
   if (!progressive) {
-    await collectCandidateJobs({ jobs: states.flatMap(state => state.queries.map(query => ({ state, query }))), provider, providerLabel, concurrency, retrySearch });
+    await collectCandidateJobs({ jobs: states.flatMap(state => state.queries.map(query => ({ state, query }))), provider, providerLabel, concurrency, retrySearch, phase });
     return;
   }
   const queryCount = Math.max(0, ...states.map(state => state.queries.length));
   for (let queryIndex = 0; queryIndex < queryCount; queryIndex += 1) {
     const jobs = states.filter(state => (queryIndex < 2 || state.candidates.length === 0) && state.queries[queryIndex]).map(state => ({ state, query: state.queries[queryIndex] }));
     if (!jobs.length) break;
-    await collectCandidateJobs({ jobs, provider, providerLabel, concurrency, retrySearch });
+    await collectCandidateJobs({ jobs, provider, providerLabel, concurrency, retrySearch, phase });
   }
 };
 
@@ -226,9 +239,10 @@ const reserve = (candidate, used) => candidateKeys(candidate).forEach(key => use
 const release = (candidate, used) => candidateKeys(candidate).forEach(key => used.delete(key));
 const choose = (state, used) => state.pool.find(candidate => !state.failedKeys.has(candidateKeys(candidate).join('|')) && !conflicts(candidate, used));
 
-export const findAndDownloadImages = async ({ plan, provider, webProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage }) => {
+export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
-  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [] }));
+  const recoveryConfig = { ...IMAGE_RECOVERY_DEFAULTS, ...recovery };
+  const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, maxRetries + 1), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [] }));
   await collectCandidates({ states, provider, providerLabel: 'Pexels', concurrency, retrySearch: true });
   for (const state of states) {
     const rankedPexels = rankedUnique(state.candidates.filter(candidate => candidate.provider === 'Pexels')).slice(0, MAX_RANKED_CANDIDATES);
@@ -296,11 +310,60 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     for (const state of brokenPexelsStates) { state.webCandidates = rankedUnique(state.candidates).slice(0, MAX_RANKED_CANDIDATES); state.pool = state.webCandidates; state.selected = choose(state, used); if (state.selected) reserve(state.selected, used); }
     await downloadSelections(brokenPexelsStates);
   }
+  const failedStates = states.filter(state => !state.localPath);
+  for (const state of failedStates) {
+    const recoveryStartedAt = Date.now(); const deadline = recoveryStartedAt + recoveryConfig.maxWallClockMs;
+    const canRecover = () => state.providerRequestCount < recoveryConfig.maxProviderRequests && Date.now() < deadline;
+    const searchRecoveryProvider = async (query, recoveryProvider, providerLabel) => {
+      if (!recoveryProvider || !canRecover()) return false;
+      await collectCandidateJobs({ jobs: [{ state, query }], provider: recoveryProvider, providerLabel, concurrency: 1, retrySearch: false, phase: 'recovery' });
+      return true;
+    };
+    const tryRecoveryCandidates = async () => {
+      if (Date.now() >= deadline) return false;
+      state.pool = rankedUnique([...state.candidates, ...state.pexelsFallbackCandidates]);
+      state.selected = choose(state, used);
+      if (state.selected) reserve(state.selected, used);
+      await downloadSelections([state]);
+      return Boolean(state.localPath);
+    };
+    const alternateQueries = buildAlternateImageQueries(state.option).slice(0, recoveryConfig.alternateQueryRounds);
+    for (const query of alternateQueries) {
+      if (!canRecover()) break;
+      state.recoveryQueries.push(query);
+      await searchRecoveryProvider(query, provider, 'Pexels (recovery)');
+      await searchRecoveryProvider(query, webProvider, webProvider?.name ? `${webProvider.name} (recovery)` : 'Web image search (recovery)');
+    }
+    if (await tryRecoveryCandidates()) continue;
+    if (visualQueryProvider && typeof visualQueryProvider.generateVisualQueries === 'function' && canRecover()) {
+      const groqQuery = `visual reformulation for option: ${state.option.text}`;
+      state.providerRequestCount += 1;
+      try {
+        const reformulated = await visualQueryProvider.generateVisualQueries({ optionText: state.option.text, attemptedQueries: [...state.queries, ...state.recoveryQueries], maxQueries: recoveryConfig.alternateQueryRounds });
+        state.searchAttempts.push({ phase: 'recovery', provider: 'Groq visual reformulation', query: groqQuery, candidateCount: reformulated.length, error: null });
+        for (const query of reformulated) {
+          if (!canRecover()) break;
+          state.recoveryQueries.push(query);
+          await searchRecoveryProvider(query, provider, 'Pexels (Groq recovery)');
+          await searchRecoveryProvider(query, webProvider, webProvider?.name ? `${webProvider.name} (Groq recovery)` : 'Web image search (Groq recovery)');
+        }
+      } catch (error) {
+        state.searchAttempts.push({ phase: 'recovery', provider: 'Groq visual reformulation', query: groqQuery, candidateCount: 0, error: error.message });
+        state.providerErrors.push(`Groq visual reformulation: ${error.message}`);
+      }
+      if (await tryRecoveryCandidates()) continue;
+    }
+    state.recoveryElapsedMs = Date.now() - recoveryStartedAt;
+  }
   const missing = states.find(state => !state.localPath);
-  if (missing) throw new Error(`No downloadable relevant image found for question ${missing.option.questionIndex + 1}, option ${missing.option.slot}. Pexels and optional web fallback were exhausted.`);
+  if (missing) {
+    const attempts = missing.searchAttempts.map(attempt => `${attempt.phase || 'normal'} ${attempt.provider} query="${attempt.query}" candidates=${attempt.candidateCount}${attempt.error ? ` error=${attempt.error}` : ''}`).join(' | ') || 'none';
+    const reasons = missing.rejections.flatMap(rejection => rejection.reasons || []).concat(missing.candidateDiagnostics.flatMap(candidate => candidate.reasons || [])).filter(Boolean);
+    throw new Error(`No downloadable relevant image found for question ${missing.option.questionIndex + 1}, option ${missing.option.slot} (${missing.option.text}). Pexels and optional web fallback were exhausted. Queries attempted: ${missing.searchAttempts.map(attempt => attempt.query).join(' | ') || 'none'}. Provider attempts: ${attempts}. Candidate rejection reasons: ${[...new Set(reasons)].join('; ') || 'none'}. Request count: ${missing.providerRequestCount}. Recovery elapsed: ${missing.recoveryElapsedMs ?? recoveryConfig.maxWallClockMs}ms.`);
+  }
   const selections = states.map(state => ({
     ...state.option, ...state.selected, queryUsed: state.selected.query, searchAttempts: state.searchAttempts, rejectionReasons: state.rejections, candidateDiagnostics: state.candidateDiagnostics,
-    queryOrder: state.queries, candidateCount: state.searchAttempts.reduce((sum, attempt) => sum + attempt.candidateCount, 0),
+    queryOrder: state.queries, recoveryQueries: state.recoveryQueries, candidateCount: state.searchAttempts.reduce((sum, attempt) => sum + attempt.candidateCount, 0), providerRequestCount: state.providerRequestCount, recoveryElapsedMs: state.recoveryElapsedMs || 0,
     webFallbackRequired: Boolean(state.webFallbackRequired), pexelsPassed: state.pexelsGatePassed,
     pexelsBestCandidate: state.pexelsBestCandidate ? { id: state.pexelsBestCandidate.id, query: state.pexelsBestCandidate.query, alt: state.pexelsBestCandidate.alt, qualityScore: state.pexelsBestCandidate.qualityScore, conceptClarity: state.pexelsBestCandidate.conceptClarity, specificity: state.pexelsBestCandidate.specificity, visualImpact: state.pexelsBestCandidate.visualImpact, wyrSuitability: state.pexelsBestCandidate.wyrSuitability, passed: state.pexelsBestCandidate.pexelsQualityPassed, reasons: state.pexelsBestCandidate.pexelsQualityReasons } : null,
     fallbackReason: state.selected.provider === 'Pexels' && state.webFallbackRequired ? (state.webProviderErrors.join('; ') || 'web image search returned no relevant downloadable candidate') : null, localPath: state.localPath, filename: state.filename,

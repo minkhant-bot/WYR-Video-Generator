@@ -84,3 +84,17 @@ test('Groq rejects an invalid JSON Object fallback plan', async () => withMocked
 ], async () => {
   await assert.rejects(() => provider().generatePlan(8), /must contain exactly 8 questions/);
 }));
+
+test('Groq visual-query reformulation is one bounded request and preserves the option text', async () => withMockedFetch([
+  new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ queries: ['person floating objects telekinesis cinematic', 'human controlling gravity objects levitating'] }) } }] }), { status: 200 }),
+], async requests => {
+  const optionText = 'Control Gravity'; const queries = await provider().generateVisualQueries({ optionText, attemptedQueries: ['control gravity'], maxQueries: 3 });
+  assert.deepEqual(queries, ['person floating objects telekinesis cinematic', 'human controlling gravity objects levitating']);
+  assert.equal(requests.length, 1); assert.match(requests[0].body.messages[1].content, new RegExp(optionText));
+  assert.equal(requests[0].body.messages[1].content.includes('rewrite the choice'), false);
+}));
+
+test('Groq visual-query reformulation exposes HTTP 429 without retrying', async () => withMockedFetch([rateLimitResponse('1.5')], async requests => {
+  await assert.rejects(() => provider().generateVisualQueries({ optionText: 'Control Gravity' }), error => { assert.equal(error.status, 429); assert.equal(error.retryAfterMs, 1500); return true; });
+  assert.equal(requests.length, 1);
+}));
