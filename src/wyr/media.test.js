@@ -118,6 +118,33 @@ test('rendering consumes locked local assets without image-provider calls', asyn
   assert.deepEqual(segments, ['locked-local-segment.mp4']); assert.equal(providerCalls, 0); assert.equal(typeof provider.search, 'function');
 });
 
+test('a genuine FFmpeg failure (undecodable input) rejects the render and is never silently reported as a successful segment', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-ffmpeg-failure-'));
+  const garbagePath = path.join(root, 'not-an-image.jpg');
+  fs.writeFileSync(garbagePath, Buffer.alloc(20_000, 65)); // correct extension, not valid image data
+  try {
+    const assets = [
+      { questionIndex: 0, slot: 'A', provider: 'Pexels', localPath: garbagePath },
+      { questionIndex: 0, slot: 'B', provider: 'Pexels', localPath: garbagePath },
+    ];
+    const plan = { questions: [{ index: 0, optionA: { text: 'Explore Space', percentage: 55 }, optionB: { text: 'Explore Oceans', percentage: 45 } }] };
+    await assert.rejects(
+      () => renderSceneSegments({ plan, assets, duration: 1, renderDir: root, sceneConcurrency: 1, ffmpegThreads: 1 }),
+      /exited with code/,
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('verifyVideo rejects a zero-byte or missing output file before ever probing it, instead of reporting it completed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-empty-output-'));
+  try {
+    const emptyPath = path.join(root, 'empty.mp4');
+    fs.writeFileSync(emptyPath, Buffer.alloc(0));
+    await assert.rejects(() => verifyVideo(emptyPath, {}), /not a non-empty regular file/);
+    await assert.rejects(() => verifyVideo(path.join(root, 'does-not-exist.mp4'), {}), error => Boolean(error));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('verification authoritatively rejects any output at or above the 60s Shorts limit, independent of the expected duration', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-duration-gate-')); const ffmpeg = resolveFfmpegPath();
   try {

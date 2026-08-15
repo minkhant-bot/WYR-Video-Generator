@@ -48,7 +48,9 @@ const poll = async () => {
   }
 
   if (job?.status === 'failed') {
-    showError(new Error(job.error || 'Job failed.'));
+    status.hidden = true;
+    const label = job.errorCode ? `${job.errorCode}: ${job.error || 'Job failed.'}` : (job.error || 'Job failed.');
+    showError(new Error(label));
   }
 };
 
@@ -62,6 +64,9 @@ startButton.onclick = async () => {
     await poll();
   } catch (error) {
     showError(error);
+  } finally {
+    // Re-enable on EVERY outcome (network error, job.status === 'failed', or completion) -- a
+    // failed job must never leave the user stuck unable to try again.
     startButton.disabled = false;
   }
 };

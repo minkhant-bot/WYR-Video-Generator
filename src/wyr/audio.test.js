@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, RATE_COMPRESSION_LADDER } from './audio.js';
+import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, RATE_COMPRESSION_LADDER, TtsGenerationError } from './audio.js';
 import { WYR_TEMPLATE } from './template.js';
 import { assertProductionAudioInputs } from './media.js';
 
@@ -69,6 +69,70 @@ test('compression keeps the shortest achievable narration and never abandons or 
     assert.deepEqual(harness.calls, ['-10%', '-5%', '+0%', '+8%', '+15%', '+22%']);
     assert.equal(voiceovers[0].rate, '+22%');
     assert.equal(voiceovers[0].duration, 2.4);
+    assert.ok(fs.statSync(voiceovers[0].localPath).size > 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a transient TTS failure on attempt 1 is retried and succeeds on attempt 2, without touching the duration budget path', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-transient-'));
+  try {
+    let calls = 0;
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
+      ttsFactory: () => ({ call: async () => { calls += 1; if (calls === 1) throw new Error('transient network blip'); return { data: Buffer.alloc(1200, 1), subtitles: [] }; } }),
+      measureDuration: async () => 3.0,
+    });
+    assert.equal(calls, 2, 'the transient failure must be retried exactly once more, not abandoned');
+    assert.equal(voiceovers[0].duration, 3.0);
+    assert.ok(fs.statSync(voiceovers[0].localPath).size > 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('audio that fails ffprobe measurement (corrupt/truncated despite passing the byte-size check) is retried, and the on-disk file is never left holding the unverified bytes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-unmeasurable-'));
+  try {
+    let calls = 0;
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
+      ttsFactory: () => ({ call: async () => { calls += 1; return { data: Buffer.alloc(1200, calls), subtitles: [] }; } }),
+      measureDuration: async candidatePath => { if (calls === 1) throw new Error('FFprobe returned an invalid narration duration'); return 2.75; },
+    });
+    assert.equal(calls, 2, 'an unmeasurable candidate must be retried, not accepted as-is');
+    assert.equal(voiceovers[0].duration, 2.75);
+    const finalBytes = fs.readFileSync(voiceovers[0].localPath);
+    assert.equal(finalBytes.equals(Buffer.alloc(1200, 2)), true, 'localPath must hold the SECOND (verified) attempt, never the first unmeasurable one');
+    assert.equal(fs.readdirSync(dir).filter(name => name.includes('.candidate-')).length, 0, 'no stray unverified candidate file should be left behind');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a scene whose narration cannot be produced after bounded retries throws TtsGenerationError and leaves no partial file behind', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-final-failure-'));
+  try {
+    await assert.rejects(
+      () => generateVoiceovers({
+        plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
+        ttsFactory: () => ({ call: async () => { throw new Error('Edge TTS service unavailable'); } }),
+        measureDuration: async () => 3.0,
+      }),
+      error => { assert.ok(error instanceof TtsGenerationError); assert.equal(error.code, 'TTS_FAILED'); assert.match(error.message, /scene 1/); return true; },
+    );
+    const expectedPath = path.join(dir, 'q01-narration.mp3');
+    assert.equal(fs.existsSync(expectedPath), false, 'a scene that never succeeded must never leave a partial/invalid file at its localPath');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a compression-attempt failure never aborts the scene -- the earlier successful synthesis is kept', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-compress-fail-'));
+  try {
+    let compressionAttempted = false;
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
+      ttsFactory: options => ({ call: async () => { if (options.rate !== '-10%') { compressionAttempted = true; throw new Error('compression attempt network blip'); } return { data: Buffer.alloc(1200, 9), subtitles: [] }; } }),
+      measureDuration: async () => 6.0, sceneDurationBudget: 5.0,
+    });
+    assert.equal(compressionAttempted, true, 'a compression attempt must actually have been tried');
+    assert.equal(voiceovers[0].rate, '-10%', 'the original (successful) rate must be kept when every compression attempt fails');
+    assert.equal(voiceovers[0].duration, 6.0);
     assert.ok(fs.statSync(voiceovers[0].localPath).size > 0);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -163,5 +227,33 @@ test('production and fixture audio validation cannot silently omit the countdown
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });
   const base = { entrance: { localPath: 'entrance.wav' }, reveal: { localPath: 'reveal.wav' }, transition: { localPath: 'transition.wav' } };
   assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: base }), /all local SFX files/);
-  assert.equal(assertProductionAudioInputs({ plan, timeline, sfx: { ...base, countdownSequence: { localPath: 'countdown-sequence.wav' } } }), true);
+});
+
+test('assertProductionAudioInputs verifies every SFX/voiceover file actually exists and is non-empty before render starts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-audio-input-check-'));
+  try {
+    const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });
+    const realSfxPath = name => path.resolve('assets/sfx', name);
+    const validSfx = {
+      entrance: { localPath: realSfxPath('generated-scene-entrance-impact.wav') },
+      reveal: { localPath: realSfxPath('generated-result-reveal-sting.wav') },
+      transition: { localPath: realSfxPath('generated-scene-transition-whoosh.wav') },
+      countdownSequence: { localPath: realSfxPath('generated-countdown-sequence.wav') },
+    };
+    // All real, non-empty, on-disk files: passes.
+    assert.equal(assertProductionAudioInputs({ plan, timeline, sfx: validSfx }), true);
+
+    // A missing file (deleted/never-written) is caught with a clear message.
+    const missing = { ...validSfx, transition: { localPath: path.join(dir, 'does-not-exist.wav') } };
+    assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: missing }), /Required render input is missing/);
+
+    // A zero-byte file (write interrupted/corrupt) is also caught, not just a missing one.
+    const emptyPath = path.join(dir, 'empty.wav'); fs.writeFileSync(emptyPath, Buffer.alloc(0));
+    const empty = { ...validSfx, reveal: { localPath: emptyPath } };
+    assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: empty }), /empty or unreadable/);
+
+    // A missing voiceover file is caught the same way, before the expensive FFmpeg mix runs.
+    const missingVoiceoverPath = path.join(dir, 'missing-voice.mp3');
+    assert.throws(() => assertProductionAudioInputs({ plan, voiceovers: [{ questionIndex: 0, localPath: missingVoiceoverPath }], timeline, sfx: validSfx }), /Required render input is missing/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

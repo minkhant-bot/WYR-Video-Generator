@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EdgeTTS } from '@seepine/edge-tts';
-import { mapWithConcurrency, retry } from './utils.js';
+import { mapWithConcurrency, retry, log } from './utils.js';
 import { WYR_TEMPLATE } from './template.js';
 import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 
@@ -38,27 +38,58 @@ const fasterRateSteps = baseRate => {
   return steps.length ? steps : [baseRate];
 };
 
+// Thrown once a scene's narration cannot be produced (as valid, ffprobe-measurable audio) after
+// its own bounded retries -- distinct from a duration-budget failure so the pipeline/UI can tell
+// "TTS itself is broken" apart from "narration is simply too long to fit" (see pipeline.js).
+export class TtsGenerationError extends Error {
+  constructor(message, details = {}) { super(message); this.code = 'TTS_FAILED'; Object.assign(this, details); }
+}
+
 export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration, sceneDurationBudget = Infinity, maxCompressionAttempts = 5 }) => {
   fs.mkdirSync(audioDir, { recursive: true }); let completed = 0;
   return mapWithConcurrency(plan.questions, concurrency, async (question, index) => {
     const narration = buildNarration(question); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
-    const synthesize = async rateValue => {
-      await retry(async () => {
-        const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
-        let result;
-        try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
-        if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
-        fs.writeFileSync(localPath, result.data);
-      }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
-      return measureDuration(localPath);
-    };
-    let usedRate = rate; let duration = await synthesize(rate);
-    // Narration this long would push the scene past its duration budget; speed up speech (never truncate audio) until it fits.
+    // Synthesize AND measure inside the SAME bounded retry, writing to a private candidate path
+    // first: a file that fails ffprobe measurement (truncated/corrupt audio that still passed the
+    // byte-size check) is exactly as much a TTS failure as an empty response and must be retried
+    // the same way -- and `localPath` (the file the rest of the pipeline reads) is only ever
+    // replaced once a candidate is FULLY verified, so a later failed attempt (e.g. during optional
+    // rate compression) can never leave `localPath` holding not-yet-verified/corrupt bytes.
+    const synthesizeAndMeasure = rateValue => retry(async attempt => {
+      const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
+      let result;
+      try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
+      if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
+      const candidatePath = `${localPath}.candidate-${attempt}`;
+      fs.writeFileSync(candidatePath, result.data);
+      let measured;
+      try { measured = await measureDuration(candidatePath); }
+      catch (error) { fs.rmSync(candidatePath, { force: true }); throw error; }
+      if (!Number.isFinite(measured) || measured <= 0) { fs.rmSync(candidatePath, { force: true }); throw new Error(`Edge TTS produced unreadable or zero-duration audio for scene ${index + 1}.`); }
+      fs.renameSync(candidatePath, localPath);
+      return measured;
+    }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
+
+    let usedRate = rate; let duration;
+    try {
+      duration = await synthesizeAndMeasure(rate);
+    } catch (error) {
+      fs.rmSync(localPath, { force: true });
+      throw new TtsGenerationError(`Narration for scene ${index + 1} could not be generated after bounded retries: ${error.message}`, { sceneIndex: index, cause: error });
+    }
+    // Narration this long would push the scene past its duration budget; speed up speech (never
+    // truncate audio) until it fits. A compression attempt failing (e.g. a transient hiccup on an
+    // OPTIONAL speed-up call) never aborts the scene -- the already-valid `duration`/`localPath`
+    // from the successful synthesis above remain a safe fallback.
     if (Number.isFinite(sceneDurationBudget) && SCENE_TAIL_SECONDS + duration > sceneDurationBudget) {
       for (const candidateRate of fasterRateSteps(rate).slice(0, maxCompressionAttempts)) {
-        const candidateDuration = await synthesize(candidateRate);
-        if (candidateDuration < duration) { duration = candidateDuration; usedRate = candidateRate; }
-        if (SCENE_TAIL_SECONDS + candidateDuration <= sceneDurationBudget) break;
+        try {
+          const candidateDuration = await synthesizeAndMeasure(candidateRate);
+          if (candidateDuration < duration) { duration = candidateDuration; usedRate = candidateRate; }
+          if (SCENE_TAIL_SECONDS + candidateDuration <= sceneDurationBudget) break;
+        } catch (error) {
+          log('tts.compression_attempt_failed', { sceneIndex: index, rate: candidateRate, message: error.message });
+        }
       }
     }
     completed += 1; onProgress?.(completed, plan.questions.length);

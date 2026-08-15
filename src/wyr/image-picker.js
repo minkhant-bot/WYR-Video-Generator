@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { PexelsImageProvider, assessImageCandidate, buildImageQueries, inspectDownloadedImage } from './images.js';
-import { fetchWithTimeout, mapWithConcurrency } from './utils.js';
+import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
 
@@ -62,14 +62,20 @@ export class PixabayImageProvider {
   }
 
   async downloadAsset(candidate, destination) {
-    const response = await fetchWithTimeout(candidate.downloadUrl, {}, this.timeoutMs);
-    if (!response.ok) throw new Error(`Pixabay image download returned HTTP ${response.status}.`);
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.startsWith('image/')) {
-      throw new Error(`Unexpected Pixabay asset content type: ${contentType || 'unknown'}.`);
-    }
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, Buffer.from(await response.arrayBuffer()));
+    // Matches PexelsImageProvider's bounded retry (images.js) -- a transient network/5xx failure
+    // on the PRIMARY provider must not be treated as permanent any more readily than the fallback is.
+    await retry(async () => {
+      const response = await fetchWithTimeout(candidate.downloadUrl, {}, this.timeoutMs);
+      if (!response.ok) throw new Error(`Pixabay image download returned HTTP ${response.status}.`);
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) {
+        throw new Error(`Unexpected Pixabay asset content type: ${contentType || 'unknown'}.`);
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length < 10_000) throw new Error(`Downloaded Pixabay image is suspiciously small (${bytes.length} bytes).`);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.writeFileSync(destination, bytes);
+    }, { attempts: 2, label: `download Pixabay photo ${candidate.id}` });
     return destination;
   }
 }
@@ -350,6 +356,36 @@ export const selectedCandidates = selection =>
       selected: slot.candidates.find(candidate => candidate.candidateKey === slot.selectedId),
     }));
 
+// Thrown only once EVERY candidate for a slot (the auto-selected one, the rest of its already-
+// fetched pool, and one round of freshly-widened query/provider results) has failed download or
+// validation -- distinct from other pipeline failures so the UI/logs can show a clear, specific
+// cause instead of a generic error (see pipeline.js's error classification).
+export class ImageSelectionExhaustedError extends Error {
+  constructor(message, details = {}) { super(message); this.code = 'IMAGE_SELECTION_EXHAUSTED'; Object.assign(this, details); }
+}
+
+const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsDir }) => {
+  const safeId = String(candidate.id).replace(/[^a-z0-9_-]/gi, '_');
+  const filename = `${item.key.toLowerCase()}-${candidate.provider.toLowerCase()}-${safeId}.jpg`;
+  const localPath = path.join(assetsDir, filename);
+  try {
+    await provider.downloadAsset(candidate, localPath);
+    const inspection = await inspectDownloadedImage(localPath);
+    if (!inspection.valid) throw new Error(`failed validation: ${inspection.reasons.join('; ')}`);
+    return { localPath, filename };
+  } catch (error) {
+    fs.rmSync(localPath, { force: true });
+    throw error;
+  }
+};
+
+// For EACH A/B slot: try the auto-selected candidate, then the rest of its already-ranked pool
+// (specific query results first, broader-query results after -- the pool is already sorted by
+// finalScore from fetchPoolForSlot), then -- only if that whole pool is exhausted -- widen the
+// SAME bounded query/provider cycle for more candidates (reusing fetchPoolForSlot, so it keeps
+// trying alternate/broader queries and the other provider) before finally failing that slot
+// clearly. A candidate that fails is never retried (tracked in `failedKeys`), and a candidate
+// whose bytes duplicate one already used for another slot is skipped, never both kept.
 export const downloadSelectedCandidates = async ({ selection, assetsDir, config }) => {
   const providers = new Map();
   if (config.pixabayApiKey) {
@@ -370,44 +406,46 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config 
     throw new Error(`All 16 images must be ready before generation; ready ${chosen.length}/16.`);
   }
 
-  const used = new Set();
+  const usedCandidateKeys = new Set();
+  const usedContentHashes = new Set();
 
   return mapWithConcurrency(chosen, config.pexelsConcurrency, async item => {
-    const candidate = item.selected;
-    if (!candidate || candidate.candidateKey !== item.selectedId) {
-      throw new Error(`Selection changed for ${item.key}.`);
-    }
+    const state = selection.slots[item.key];
+    const failedKeys = new Set();
+    let rank = 0; let lastError = null;
 
-    const provider = providers.get(candidate.provider);
-    if (!provider) throw new Error(`Unsupported selected provider for ${item.key}: ${candidate.provider}.`);
-
-    const filename = `${item.key.toLowerCase()}-${candidate.provider.toLowerCase()}.jpg`;
-    const localPath = path.join(assetsDir, filename);
-
-    await provider.downloadAsset(candidate, localPath);
-
-    const inspection = await inspectDownloadedImage(localPath);
-    if (!inspection.valid) {
-      throw new Error(`${item.key} selected image failed validation: ${inspection.reasons.join('; ')}`);
-    }
-
-    const sha256 = createHash('sha256').update(fs.readFileSync(localPath)).digest('hex');
-    if (used.has(sha256)) throw new Error(`Duplicate selected image bytes for ${item.key}.`);
-    used.add(sha256);
-
-    return {
-      ...candidate,
-      questionIndex: item.questionIndex,
-      slot: item.slot,
-      text: item.optionText,
-      queryUsed: candidate.queryUsed,
-      localPath,
-      filename,
-      sha256,
-      selectedProvider: candidate.provider,
-      selectedQuery: candidate.queryUsed,
-      providerAttemptOrder: ['Pixabay', 'Pexels'],
-      locked: false,
+    const tryCandidate = async candidate => {
+      if (!candidate || failedKeys.has(candidate.candidateKey) || usedCandidateKeys.has(candidate.candidateKey)) return null;
+      const provider = providers.get(candidate.provider);
+      if (!provider) { failedKeys.add(candidate.candidateKey); return null; }
+      rank += 1;
+      try {
+        const { localPath, filename } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir });
+        const sha256 = createHash('sha256').update(fs.readFileSync(localPath)).digest('hex');
+        if (usedContentHashes.has(sha256)) { fs.rmSync(localPath, { force: true }); throw new Error('duplicate image bytes already used for another slot'); }
+        usedContentHashes.add(sha256); usedCandidateKeys.add(candidate.candidateKey);
+        log('image.candidate_accepted', { slot: item.key, provider: candidate.provider, query: candidate.queryUsed, candidateRank: rank });
+        return {
+          ...candidate, questionIndex: item.questionIndex, slot: item.slot, text: item.optionText,
+          queryUsed: candidate.queryUsed, localPath, filename, sha256,
+          selectedProvider: candidate.provider, selectedQuery: candidate.queryUsed,
+          providerAttemptOrder: [...IMAGE_PROVIDER_ORDER], locked: false,
+        };
+      } catch (error) {
+        failedKeys.add(candidate.candidateKey); lastError = error;
+        log('image.candidate_rejected', { slot: item.key, provider: candidate.provider, query: candidate.queryUsed, candidateRank: rank, reason: error.message });
+        return null;
+      }
     };
+
+    let result = await tryCandidate(item.selected);
+    if (!result) for (const candidate of state.candidates) { result = await tryCandidate(candidate); if (result) break; }
+    if (!result) {
+      const before = state.candidates.length;
+      await fetchPoolForSlot(state, [...providers.values()], config, before + REVIEW_POOL_SIZE);
+      for (const candidate of state.candidates.slice(before)) { result = await tryCandidate(candidate); if (result) break; }
+    }
+    if (!result) throw new ImageSelectionExhaustedError(`${item.key}: every image candidate (${rank} tried) failed download or validation. Last error: ${lastError?.message || 'no candidates were available'}`, { slot: item.key, candidatesTried: rank });
+    return result;
   });
 };

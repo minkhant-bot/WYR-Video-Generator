@@ -77,6 +77,26 @@ test('a fantasy-coded question still gets a stylized fallback query, but a reali
   } finally { global.fetch = originalFetch; }
 });
 
+test('when the first (most specific) query returns nothing, a later broader query still succeeds', async () => {
+  const originalFetch = global.fetch; let pixabayCalls = 0;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { photos: [] }; } };
+      pixabayCalls += 1;
+      // The first two queries tried (most specific -> next fallback) come back empty; only the
+      // third (a broader query further down the list) returns a usable candidate.
+      if (pixabayCalls < 3) return { ok: true, async json() { return { hits: [] }; } };
+      return { ok: true, async json() { return { hits: [{ id: 42, imageWidth: 1600, imageHeight: 900, tags: 'treehouse forest', pageURL: 'https://pixabay.com/images/id-42/', largeImageURL: 'https://cdn.pixabay.com/42.jpg' }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a houseboat', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: { pixabayApiKey: 'test-key', pexelsApiKey: '', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    assert.ok(pixabayCalls >= 3, 'the broader query must only be reached after the earlier ones came back empty');
+    assert.ok(selection.slots.Q1A.selectedId, 'a candidate from the later, broader query must still be selected');
+    assert.equal(selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId).id, '42');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('auto-selection logs a diagnostic line per slot with query, provider, and scores', async () => {
   const originalFetch = global.fetch; const originalInfo = console.info; let counter = 0; const logs = [];
   try {

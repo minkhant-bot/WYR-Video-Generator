@@ -113,8 +113,17 @@ export const buildComposition = ({ plan, assets, duration, timeline, voiceovers 
   const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, entrance: sfx.entrance.filename, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
+const assertReadableNonEmptyFile = (localPath, label) => {
+  if (!localPath || !fs.existsSync(localPath)) throw new Error(`Required render input is missing: ${label}.`);
+  if (!fs.statSync(localPath).isFile() || fs.statSync(localPath).size <= 0) throw new Error(`Required render input is empty or unreadable: ${label}.`);
+};
 export const assertProductionAudioInputs = ({ plan, voiceovers = [], timeline, sfx }) => {
   if ((voiceovers.length && voiceovers.length !== plan.questions.length) || !timeline || !sfx || SFX_EVENT_TYPES.some(type => !sfx[type]?.localPath) || !sfx.countdownSequence?.localPath) throw new Error('Production audio rendering requires a timeline and all local SFX files, plus one voice file per scene when narration is enabled.');
+  // Catches a deleted/corrupted/never-written file with a clear message before the expensive
+  // multi-input FFmpeg mix starts, instead of a cryptic FFmpeg "No such file or directory" failure.
+  for (const voiceover of voiceovers) assertReadableNonEmptyFile(voiceover.localPath, `voiceover for scene ${voiceover.questionIndex + 1}`);
+  for (const type of SFX_EVENT_TYPES) assertReadableNonEmptyFile(sfx[type].localPath, `${type} SFX`);
+  assertReadableNonEmptyFile(sfx.countdownSequence.localPath, 'countdown sequence SFX');
   return true;
 };
 export const renderSceneSegments = async ({ plan, assets, duration, timeline, renderDir, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, renderScene = renderSegment }) => {
@@ -170,7 +179,9 @@ const rate = value => { const [numerator, denominator] = String(value || '').spl
 // Authoritative, independent of expectedDuration matching: a >=60s output must never be reported as a
 // successful Shorts render, regardless of what the timeline predicted going in.
 export const SHORTS_DURATION_LIMIT_SECONDS = 60;
-export class DurationVerificationError extends Error {}
+export class DurationVerificationError extends Error {
+  constructor(message, details = {}) { super(message); this.code = 'DURATION_BUDGET_EXCEEDED'; Object.assign(this, details); }
+}
 export const verifyVideo = async (output, { expectedSceneCount, expectedDuration, renderDir, timeline, sfxSchedule, countdownSchedule } = {}) => {
   const stat = fs.statSync(output); if (!stat.isFile() || stat.size <= 0) throw new Error('Output is not a non-empty regular file.'); let stdout = '';
   await new Promise((resolve, reject) => { const child = spawn(ffprobePath, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', output], { stdio: ['ignore', 'pipe', 'pipe'] }); let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(new Error(`FFprobe exited with code ${code}: ${stderr}`))); });

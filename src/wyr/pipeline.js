@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonAtomic, log } from './utils.js';
 import { assertProviderConfig } from './config.js';
@@ -6,11 +7,62 @@ import { ContentHistoryStore, generateProductionPlan } from './content-engine.js
 import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, DurationVerificationError, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
-import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
+import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, TtsGenerationError } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
-import { createImageSelection, downloadSelectedCandidates } from './image-picker.js';
+import { createImageSelection, downloadSelectedCandidates, ImageSelectionExhaustedError } from './image-picker.js';
 import { selectContentPlan } from './content-source.js';
 import { commitPlanUsage, releaseReservation } from './question-pool.js';
+
+// Disposable per-job temp artifacts (raw downloaded images, TTS mp3s, rendered scene segments) --
+// always scoped to path.join(job.workspace, ...), never anything outside a job's own directory.
+// Deliberately excludes 'output' (a failed job never has a verified MP4 there anyway) and never
+// touches the job.json record itself, so diagnostics (plan.json, timeline.json, etc. written
+// earlier via writeJsonAtomic) survive for debugging a failure.
+const DISPOSABLE_JOB_SUBDIRS = ['assets', 'audio', 'render'];
+const cleanupFailedJobArtifacts = job => {
+  for (const dir of DISPOSABLE_JOB_SUBDIRS) {
+    try { fs.rmSync(path.join(job.workspace, dir), { recursive: true, force: true }); }
+    catch (error) { log('job.cleanup_failed', { jobId: job.id, dir, message: error.message }); }
+  }
+};
+
+// Fallback classification for the (rare) error that reaches here without its own explicit `.code`
+// -- keyed by the LAST stage the job reported before failing. Errors that already carry a `.code`
+// (ContentPoolExhaustedError, DurationBudgetExceededError, TtsGenerationError,
+// ImageSelectionExhaustedError, ...) always win; this only backstops genuinely uncoded errors
+// (e.g. a raw FFmpeg/render Error) so the UI still gets a useful high-level category.
+const STAGE_FALLBACK_ERROR_CODES = {
+  generating_content: 'QUESTION_POOL_EXHAUSTED',
+  searching_images: 'IMAGE_SELECTION_EXHAUSTED',
+  downloading_assets: 'IMAGE_SELECTION_EXHAUSTED',
+  generating_voice: 'TTS_FAILED',
+  building_timeline: 'RENDER_FAILED',
+  rendering: 'RENDER_FAILED',
+  verifying: 'OUTPUT_VERIFICATION_FAILED',
+};
+const classifyJobError = (error, stage) => error?.code || STAGE_FALLBACK_ERROR_CODES[stage] || 'JOB_FAILED';
+
+// Bounds what reaches the client: never a multi-KB FFmpeg stderr dump or a stack trace, just a
+// short, single-line summary. The FULL message/stack is still logged server-side (job.failed
+// below) -- this only shapes what publicJob() exposes over the API.
+const MAX_CLIENT_ERROR_MESSAGE_LENGTH = 240;
+const sanitizeErrorForClient = message => {
+  const flattened = String(message ?? '').replace(/\s+/g, ' ').trim();
+  if (!flattened) return 'The job failed unexpectedly.';
+  return flattened.length > MAX_CLIENT_ERROR_MESSAGE_LENGTH ? `${flattened.slice(0, MAX_CLIENT_ERROR_MESSAGE_LENGTH)}…` : flattened;
+};
+
+// Shared by every production job-runner catch block below: releases any DB reservation, cleans up
+// disposable temp artifacts, classifies the failure into a high-level UI error code, logs full
+// diagnostics server-side, and records a bounded, secret-free error message on the job.
+const handleJobFailure = async ({ job, store, error, poolReserved = false }) => {
+  const stage = store.get(job.id)?.stage;
+  if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
+  cleanupFailedJobArtifacts(job);
+  const errorCode = classifyJobError(error, stage);
+  log('job.failed', { jobId: job.id, stage, errorCode, message: error.message, stack: error.stack });
+  store.update(job.id, { status: 'failed', stage: 'failed', error: sanitizeErrorForClient(error.message), errorCode });
+};
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
 // Stay clear of the hard 60s ffprobe ceiling when judging the *projected* (pre-render) timeline.
@@ -38,6 +90,12 @@ const buildBudgetedVoiceTimeline = async ({ plan, config, workspace, onProgress 
       lastError = error;
       log('duration.budget_attempt_failed', { attemptIndex, sceneDurationBudget, message: error.message });
     }
+  }
+  // A pure TTS failure (audio couldn't be produced at all, even after its own bounded retries) is
+  // NOT a duration problem -- keep its TTS_FAILED classification instead of relabeling it as a
+  // duration-budget failure just because it happened inside this duration-budget retry loop.
+  if (lastError?.code === 'TTS_FAILED') {
+    throw new TtsGenerationError(`Narration generation failed after ${attempts.length} bounded attempt(s): ${lastError.message}`, { cause: lastError });
   }
   throw new DurationVerificationError(`Could not build a video projected under ${SHORTS_DURATION_LIMIT_SECONDS}s after ${attempts.length} bounded attempt(s). Last error: ${lastError?.message}`);
 };
@@ -107,8 +165,7 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     // never increments used_count, and the reservation is released instead (see the catch block).
     if (poolReserved) await commitPlanUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration }).catch(error => log('pool.commit_failed', { jobId: job.id, message: error.message }));
   } catch (error) {
-    if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
-    log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
+    await handleJobFailure({ job, store, error, poolReserved });
   }
 };
 
@@ -129,7 +186,7 @@ export const prepareImageSelection = async ({ job, store, config }) => {
     const selection = await createImageSelection({ plan, config });
     update({ status: 'reviewing_images', stage: 'reviewing_images', progress: 35, selection });
   } catch (error) {
-    log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
+    await handleJobFailure({ job, store, error });
   }
 };
 
@@ -150,11 +207,10 @@ export const runAutomaticPipeline = async ({ job, store, config }) => {
     writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
-    if (selection.selectedCount !== 16) throw new Error(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`);
+    if (selection.selectedCount !== 16) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`, { selectedCount: selection.selectedCount });
     await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
   } catch (error) {
-    if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
-    log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
+    await handleJobFailure({ job, store, error, poolReserved });
   }
 };
 

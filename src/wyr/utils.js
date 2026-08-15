@@ -8,10 +8,17 @@ export const writeJsonAtomic = (file, value) => {
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
   fs.renameSync(temporary, file);
 };
+// Several providers (e.g. Pixabay) put the API key directly in the URL's query string. A timeout
+// error message that echoes the full URL would leak that key into logs/job records -- strip the
+// query string (and any auth-shaped userinfo) so only the host+path ever appears in diagnostics.
+const redactUrlForDiagnostics = url => {
+  try { const parsed = new URL(url); return `${parsed.origin}${parsed.pathname}`; }
+  catch { return '[unparseable URL]'; }
+};
 export const fetchWithTimeout = async (url, options = {}, timeoutMs = 20_000) => {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
   try { return await fetch(url, { ...options, signal: controller.signal }); }
-  catch (error) { if (error.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs}ms: ${url}`); throw error; }
+  catch (error) { if (error.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs}ms: ${redactUrlForDiagnostics(url)}`); throw error; }
   finally { clearTimeout(timer); }
 };
 export const retry = async (operation, { attempts, label }) => {
@@ -37,4 +44,4 @@ export const mapWithConcurrency = async (items, concurrency, operation) => {
   await Promise.all(workers);
   return results;
 };
-export const publicJob = job => ({ id: job.id, status: job.status, stage: job.stage, progress: job.progress, error: job.error, topic: job.topic, createdAt: job.createdAt, updatedAt: job.updatedAt, verification: job.verification, selection: job.selection ? { pageSize: job.selection.pageSize, total: job.selection.total, selectedCount: job.selection.selectedCount, providers: job.selection.providers, slots: Object.fromEntries(Object.entries(job.selection.slots).map(([key, slot]) => [key, { key: slot.key, questionIndex: slot.questionIndex, slot: slot.slot, optionText: slot.optionText, candidates: slot.candidates, selectedId: slot.selectedId, error: slot.error, exhausted: slot.exhausted }])) } : null, outputUrl: job.status === 'completed' ? `/api/jobs/${job.id}/video` : null, downloadUrl: job.status === 'completed' ? `/api/jobs/${job.id}/download` : null, creditsUrl: job.status === 'completed' ? `/api/jobs/${job.id}/credits` : null });
+export const publicJob = job => ({ id: job.id, status: job.status, stage: job.stage, progress: job.progress, error: job.error, errorCode: job.errorCode || null, topic: job.topic, createdAt: job.createdAt, updatedAt: job.updatedAt, verification: job.verification, selection: job.selection ? { pageSize: job.selection.pageSize, total: job.selection.total, selectedCount: job.selection.selectedCount, providers: job.selection.providers, slots: Object.fromEntries(Object.entries(job.selection.slots).map(([key, slot]) => [key, { key: slot.key, questionIndex: slot.questionIndex, slot: slot.slot, optionText: slot.optionText, candidates: slot.candidates, selectedId: slot.selectedId, error: slot.error, exhausted: slot.exhausted }])) } : null, outputUrl: job.status === 'completed' ? `/api/jobs/${job.id}/video` : null, downloadUrl: job.status === 'completed' ? `/api/jobs/${job.id}/download` : null, creditsUrl: job.status === 'completed' ? `/api/jobs/${job.id}/credits` : null });
