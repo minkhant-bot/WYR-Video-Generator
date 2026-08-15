@@ -12,6 +12,7 @@ import { runStartupMigrations } from './src/wyr/startup.js';
 import { isAdminRequestAuthorized } from './src/wyr/admin-auth.js';
 import { getPoolStats } from './src/wyr/question-pool.js';
 import { getRefillStatus, triggerAdminRefill } from './src/wyr/refill.js';
+import { seedStaticPool } from './src/wyr/seed.js';
 
 const startupConfig = getConfig(); const store = createJobStore(startupConfig.rootDir); const publicDir = PUBLIC_DIR;
 const json = (res, status, body) => { const payload = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'cache-control': 'no-store' }); res.end(payload); };
@@ -40,7 +41,7 @@ const server = http.createServer(async (req, res) => {
       const status = saveLocalCredentials({ groqApiKey: submitted?.groqApiKey, pexelsApiKey: submitted?.pexelsApiKey });
       return json(res, 200, { saved: true, ...status });
     }
-    if (url.pathname === '/api/admin/content-pool/status' || url.pathname === '/api/admin/content-pool/refill') {
+    if (url.pathname === '/api/admin/content-pool/status' || url.pathname === '/api/admin/content-pool/refill' || url.pathname === '/api/admin/content-pool/seed-static') {
       const adminConfig = getConfig();
       if (!isAdminRequestAuthorized(req.headers, adminConfig)) return json(res, adminConfig.adminToken ? 401 : 503, { error: adminConfig.adminToken ? 'Unauthorized.' : 'Admin endpoints are not configured.' });
       if (req.method === 'GET' && url.pathname === '/api/admin/content-pool/status') {
@@ -56,6 +57,9 @@ const server = http.createServer(async (req, res) => {
         const outcome = triggerAdminRefill({ apiKey: adminConfig.groqApiKey, model: adminConfig.groqModel, timeoutMs: adminConfig.timeoutMs, target, maxBatches: adminConfig.poolRefillMaxBatchesPerRun });
         const stats = await getPoolStats();
         return json(res, outcome.started ? 202 : 200, { started: outcome.started, ...stats, ...outcome.status });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/admin/content-pool/seed-static') {
+        return json(res, 200, await seedStaticPool());
       }
       return json(res, 404, { error: 'Not found.' });
     }

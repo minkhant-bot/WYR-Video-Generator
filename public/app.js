@@ -75,6 +75,7 @@ const poolStatusEl = document.querySelector('#pool-refill-status');
 const poolTokenInput = document.querySelector('#pool-admin-token');
 const poolRefreshButton = document.querySelector('#pool-refresh');
 const poolRefillButton = document.querySelector('#pool-refill');
+const poolSeedButton = document.querySelector('#pool-seed-static');
 const poolErrorBox = document.querySelector('#pool-error');
 const ADMIN_TOKEN_KEY = 'wyrAdminToken';
 
@@ -128,6 +129,24 @@ poolRefillButton.onclick = async () => {
     showPoolError(error.message);
   } finally {
     poolRefillButton.disabled = false;
+  }
+};
+
+poolSeedButton.onclick = async () => {
+  clearPoolError();
+  poolSeedButton.disabled = true;
+  const originalLabel = poolSeedButton.textContent;
+  poolSeedButton.textContent = 'Seeding…';
+  try {
+    const data = await adminRequest('/api/admin/content-pool/seed-static', { method: 'POST' });
+    poolReadyEl.textContent = data.ready ?? '–';
+    poolTotalEl.textContent = data.total ?? '–';
+    poolStatusEl.textContent = `Seed done: +${data.inserted} inserted, ${data.skipped} already seeded, ${data.rejected} rejected.`;
+  } catch (error) {
+    showPoolError(error.message);
+  } finally {
+    poolSeedButton.disabled = false;
+    poolSeedButton.textContent = originalLabel;
   }
 };
 
