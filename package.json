@@ -13,7 +13,8 @@
     "fixture": "node scripts/render-wyr-fixture.mjs --fixture",
     "test": "node --test src/wyr/*.test.js",
     "wyr:migrate": "node scripts/migrate.mjs",
-    "wyr:refill": "node scripts/refill-pool.mjs"
+    "wyr:refill": "node scripts/refill-pool.mjs",
+    "wyr:seed": "node scripts/seed-pool.mjs"
   },
   "dependencies": {
     "@seepine/edge-tts": "^1.4.1",
