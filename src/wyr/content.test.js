@@ -48,6 +48,20 @@ const generatedPlan = () => ({ topic: 'Dream adventures', questions: [
 const successfulResponse = (plan = generatedPlan()) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
 const failedGenerationResponse = () => new Response(JSON.stringify({ error: { message: 'Failed to generate JSON', code: 'failed_generation', failed_generation: 'PRIVATE-GENERATION-DIAGNOSTIC' } }), { status: 400, headers: { 'content-type': 'application/json' } });
 const rateLimitResponse = retryAfter => new Response(JSON.stringify({ error: { message: 'Rate limit reached', code: 'rate_limit_exceeded' } }), { status: 429, headers: { 'content-type': 'application/json', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) } });
+const tokenRateLimitResponse = () => new Response(JSON.stringify({ error: { message: 'Rate limit reached for model `openai/gpt-oss-20b` on tokens per minute (TPM): Limit 8000, Used 7600, Requested 1800. Please try again in 10.5s.', type: 'tokens', code: 'rate_limit_exceeded' } }), {
+  status: 429,
+  headers: {
+    'content-type': 'application/json',
+    'retry-after': '10.5',
+    'x-ratelimit-limit-requests': '30',
+    'x-ratelimit-remaining-requests': '27',
+    'x-ratelimit-reset-requests': '2s',
+    'x-ratelimit-limit-tokens': '8000',
+    'x-ratelimit-remaining-tokens': '400',
+    'x-ratelimit-reset-tokens': '10.5s',
+  },
+});
+const requestRateLimitResponse = () => new Response(JSON.stringify({ error: { message: 'Rate limit reached for model `openai/gpt-oss-20b` on requests per minute (RPM): Limit 30, Used 30.', type: 'requests', code: 'rate_limit_exceeded' } }), { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '3', 'x-ratelimit-limit-requests': '30', 'x-ratelimit-remaining-requests': '0' } });
 const withMockedFetch = async (responses, operation) => {
   const originalFetch = globalThis.fetch; const requests = []; let index = 0;
   globalThis.fetch = async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return responses[index++] || responses.at(-1); };
@@ -64,6 +78,31 @@ test('Groq provider accepts a valid strict structured response', async () => wit
   assert.equal(request.body.response_format.type, 'json_schema');
   assert.equal(request.body.response_format.json_schema.strict, true);
   assert.equal(plan.questions.length, 8);
+}));
+
+test('the content-generation request stays within a tight token budget on a mature production history', async () => withMockedFetch([successfulResponse()], async requests => {
+  // A mature history's full exclusion/motif pools before any prompt-facing slicing.
+  const exclusions = Array.from({ length: 240 }, (_, i) => `Sample dilemma option A wording ${i} OR Sample dilemma option B wording ${i}`);
+  const excludedMotifs = Array.from({ length: 300 }, (_, i) => `motif-key-${i % 90}`);
+  const context = {
+    categories: ['superpowers', 'money', 'luxury', 'dream lifestyle', 'travel', 'impossible choices', 'future technology', 'fantasy'],
+    styles: ['tradeoff', 'power', 'discovery', 'emotional choice', 'future technology', 'weird/funny', 'lifestyle', 'fantasy'],
+    families: ['food', 'social', 'relationships', 'work', 'lifestyle', 'money-tradeoff', 'privacy', 'technology'],
+    exclusions, excludedMotifs,
+  };
+  await provider().generatePlan(8, context);
+  const body = requests[0].body;
+  assert.equal(body.max_completion_tokens, 1500);
+  const userMessage = body.messages[1].content;
+  // Bounded regardless of how large the underlying history grows — this is what keeps a single
+  // request's prompt tokens well clear of Groq's tight tokens-per-minute budget. (Previously this
+  // scaled with history size and could reach ~11000 chars / ~2750 tokens on a mature history.)
+  assert.ok(userMessage.length < 6500, `expected a bounded prompt, got ${userMessage.length} chars`);
+  const totalRequestBytes = JSON.stringify(body).length;
+  assert.ok(totalRequestBytes < 9000, `expected a bounded total request payload, got ${totalRequestBytes} bytes`);
+  // Slicing actually took effect, regardless of how large the underlying history pool was.
+  assert.equal((userMessage.match(/Sample dilemma option A wording/g) || []).length, 20);
+  assert.equal((userMessage.match(/motif-key-/g) || []).length, 40);
 }));
 
 test('Groq failed_generation handling is bounded and does not expose diagnostics', async () => withMockedFetch(Array.from({ length: 4 }, failedGenerationResponse), async requests => {
@@ -89,6 +128,53 @@ test('Groq exposes HTTP 429 and Retry-After without internally burning structure
     assert.equal(error.status, 429); assert.equal(error.code, 'rate_limit_exceeded'); assert.equal(error.retryAfterMs, 2500); return true;
   });
   assert.equal(requests.length, 1);
+}));
+
+test('Groq 429 metadata captures rate-limit headers and classifies the exceeded limit as tokens', async () => withMockedFetch([tokenRateLimitResponse()], async () => {
+  await assert.rejects(() => provider().generatePlan(8), error => {
+    assert.equal(error.status, 429);
+    assert.equal(error.retryAfterMs, 10_500);
+    assert.equal(error.limitType, 'tokens');
+    assert.deepEqual(error.rateLimitHeaders, {
+      'retry-after': '10.5',
+      'x-ratelimit-limit-requests': '30',
+      'x-ratelimit-remaining-requests': '27',
+      'x-ratelimit-reset-requests': '2s',
+      'x-ratelimit-limit-tokens': '8000',
+      'x-ratelimit-remaining-tokens': '400',
+      'x-ratelimit-reset-tokens': '10.5s',
+    });
+    return true;
+  });
+}));
+
+test('Groq 429 metadata classifies a requests-per-minute rejection as requests', async () => withMockedFetch([requestRateLimitResponse()], async () => {
+  await assert.rejects(() => provider().generatePlan(8), error => {
+    assert.equal(error.limitType, 'requests');
+    assert.equal(error.rateLimitHeaders['x-ratelimit-remaining-requests'], '0');
+    return true;
+  });
+}));
+
+test('Groq 429 metadata is null (not populated) on non-rate-limit HTTP errors', async () => withMockedFetch([new Response(JSON.stringify({ error: { message: 'Internal error' } }), { status: 500 })], async () => {
+  await assert.rejects(() => provider().requestPlan({ questionCount: 8, mode: 'json_schema', attempt: 1, context: {} }), error => {
+    assert.equal(error.status, 500);
+    assert.equal(error.limitType, null);
+    assert.equal(error.rateLimitHeaders, null);
+    return true;
+  });
+}));
+
+test('rate-limit diagnostics never carry the API key, Authorization header, or raw error message text', async () => withMockedFetch([tokenRateLimitResponse()], async requests => {
+  await assert.rejects(() => provider().generatePlan(8), error => {
+    const serialized = JSON.stringify(error.rateLimitHeaders);
+    assert.equal(serialized.includes('test-key'), false);
+    assert.equal('authorization' in error.rateLimitHeaders, false);
+    assert.equal(Object.keys(error.rateLimitHeaders).some(key => key.toLowerCase() === 'authorization'), false);
+    assert.equal(JSON.stringify(error).includes('Please try again'), false); // raw message text is never propagated
+    return true;
+  });
+  assert.equal(requests[0].url, 'https://api.groq.com/openai/v1/chat/completions');
 }));
 
 test('Groq provider tracks total requests and 429 count for auditing', async () => withMockedFetch([rateLimitResponse('1'), rateLimitResponse('1'), successfulResponse()], async () => {

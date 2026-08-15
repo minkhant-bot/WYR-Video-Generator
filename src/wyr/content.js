@@ -107,9 +107,30 @@ const retryAfterMilliseconds = (value, now = Date.now()) => {
 
 export const groqRateLimitDetails = error => {
   for (let current = error; current; current = current.cause) {
-    if (current.status === 429 || current.code === 'rate_limit_exceeded' || current.code === 'rate_limit') return { rateLimited: true, retryAfterMs: Number.isFinite(current.retryAfterMs) ? current.retryAfterMs : null };
+    if (current.status === 429 || current.code === 'rate_limit_exceeded' || current.code === 'rate_limit') return { rateLimited: true, retryAfterMs: Number.isFinite(current.retryAfterMs) ? current.retryAfterMs : null, rateLimitHeaders: current.rateLimitHeaders || null, limitType: current.limitType || null };
   }
-  return { rateLimited: false, retryAfterMs: null };
+  return { rateLimited: false, retryAfterMs: null, rateLimitHeaders: null, limitType: null };
+};
+
+// Only these specific, non-sensitive Groq rate-limit headers are ever captured — never
+// Authorization or any other header that could carry a credential.
+const RATE_LIMIT_HEADER_NAMES = Object.freeze([
+  'retry-after',
+  'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
+  'x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-reset-tokens',
+]);
+const extractRateLimitHeaders = response => {
+  const headers = {};
+  for (const name of RATE_LIMIT_HEADER_NAMES) { const value = response.headers.get(name); if (value !== null) headers[name] = value; }
+  return headers;
+};
+// Groq's 429 error message names which budget was exceeded (e.g. "...on tokens per minute
+// (TPM): Limit 8000, Used 7500...") — classify it without ever logging the raw message text.
+const detectLimitType = (message, fallbackType) => {
+  const text = String(message || '');
+  if (/tokens per (?:minute|day)|\bTPM\b|\bTPD\b/i.test(text)) return 'tokens';
+  if (/requests per (?:minute|day)|\bRPM\b|\bRPD\b/i.test(text)) return 'requests';
+  return fallbackType === 'tokens' || fallbackType === 'requests' ? fallbackType : null;
 };
 
 const planSchema = () => {
@@ -119,10 +140,18 @@ const planSchema = () => {
   return { type: 'object', properties: { topic: { type: 'string' }, questions: { type: 'array', items: question } }, required: ['topic', 'questions'], additionalProperties: false };
 };
 
+// These are only an efficiency hint to help Groq avoid an obviously-wasted regeneration attempt.
+// Actual duplicate/motif protection is 100% enforced in content-engine.js against the FULL
+// history (compareDilemmas, blockedMotifs), independent of what's in the prompt — so these can
+// stay small without weakening protection. Kept deliberately small because a mature production
+// history's full exclusion/motif lists alone could consume most of a request's token budget
+// against Groq's tight per-minute token limit.
+const PROMPT_EXCLUSION_LIMIT = 20;
+const PROMPT_MOTIF_LIMIT = 40;
 const contextText = context => {
   const categories = Array.isArray(context?.categories) ? context.categories.filter(category => CONTENT_CATEGORIES.includes(category)) : [];
-  const exclusions = Array.isArray(context?.exclusions) ? context.exclusions.slice(-80) : [];
-  const motifs = Array.isArray(context?.excludedMotifs) ? [...new Set(context.excludedMotifs)].slice(-150) : [];
+  const exclusions = Array.isArray(context?.exclusions) ? context.exclusions.slice(-PROMPT_EXCLUSION_LIMIT) : [];
+  const motifs = Array.isArray(context?.excludedMotifs) ? [...new Set(context.excludedMotifs)].slice(-PROMPT_MOTIF_LIMIT) : [];
   const styles = Array.isArray(context?.styles) ? context.styles.filter(style => DILEMMA_STYLES.includes(style)) : [];
   const families = Array.isArray(context?.families) ? context.families.filter(family => CONTENT_FAMILIES.includes(family)) : [];
   return `${categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : ''}${styles.length ? ` Use these dilemma styles once each, matched to the same order: ${styles.join(', ')}.` : ''}${families.length ? ` Use these contentFamily values once each, matched to the same order: ${families.join(', ')}. At most one of these may be a fantasy-like family (${FANTASY_CONTENT_FAMILIES.join(', ')}).` : ''}${exclusions.length ? ` Do not repeat or paraphrase these prior dilemmas: ${exclusions.join('; ')}.` : ''}${motifs.length ? ` Do not reuse these core concepts/motifs even with different wording (e.g. teleportation, mind-reading, invisibility, time-freeze, dragon, private-island, mars, flying-car, million-dollars, memory-loss, robot-companion, alien-city, lost-civilization, underwater-world, or any other already-used idea): ${motifs.join(', ')}.` : ''}`;
@@ -145,7 +174,13 @@ const groqErrorFromResponse = async response => {
     || /failed_generation|failed to generate json/i.test(raw);
   if (failedGeneration) return new GroqGenerationError(`Groq generation failed with HTTP ${response.status}.`, 'failed_generation');
   const code = normalize(remoteError?.code || remoteError?.type);
-  return new GroqGenerationError(`Groq returned HTTP ${response.status}${code ? ` (${code})` : ''}.`, code || 'http_error', { status: response.status, retryAfterMs: response.status === 429 ? retryAfterMilliseconds(response.headers.get('retry-after')) : null });
+  const isRateLimited = response.status === 429;
+  return new GroqGenerationError(`Groq returned HTTP ${response.status}${code ? ` (${code})` : ''}.`, code || 'http_error', {
+    status: response.status,
+    retryAfterMs: isRateLimited ? retryAfterMilliseconds(response.headers.get('retry-after')) : null,
+    rateLimitHeaders: isRateLimited ? extractRateLimitHeaders(response) : null,
+    limitType: isRateLimited ? detectLimitType(remoteError?.message, remoteError?.type) : null,
+  });
 };
 
 const validateGeneratedPlan = (text, questionCount) => {
@@ -175,7 +210,11 @@ export class GroqContentProvider extends ContentProvider {
       body: JSON.stringify({
         model: this.model,
         temperature: TEMPERATURE,
-        max_completion_tokens: 2500,
+        // A realistic 8-question completion measures ~900-1100 tokens; 1500 leaves comfortable
+        // headroom while cutting the reserved/requested token budget by 40% versus the previous
+        // 2500, which mattered once Groq's TPM (tokens-per-minute) limit was identified as the
+        // actual binding constraint (not RPM) for this model tier.
+        max_completion_tokens: 1500,
         messages: [
           { role: 'system', content: 'Return only the requested Would You Rather plan as JSON.' },
           { role: 'user', content: structured ? (attempt === 1 ? initialPrompt(questionCount, context) : repairPrompt(questionCount, attempt, context)) : objectPrompt(questionCount, context) },

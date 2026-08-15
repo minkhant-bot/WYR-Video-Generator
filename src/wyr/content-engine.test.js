@@ -17,6 +17,10 @@ const styledMotifPlan = calls => (category, index) => withMotif(`${category} won
 const REALISTIC_FAMILIES = CONTENT_FAMILIES.filter(family => !FANTASY_CONTENT_FAMILIES.includes(family));
 const styledFamilyPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length], REALISTIC_FAMILIES[index % REALISTIC_FAMILIES.length]);
 const rateLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), { status: 429, code: 'rate_limit_exceeded', retryAfterMs });
+const tokenLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), {
+  status: 429, code: 'rate_limit_exceeded', retryAfterMs, limitType: 'tokens',
+  rateLimitHeaders: { 'retry-after': String(retryAfterMs / 1000), 'x-ratelimit-limit-tokens': '8000', 'x-ratelimit-remaining-tokens': '200', 'x-ratelimit-reset-tokens': `${retryAfterMs / 1000}s` },
+});
 const temporaryStore = operation => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-content-history-'));
   const store = new ContentHistoryStore(path.join(directory, 'history.json'));
@@ -284,6 +288,23 @@ test('exhausting the rate-limit budget reports the request/429/wait counters ins
     assert.ok(exhausted);
     assert.equal(exhausted.totalGroqRequests, provider.requestCount);
     assert.equal(exhausted.rateLimitCount, provider.rateLimitCount);
+  } finally { console.info = originalInfo; }
+}));
+
+test('rate-limit wait/exhaustion logs surface which Groq limit (tokens vs requests) was exceeded, with headers but never the API key', async () => temporaryStore(async store => {
+  const logs = []; const originalInfo = console.info;
+  console.info = message => logs.push(message);
+  try {
+    const provider = { apiKey: 'super-secret-key-should-never-appear', requestCount: 0, rateLimitCount: 0, async generatePlan() { this.requestCount += 1; this.rateLimitCount += 1; throw tokenLimitError(1000); } };
+    await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 3000 }, sleep: async () => {} }), ContentRateLimitError);
+    const waitLog = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_wait');
+    const exhaustedLog = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_exhausted');
+    assert.ok(waitLog); assert.equal(waitLog.limitType, 'tokens'); assert.equal(waitLog.rateLimitHeaders['x-ratelimit-remaining-tokens'], '200');
+    assert.ok(exhaustedLog); assert.equal(exhaustedLog.limitType, 'tokens');
+    for (const line of logs) {
+      assert.equal(line.includes('super-secret-key-should-never-appear'), false);
+      assert.equal(/authorization/i.test(line), false);
+    }
   } finally { console.info = originalInfo; }
 }));
 
