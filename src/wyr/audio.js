@@ -27,20 +27,42 @@ export const measureAudioDuration = async audioPath => {
   return duration;
 };
 
-export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration }) => {
+// A scene's total duration is voiceStart + narration + a fixed pause/countdown/reveal/transition tail.
+// This constant mirrors that tail so voice generation can predict a scene's duration before buildSceneTimeline runs.
+const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + WYR_TEMPLATE.timing.countdownSequenceDuration + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+export const RATE_COMPRESSION_LADDER = Object.freeze(['-10%', '-5%', '+0%', '+8%', '+15%', '+22%']);
+const parseRatePercent = value => Number(String(value ?? '+0%').replace('%', '')) || 0;
+const fasterRateSteps = baseRate => {
+  const basePercent = parseRatePercent(baseRate);
+  const steps = RATE_COMPRESSION_LADDER.filter(step => parseRatePercent(step) > basePercent);
+  return steps.length ? steps : [baseRate];
+};
+
+export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration, sceneDurationBudget = Infinity, maxCompressionAttempts = 5 }) => {
   fs.mkdirSync(audioDir, { recursive: true }); let completed = 0;
   return mapWithConcurrency(plan.questions, concurrency, async (question, index) => {
     const narration = buildNarration(question); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
-    await retry(async () => {
-      const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
-      let result;
-      try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
-      if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
-      fs.writeFileSync(localPath, result.data);
-    }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
-    const duration = await measureDuration(localPath);
+    const synthesize = async rateValue => {
+      await retry(async () => {
+        const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
+        let result;
+        try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
+        if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
+        fs.writeFileSync(localPath, result.data);
+      }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
+      return measureDuration(localPath);
+    };
+    let usedRate = rate; let duration = await synthesize(rate);
+    // Narration this long would push the scene past its duration budget; speed up speech (never truncate audio) until it fits.
+    if (Number.isFinite(sceneDurationBudget) && SCENE_TAIL_SECONDS + duration > sceneDurationBudget) {
+      for (const candidateRate of fasterRateSteps(rate).slice(0, maxCompressionAttempts)) {
+        const candidateDuration = await synthesize(candidateRate);
+        if (candidateDuration < duration) { duration = candidateDuration; usedRate = candidateRate; }
+        if (SCENE_TAIL_SECONDS + candidateDuration <= sceneDurationBudget) break;
+      }
+    }
     completed += 1; onProgress?.(completed, plan.questions.length);
-    return { questionIndex: index, narration, filename, localPath, duration, voice, rate };
+    return { questionIndex: index, narration, filename, localPath, duration, voice, rate: usedRate };
   });
 };
 

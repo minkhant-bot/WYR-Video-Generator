@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CONTENT_CATEGORIES } from './content.js';
-import { assessQuestionQuality, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, generateProductionPlan, selectCategories } from './content-engine.js';
+import { CONTENT_CATEGORIES, DILEMMA_STYLES } from './content.js';
+import { assessQuestionQuality, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, generateProductionPlan, MOTIF_HISTORY_WINDOW, recentMotifs, selectCategories } from './content-engine.js';
 
 const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
 const dilemma = (a, b, category = 'superpowers', scores = quality) => ({ category, quality: scores, optionA: { text: a, searchQuery: `${a} concept photo` }, optionB: { text: b, searchQuery: `${b} concept photo` } });
+const withMotif = (a, b, conceptKeyA, conceptKeyB, category = 'superpowers', dilemmaStyle = 'power') => ({
+  category, dilemmaStyle, quality,
+  optionA: { text: a, searchQuery: `${a} concept photo`, conceptKey: conceptKeyA },
+  optionB: { text: b, searchQuery: `${b} concept photo`, conceptKey: conceptKeyB },
+});
+const styledMotifPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length]);
 const rateLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), { status: 429, code: 'rate_limit_exceeded', retryAfterMs });
 const temporaryStore = operation => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-content-history-'));
@@ -146,4 +152,76 @@ test('rate-limit recovery does not bypass duplicate or persistent-history checks
   assert.equal(plan.questions.length, 8);
   assert.equal(plan.questions.some(question => compareDilemmas(question, dilemma('Control gravity', 'Control lightning')).duplicate), false);
   assert.equal(store.load().videos.length, 2);
+}));
+
+test('recentMotifs collects concept keys only from the most recent window of videos', () => {
+  const oldVideo = { generatedAt: '2020-01-01T00:00:00Z', categories: ['superpowers'], questions: [{ category: 'superpowers', dilemmaStyle: 'power', optionA: 'a', optionB: 'b', conceptKeyA: 'ancient-motif', conceptKeyB: 'other-motif' }] };
+  const recentVideos = Array.from({ length: MOTIF_HISTORY_WINDOW }, (_, index) => ({ generatedAt: `2021-01-01T00:0${index}:00Z`, categories: ['money'], questions: [{ category: 'money', dilemmaStyle: 'tradeoff', optionA: `a${index}`, optionB: `b${index}`, conceptKeyA: `motif-${index}`, conceptKeyB: null }] }));
+  const history = { version: 1, videos: [oldVideo, ...recentVideos] };
+  const motifs = recentMotifs(history, MOTIF_HISTORY_WINDOW);
+  assert.equal(motifs.has('ancient-motif'), false);
+  assert.equal(motifs.has('motif-0'), true);
+  assert.equal(motifs.has(`motif-${MOTIF_HISTORY_WINDOW - 1}`), true);
+});
+
+test('persisted history stores conceptKey and dilemmaStyle per question', () => temporaryStore((store, directory) => {
+  store.appendPlan({ topic: 'Motifs', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading', 'superpowers', 'power')] });
+  const reloaded = new ContentHistoryStore(path.join(directory, 'history.json')).load();
+  assert.equal(reloaded.videos[0].questions[0].conceptKeyA, 'teleportation');
+  assert.equal(reloaded.videos[0].questions[0].conceptKeyB, 'mind-reading');
+  assert.equal(reloaded.videos[0].questions[0].dilemmaStyle, 'power');
+}));
+
+test('a candidate reusing a motif blocked by recent video history is rejected and replaced', async () => temporaryStore(async store => {
+  store.appendPlan({ topic: 'Prior', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading')] });
+  let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1;
+    assert.ok(context.excludedMotifs.includes('teleportation'));
+    const questions = context.categories.map((category, index) => calls === 1 && index === 0
+      ? withMotif(`${category} wonder`, `${category} escape`, 'teleportation', 'alt-0', category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])
+      : styledMotifPlan(calls)(category, index));
+    return { topic: 'Candidates', questions: questions.slice(0, count) };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(calls, 2);
+  assert.equal(plan.questions.every(question => question.optionA.conceptKey !== 'teleportation' && question.optionB.conceptKey !== 'teleportation'), true);
+}));
+
+test('a duplicate motif inside the same video batch is rejected and replaced', async () => temporaryStore(async store => {
+  let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1;
+    const questions = context.categories.map(styledMotifPlan(calls));
+    if (calls === 1) questions[1] = { ...questions[1], optionA: { ...questions[1].optionA, conceptKey: questions[0].optionA.conceptKey } };
+    return { topic: 'Candidates', questions: questions.slice(0, count) };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
+  assert.equal(plan.questions.length, 8); assert.equal(calls, 2);
+  const motifs = plan.questions.flatMap(question => [question.optionA.conceptKey, question.optionB.conceptKey]);
+  assert.equal(new Set(motifs).size, motifs.length);
+}));
+
+test('a different concept key in a previously used category is not blocked', async () => temporaryStore(async store => {
+  store.appendPlan({ topic: 'Prior', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading', 'superpowers')] });
+  const provider = { async generatePlan(count, context) { return { topic: 'New', questions: context.categories.map((category, index) => withMotif(`${category} ability ${index}`, `${category} feat ${index}`, `invisibility-${index}`, `flight-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])) }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.contentQuality.rejectedCandidates, 0);
+  assert.equal(plan.contentQuality.attemptsUsed, 1);
+}));
+
+test('a dilemma style repeated beyond the per-video cap is rejected and replaced', async () => temporaryStore(async store => {
+  await assert.rejects(() => generateProductionPlan({
+    provider: { async generatePlan(count, context) { return { topic: 'Samey', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, 'power')) }; } },
+    historyStore: store, questionCount: 8, maxAttempts: 1,
+  }), ContentGenerationError);
+}));
+
+test('varied dilemma styles across a video are all accepted', async () => temporaryStore(async store => {
+  const provider = { async generatePlan(count, context) { return { topic: 'Varied', questions: context.categories.map(styledMotifPlan(1)).slice(0, count) }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(new Set(plan.questions.map(question => question.dilemmaStyle)).size >= 4, true);
 }));

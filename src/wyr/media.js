@@ -40,6 +40,15 @@ const createTextMeasurer = ({ renderDir, font, namespace }) => {
   };
 };
 const activeAlpha = ({ start, fadeIn, end, fadeOut }) => `'clip((t-${start})/${fadeIn},0,1)*clip((${end}-t)/${fadeOut},0,1)'`;
+export const buildFramedImageChain = ({ input, width, height, fps, outLabel, chainId }) => {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new TypeError('Framed image chain requires a positive width and height.');
+  return [
+    `[${input}]loop=loop=-1:size=1:start=0,setpts=N/${fps}/TB,split=2[${chainId}src1][${chainId}src2]`,
+    `[${chainId}src1]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2,gblur=sigma=24,eq=brightness=-0.12,setsar=1,format=rgba[${chainId}bg]`,
+    `[${chainId}src2]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba[${chainId}fg]`,
+    `[${chainId}bg][${chainId}fg]overlay=x=(W-w)/2:y=(H-h)/2:format=auto,format=rgba[${outLabel}]`,
+  ];
+};
 export const buildStillImageInputArgs = (localPath, fps = WYR_TEMPLATE.canvas.fps) => {
   if (typeof localPath !== 'string' || !localPath) throw new TypeError('Still-image input requires a local file path.');
   if (!Number.isFinite(fps) || fps <= 0) throw new TypeError('Still-image input requires a positive frame rate.');
@@ -80,8 +89,8 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   ];
   const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
   const filter = [
-    `[0:v]loop=loop=-1:size=1:start=0,setpts=N/${canvas.fps}/TB,scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[aimg]`,
-    `[1:v]loop=loop=-1:size=1:start=0,setpts=N/${canvas.fps}/TB,scale=${layout.imageWidth}:${layout.imageHeight}:force_original_aspect_ratio=increase,crop=${layout.imageWidth}:${layout.imageHeight}:(iw-${layout.imageWidth})/2:(ih-${layout.imageHeight})/2,setsar=1,format=rgba[bimg]`,
+    ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a' }),
+    ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b' }),
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,

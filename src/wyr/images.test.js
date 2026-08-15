@@ -71,6 +71,30 @@ test('strong specific Pexels visual passes and a specific photograph is not reje
   assert.ok(assessment.qualityScore >= 72);
 });
 
+test('a fantasy illustration is accepted and not penalized merely for being illustration or AI-generated', () => {
+  const option = { text: 'Befriend a Dragon' };
+  const illustration = assessImageCandidate({ id: 'dragon-art', width: 2400, height: 1400, alt: 'digital fantasy art illustration of a person petting a friendly dragon', downloadUrl: 'https://images.test/dragon-art.jpg' }, option);
+  assert.equal(illustration.accepted, true);
+  assert.equal(illustration.pexelsQualityPassed, true);
+});
+
+test('a visually relevant illustration outranks a generic diagram/icon result for the same concept', () => {
+  const option = { text: 'Befriend a Dragon' };
+  const relevant = assessImageCandidate({ id: 'dragon-art', width: 2400, height: 1400, alt: 'digital fantasy art illustration of a person petting a friendly dragon', downloadUrl: 'https://images.test/dragon-art.jpg' }, option);
+  const generic = assessImageCandidate({ id: 'dragon-diagram', width: 2400, height: 1400, alt: 'simple diagram of a person and a dragon symbol icon', downloadUrl: 'https://images.test/dragon-diagram.jpg' }, option);
+  assert.ok(relevant.finalScore > generic.finalScore);
+  assert.equal(relevant.accepted, true);
+  assert.equal(compareImageCandidates({ ...relevant, provider: 'Pixabay', id: 'dragon-art' }, { ...generic, provider: 'Pixabay', id: 'dragon-diagram' }) < 0, true);
+});
+
+test('a scene-based photograph outranks a generic tech abstraction/icon result even when both are acceptable candidates', () => {
+  const option = { text: 'Upload Your Consciousness' };
+  const cloud = assessImageCandidate({ id: 'cloud', width: 2000, height: 1200, alt: 'abstract technology cloud icon upload icon digital network background', downloadUrl: 'https://images.test/cloud.jpg' }, option);
+  const scene = assessImageCandidate({ id: 'scene', width: 2000, height: 1200, alt: 'dramatic photo of a person connected to glowing brain scanning machine consciousness transfer', downloadUrl: 'https://images.test/brain-scan.jpg' }, option);
+  assert.ok(scene.finalScore > cloud.finalScore);
+  assert.equal(compareImageCandidates({ ...scene, provider: 'Pixabay', id: 'scene' }, { ...cloud, provider: 'Pixabay', id: 'cloud' }) < 0, true);
+});
+
 test('candidate relevance gate rejects weak, undersized, and watermarked results', () => {
   const option = { text: 'Befriend a Dragon', searchQuery: 'friendly fantasy dragon' };
   const strong = assessImageCandidate({ id: 'strong', width: 2400, height: 1400, alt: 'person petting a friendly fantasy dragon creature', downloadUrl: 'https://images.test/dragon.jpg' }, option);

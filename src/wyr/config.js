@@ -41,7 +41,8 @@ export const getConfig = () => {
     groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 60_000, 1_000, 300_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
-    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 15, 8, 15),
+    // 8 scenes * 7.25s keeps the finished video at ~56-58s, safely under the 60s short-form limit.
+    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 7.25, 6, 15),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     imageRecoveryQueryRounds: integer('WYR_IMAGE_RECOVERY_QUERY_ROUNDS', 3, 0, 3),

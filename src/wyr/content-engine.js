@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONTENT_CATEGORIES, QUALITY_DIMENSIONS, groqRateLimitDetails } from './content.js';
+import { CONTENT_CATEGORIES, DILEMMA_STYLES, QUALITY_DIMENSIONS, groqRateLimitDetails } from './content.js';
 import { log, writeJsonAtomic } from './utils.js';
 
 const HISTORY_VERSION = 1;
@@ -87,7 +87,7 @@ export class ContentHistoryStore {
       if (checked.some(previous => compareDilemmas(question, previous).duplicate)) throw new ContentGenerationError('Content history changed during generation and now contains a duplicate; the job will not render.');
       checked.push(question);
     }
-    history.videos.push({ generatedAt, topic: plan.topic, categories: plan.questions.map(question => question.category), questions: plan.questions.map(question => ({ category: question.category, optionA: question.optionA.text, optionB: question.optionB.text, exact: exactDilemma(question), canonical: canonicalDilemma(question) })) });
+    history.videos.push({ generatedAt, topic: plan.topic, categories: plan.questions.map(question => question.category), questions: plan.questions.map(question => ({ category: question.category, dilemmaStyle: question.dilemmaStyle || null, optionA: question.optionA.text, optionB: question.optionB.text, conceptKeyA: question.optionA.conceptKey || null, conceptKeyB: question.optionB.conceptKey || null, exact: exactDilemma(question), canonical: canonicalDilemma(question) })) });
     writeJsonAtomic(this.filePath, history);
     return history;
   }
@@ -95,6 +95,10 @@ export class ContentHistoryStore {
 
 const historyQuestions = history => history.videos.flatMap(video => video.questions.map(question => ({ optionA: { text: question.optionA }, optionB: { text: question.optionB } })));
 const recentExclusions = history => history.videos.slice(-30).flatMap(video => video.questions.map(question => `${question.optionA} OR ${question.optionB}`));
+export const MOTIF_HISTORY_WINDOW = 50;
+export const recentMotifs = (history, windowSize = MOTIF_HISTORY_WINDOW) => new Set(
+  history.videos.slice(-windowSize).flatMap(video => video.questions.flatMap(question => [question.conceptKeyA, question.conceptKeyB].filter(Boolean))),
+);
 export const selectCategories = (history, count) => {
   const lastUsed = new Map(CONTENT_CATEGORIES.map(category => [category, -1]));
   history.videos.forEach((video, videoIndex) => video.categories.forEach(category => lastUsed.set(category, videoIndex)));
@@ -122,11 +126,17 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
   if (!Number.isInteger(policy.maxRetries) || policy.maxRetries < 0 || !Number.isFinite(policy.maxWaitMs) || policy.maxWaitMs < 0 || !Number.isFinite(policy.baseDelayMs) || policy.baseDelayMs < 0 || !Number.isFinite(policy.maxDelayMs) || policy.maxDelayMs < 0 || !Number.isFinite(policy.jitterMs) || policy.jitterMs < 0) throw new TypeError('Groq rate-limit policy values must be non-negative numbers, and maxRetries must be an integer.');
   const history = historyStore.load(); const priorQuestions = historyQuestions(history); const accepted = []; const rejectionSummary = [];
   const targetCategories = selectCategories(history, questionCount);
+  const blockedMotifs = recentMotifs(history);
+  const styleOffset = history.videos.length % DILEMMA_STYLES.length;
+  const targetStyles = Array.from({ length: questionCount }, (_, offset) => DILEMMA_STYLES[(styleOffset + offset) % DILEMMA_STYLES.length]);
+  const MAX_STYLE_REPEATS_PER_VIDEO = 2;
   let lastProviderError = null; let topic = null; let attempt = 0; let rateLimitRetries = 0; let rateLimitWaitedMs = 0;
   while (attempt < maxAttempts && accepted.length < questionCount) {
     const missingCategories = targetCategories.filter(category => !accepted.some(question => question.category === category));
+    const acceptedMotifs = new Set(accepted.flatMap(question => [question.optionA.conceptKey, question.optionB.conceptKey].filter(Boolean)));
+    const styleCounts = accepted.reduce((counts, question) => { if (question.dilemmaStyle) counts[question.dilemmaStyle] = (counts[question.dilemmaStyle] || 0) + 1; return counts; }, {});
     try {
-      const candidates = await provider.generatePlan(missingCategories.length, { categories: missingCategories, exclusions: [...recentExclusions(history), ...accepted.map(question => `${question.optionA.text} OR ${question.optionB.text}`)] });
+      const candidates = await provider.generatePlan(missingCategories.length, { categories: missingCategories, styles: targetStyles, exclusions: [...recentExclusions(history), ...accepted.map(question => `${question.optionA.text} OR ${question.optionB.text}`)], excludedMotifs: [...blockedMotifs, ...acceptedMotifs] });
       attempt += 1;
       topic ||= candidates.topic;
       for (const candidate of candidates.questions) {
@@ -137,8 +147,16 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
         const comparisons = [...priorQuestions, ...accepted].map(question => compareDilemmas(candidate, question));
         const duplicate = comparisons.find(result => result.duplicate);
         if (duplicate) reasons.push(`${duplicate.kind} duplicate detected`);
+        const candidateMotifs = [candidate.optionA?.conceptKey, candidate.optionB?.conceptKey].filter(Boolean);
+        const reusedMotif = candidateMotifs.find(motif => blockedMotifs.has(motif));
+        if (reusedMotif) reasons.push(`concept motif "${reusedMotif}" was used in a recent video`);
+        const duplicateMotifInVideo = candidateMotifs.find(motif => acceptedMotifs.has(motif));
+        if (duplicateMotifInVideo) reasons.push(`concept motif "${duplicateMotifInVideo}" duplicates another question in this video`);
+        if (candidate.dilemmaStyle && (styleCounts[candidate.dilemmaStyle] || 0) >= MAX_STYLE_REPEATS_PER_VIDEO) reasons.push(`dilemma style "${candidate.dilemmaStyle}" is overused in this video`);
         if (reasons.length) { rejectionSummary.push({ attempt, dilemma: `${candidate.optionA.text} OR ${candidate.optionB.text}`, reasons }); continue; }
         accepted.push({ ...candidate, duplicateCheck: { status: 'clear', comparedAgainst: priorQuestions.length + accepted.length } });
+        for (const motif of candidateMotifs) acceptedMotifs.add(motif);
+        if (candidate.dilemmaStyle) styleCounts[candidate.dilemmaStyle] = (styleCounts[candidate.dilemmaStyle] || 0) + 1;
       }
     } catch (error) {
       lastProviderError = error;

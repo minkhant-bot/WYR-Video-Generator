@@ -7,7 +7,7 @@ import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
-  constructor({ apiKey, timeoutMs }) { super(); this.apiKey = apiKey; this.timeoutMs = timeoutMs; }
+  constructor({ apiKey, timeoutMs }) { super(); this.apiKey = apiKey; this.timeoutMs = timeoutMs; this.name = 'Pexels'; }
   async search(query) {
     const url = new URL('https://api.pexels.com/v1/search'); url.searchParams.set('query', query); url.searchParams.set('per_page', '40'); url.searchParams.set('orientation', 'landscape');
     const response = await fetchWithTimeout(url, { headers: { Authorization: this.apiKey } }, this.timeoutMs);
@@ -87,9 +87,10 @@ const SOURCE_QUALITY_PATTERN = /\b(meme(?:generator)?|quote(?:s)?|infographic|di
 const HARD_FORMAT_PATTERN = /\b(article|news|blog|thumbnail|video|youtube|watch|screenshot|website|browser|app|user interface|dashboard|infographic|poster|banner|ad|advertisement|promotional?|promo|quote card|quote poster|meme|template|job listing|careers?|marketplace|auction|product listing|product page|shop|listing|play button|stream)\b/gi;
 const HARD_DOMAIN_PATTERN = /(^|\.)(etsy|scale\.jobs|jobs|careers|marketplace|auction|auctions|01net|cbs8)(\.|$)|(^|\.)(auctions\.)?yahoo\.co\.jp$/i;
 const HARD_LAYOUT_PATTERN = /\b(card layout|text graphic|text-heavy|text heavy|graphic design|social post|press release|promo image|article image)\b/i;
-const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
+const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|line icon|silhouette icon|button icon|symbol icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
+const GENERIC_TECH_ABSTRACTION_PATTERN = /\b(cloud icon|upload icon|download icon|gear icon|network icon|circuit board|abstract technology|digital network|data flow|binary code|matrix code|generic technology|tech background|futuristic background|abstract background|glowing network|node network|connection lines|abstract data|generic diagram|flowchart|pie chart|bar chart|symbol only|isolated symbol|generic symbol)\b/i;
 const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation)\b/i;
-const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
+const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|fantasy art|concept art|digital art|3d render|artwork|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
 export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
 export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['DuckDuckGo Images', 'Pexels'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES, minimumFinalScore: 62, minimumCandidateMargin: 4 });
@@ -152,16 +153,16 @@ export const assessImageCandidate = (candidate, option) => {
   const targetRatio = 750 / 450; const ratio = candidate.width / candidate.height;
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
   const resolution = Math.min(1, Math.min(candidate.width / 1600, candidate.height / 900));
+  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText) || GENERIC_TECH_ABSTRACTION_PATTERN.test(searchableText); const corporateWeak = CORPORATE_WEAK_PATTERN.test(searchableText); const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
   const relevanceScore = Math.round((coreCoverage * 60 + relevance * 20 + cropFit * 10 + resolution * 8 + Math.max(0, 2 - Number(candidate.position || 0) * 0.08)) * 10) / 10;
-  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText); const corporateWeak = CORPORATE_WEAK_PATTERN.test(searchableText); const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
   const optionWords = normalizeWords(option.text); const bankGrowthRequired = optionWords.includes('double') && (optionWords.includes('bank') || optionWords.includes('balance'));
   const bankGrowthDepicted = !bankGrowthRequired || containsAny(allTokens, ['big', 'double', 'doubled', 'doubling', 'multiply', 'multiplying', 'increase', 'increasing', 'growth', 'growing', 'overflowing', 'surrounded', 'endless', 'abundance', 'raining', 'falling', 'pile', 'stacks']);
-  const conceptClarity = clampScore(coreCoverage * 40 + intentCoverage * 60 - (bankGrowthDepicted ? 0 : 18));
-  const specificity = clampScore(intentCoverage * 65 + Math.min(25, matched.length * 6) + coreCoverage * 10 - (weakVisual ? 22 : 0) - (corporateWeak ? 14 : 0) - (bankGrowthDepicted ? 0 : 28));
-  const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 30 : 0) - (corporateWeak ? 18 : 0));
+  const conceptClarity = clampScore(coreCoverage * 40 + intentCoverage * 60 - (bankGrowthDepicted ? 0 : 18) - (weakVisual ? 20 : 0));
+  const specificity = clampScore(intentCoverage * 65 + Math.min(25, matched.length * 6) + coreCoverage * 10 - (weakVisual ? 32 : 0) - (corporateWeak ? 14 : 0) - (bankGrowthDepicted ? 0 : 28));
+  const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 34 : 0) - (corporateWeak ? 18 : 0));
   const wyrSuitability = clampScore(conceptClarity * 0.42 + specificity * 0.28 + visualImpact * 0.2 + cropFit * 10);
   const qualityScore = clampScore(conceptClarity * 0.34 + specificity * 0.28 + visualImpact * 0.2 + wyrSuitability * 0.18);
-  const finalScore = clampScore(qualityScore * 0.45 + relevanceScore * 0.35 + conceptClarity * 0.2);
+  const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 38) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 38.0`);
   const accepted = rejectionReasons.length === 0;

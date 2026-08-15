@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IMAGE_PROVIDER_ORDER, PixabayImageProvider, selectedCandidates, selectImageCandidate } from './image-picker.js';
+import { createImageSelection, IMAGE_PROVIDER_ORDER, PixabayImageProvider, selectedCandidates, selectImageCandidate } from './image-picker.js';
 
 const selection = () => ({ total: 16, selectedCount: 0, slots: { Q1A: { key: 'Q1A', questionIndex: 0, slot: 'A', optionText: 'Teleport Anywhere', candidates: [{ candidateKey: 'Pexels:one|https://images.test/one.jpg', provider: 'Pexels', id: 'one', previewUrl: 'https://images.test/one.jpg' }, { candidateKey: 'Pixabay:two|https://images.test/two.jpg', provider: 'Pixabay', id: 'two', previewUrl: 'https://images.test/two.jpg' }], selectedId: null } } });
 
@@ -27,5 +27,22 @@ test('Pixabay is the automatic primary and uses the official API shape', async (
     global.fetch = async url => { requested = new URL(url); return { ok: true, async json() { return { hits: [{ id: 7, imageWidth: 1600, imageHeight: 900, tags: 'person dragon fantasy', pageURL: 'https://pixabay.com/images/id-7/', largeImageURL: 'https://cdn.pixabay.com/7.jpg', webformatURL: 'https://cdn.pixabay.com/7-preview.jpg' }] }; } }; };
     const provider = new PixabayImageProvider({ apiKey: 'test-only', timeoutMs: 1000 }); const results = await provider.search('dragon', 1);
     assert.equal(requested.hostname, 'pixabay.com'); assert.equal(requested.searchParams.get('q'), 'dragon'); assert.equal(results[0].provider, 'Pixabay'); assert.equal(results[0].previewUrl, 'https://cdn.pixabay.com/7-preview.jpg');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('Pexels fallback still works when no Pixabay key is configured', async () => {
+  const originalFetch = global.fetch; let counter = 0;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url); assert.equal(parsed.hostname, 'api.pexels.com'); counter += 1;
+      return { ok: true, async json() { return { photos: [{ id: counter, width: 1600, height: 900, alt: 'person dragon fantasy cinematic', url: `https://pexels.test/${counter}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${counter}-large.jpg`, original: `https://pexels.test/${counter}.jpg` } }] }; } };
+    };
+    const plan = { questions: [{ index: 0, optionA: { text: 'Befriend a Dragon', searchQuery: 'dragon fantasy' }, optionB: { text: 'Explore Mars', searchQuery: 'mars planet' } }] };
+    const config = { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 };
+    const selection = await createImageSelection({ plan, config });
+    assert.deepEqual(selection.providers, ['Pexels']);
+    assert.equal(selection.slots.Q1A.candidates.every(candidate => candidate.provider === 'Pexels'), true);
+    assert.ok(selection.slots.Q1A.selectedId);
+    assert.ok(selection.slots.Q1B.selectedId);
   } finally { global.fetch = originalFetch; }
 });

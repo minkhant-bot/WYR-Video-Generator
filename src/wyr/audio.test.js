@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
+import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, RATE_COMPRESSION_LADDER } from './audio.js';
 import { WYR_TEMPLATE } from './template.js';
 import { assertProductionAudioInputs } from './media.js';
 
@@ -28,6 +28,67 @@ test('voice generation enforces concurrency, uses independent clients, and prese
     assert.deepEqual(voiceovers.map(voiceover => voiceover.duration), [1, 2, 3, 4, 5, 6]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + WYR_TEMPLATE.timing.countdownSequenceDuration + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+const rateCompressionHarness = durationsByRate => {
+  const calls = [];
+  return {
+    calls,
+    ttsFactory: options => ({ call: async () => { calls.push(options.rate); return { data: Buffer.alloc(1200, 1), subtitles: [] }; } }),
+    measureDuration: async () => durationsByRate[calls.at(-1)],
+  };
+};
+
+test('narration that would blow the scene duration budget is compressed with faster (but still natural) TTS rates', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-compress-'));
+  try {
+    const harness = rateCompressionHarness({ '-10%': 5.5, '-5%': 5.0, '+0%': 4.4, '+8%': 3.6, '+15%': 3.0, '+22%': 2.4 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 7.25 });
+    assert.deepEqual(harness.calls, ['-10%', '-5%', '+0%', '+8%', '+15%']);
+    assert.equal(voiceovers[0].rate, '+15%');
+    assert.equal(voiceovers[0].duration, 3.0);
+    assert.ok(SCENE_TAIL_SECONDS + voiceovers[0].duration <= 7.25);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('narration that already fits the scene duration budget is not regenerated or sped up', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-no-compress-'));
+  try {
+    const harness = rateCompressionHarness({ '-10%': 2.0 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 7.25 });
+    assert.deepEqual(harness.calls, ['-10%']);
+    assert.equal(voiceovers[0].rate, '-10%');
+    assert.equal(voiceovers[0].duration, 2.0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('compression keeps the shortest achievable narration and never abandons or truncates audio even if the tight budget is unreachable', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-compress-floor-'));
+  try {
+    const harness = rateCompressionHarness({ '-10%': 5.5, '-5%': 5.0, '+0%': 4.4, '+8%': 3.6, '+15%': 3.0, '+22%': 2.4 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 5.0 });
+    assert.deepEqual(harness.calls, ['-10%', '-5%', '+0%', '+8%', '+15%', '+22%']);
+    assert.equal(voiceovers[0].rate, '+22%');
+    assert.equal(voiceovers[0].duration, 2.4);
+    assert.ok(fs.statSync(voiceovers[0].localPath).size > 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('RATE_COMPRESSION_LADDER only ever speeds narration up relative to the configured base rate', () => {
+  assert.ok(RATE_COMPRESSION_LADDER.includes('-10%'));
+  const sorted = [...RATE_COMPRESSION_LADDER].map(value => Number(value.replace('%', '')));
+  assert.deepEqual(sorted, [...sorted].sort((left, right) => left - right));
+});
+
+test('eight scenes at the production duration budget keep the finished video safely under 60 seconds', () => {
+  const maximumSceneDuration = 7.25;
+  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.05;
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
+  assert.equal(timeline.scenes.length, 8);
+  assert.ok(timeline.totalDuration < 60, `expected < 60s, got ${timeline.totalDuration}`);
+  assert.ok(timeline.totalDuration <= 59);
+  assert.ok(timeline.totalDuration >= 55);
+});
+
 test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
 test('timeline rejects narration that would create an excessive scene', () => { assert.throws(() => buildSceneTimeline({ voiceovers: [{ duration: 12 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }), /exceed/); });
 test('SFX schedule contains entrance, reveal, and transition at the visual timestamps in every scene', () => {

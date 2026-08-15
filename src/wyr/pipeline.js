@@ -57,7 +57,7 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: providers.length === 1 ? providers[0] : 'Mixed', providers, photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, provider: asset.provider, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.sourcePageUrl || asset.photoUrl, sourcePageUrl: asset.sourcePageUrl, originalImageUrl: asset.originalImageUrl, sourceDomain: asset.sourceDomain, width: asset.width, height: asset.height, license: asset.license || 'unknown', licenseUrl: asset.licenseUrl || null, usageRights: asset.usageRights || 'unknown', sha256: asset.sha256, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, sceneDurationBudget: config.maximumSceneDuration, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
     writeJsonAtomic(path.join(job.workspace, 'voiceovers.json'), relativeMetadata(voiceovers, job.workspace));
 
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });

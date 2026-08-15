@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertLockedImageAssets, buildStillImageInputArgs, renderSceneSegments } from './media.js';
+import { assertLockedImageAssets, buildFramedImageChain, buildStillImageInputArgs, renderSceneSegments } from './media.js';
 import { resolveFfmpegPath } from './runtime.js';
+import { WYR_TEMPLATE } from './template.js';
 
 test('scene rendering enforces concurrency and preserves concat order', async () => {
   const plan = { questions: Array.from({ length: 6 }, (_, index) => ({ index })) };
@@ -57,6 +58,58 @@ test('scene rendering verifies locked image hashes before using local assets', a
   const asset = { localPath: image, filename: 'locked.jpg', locked: true, sha256: hash };
   try { assert.equal(assertLockedImageAssets([asset]), true); fs.appendFileSync(image, 'changed'); assert.throws(() => assertLockedImageAssets([asset]), /hash mismatch/); }
   finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('framed image chain scales the foreground with contain (decrease), never crop, and only crops the separate blurred background fill', () => {
+  const chain = buildFramedImageChain({ input: '0:v', width: 750, height: 450, fps: 30, outLabel: 'aimg', chainId: 'a' });
+  const joined = chain.join(';');
+  assert.match(joined, /\[asrc1\]scale=750:450:force_original_aspect_ratio=increase,crop=750:450:[^,]+,gblur=sigma=\d+[^[]*\[abg\]/);
+  assert.match(joined, /\[asrc2\]scale=750:450:force_original_aspect_ratio=decrease,setsar=1,format=rgba\[afg\]/);
+  assert.equal(/\[afg\]/.test(joined.split('[afg]')[1]?.split(';')[0] || ''), false);
+  const foregroundStage = joined.split('[asrc2]')[1].split(';')[0];
+  assert.equal(foregroundStage.includes('crop='), false);
+  assert.match(joined, /\[abg\]\[afg\]overlay=x=\(W-w\)\/2:y=\(H-h\)\/2:format=auto,format=rgba\[aimg\]/);
+});
+
+test('non-destructive framing preserves the full subject of an extreme-aspect-ratio image instead of center-cropping it away', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-safe-framing-')); const ffmpeg = resolveFfmpegPath();
+  try {
+    const width = 300; const height = 1500;
+    const header = Buffer.from(`P6\n${width} ${height}\n255\n`);
+    const pixels = Buffer.alloc(width * height * 3);
+    for (let y = 0; y < height; y += 1) {
+      const color = y < 500 ? [255, 0, 0] : y < 1000 ? [200, 200, 200] : [0, 255, 0];
+      for (let x = 0; x < width; x += 1) { const i = (y * width + x) * 3; pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2]; }
+    }
+    const ppm = path.join(root, 'tall.ppm'); const sourceJpg = path.join(root, 'tall.jpg');
+    fs.writeFileSync(ppm, Buffer.concat([header, pixels]));
+    const convert = spawnSync(ffmpeg, ['-y', '-i', ppm, '-q:v', '2', sourceJpg], { encoding: 'utf8' }); assert.equal(convert.status, 0, convert.stderr);
+
+    const renderDir = path.join(root, 'render'); fs.mkdirSync(renderDir);
+    const assets = [
+      { questionIndex: 0, slot: 'A', localPath: sourceJpg },
+      { questionIndex: 0, slot: 'B', localPath: sourceJpg },
+    ];
+    const [segment] = await renderSceneSegments({
+      plan: { questions: [{ index: 0, optionA: { text: 'Top Choice', percentage: 50 }, optionB: { text: 'Bottom Choice', percentage: 50 } }] },
+      assets, duration: 2, renderDir, sceneConcurrency: 1, ffmpegThreads: 1,
+    });
+
+    const { layout } = WYR_TEMPLATE;
+    const slotX = (WYR_TEMPLATE.canvas.width - layout.imageWidth) / 2;
+    const samplePatch = y => {
+      const result = spawnSync(ffmpeg, ['-ss', '1', '-i', segment, '-vframes', '1', '-vf', `crop=12:8:${Math.round(slotX + layout.imageWidth / 2 - 6)}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { maxBuffer: 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr?.toString());
+      const buffer = result.stdout; const pixelCount = buffer.length / 3; let r = 0; let g = 0; let b = 0;
+      for (let i = 0; i < buffer.length; i += 3) { r += buffer[i]; g += buffer[i + 1]; b += buffer[i + 2]; }
+      return { r: r / pixelCount, g: g / pixelCount, b: b / pixelCount };
+    };
+
+    const topPatch = samplePatch(layout.topImageY + 10);
+    const bottomPatch = samplePatch(layout.topImageY + layout.imageHeight - 10);
+    assert.ok(topPatch.r > 180 && topPatch.g < 80, `expected the preserved top of the source image (red) near the slot's top edge; sampled ${JSON.stringify(topPatch)}`);
+    assert.ok(bottomPatch.g > 180 && bottomPatch.r < 80, `expected the preserved bottom of the source image (green) near the slot's bottom edge; sampled ${JSON.stringify(bottomPatch)}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('rendering consumes locked local assets without image-provider calls', async () => {

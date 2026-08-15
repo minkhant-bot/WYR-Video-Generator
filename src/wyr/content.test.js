@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addIllustrativePercentages, GroqContentProvider, validatePlan } from './content.js';
+import { addIllustrativePercentages, DILEMMA_STYLES, GroqContentProvider, validatePlan } from './content.js';
 
 const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
 const question = (optionA, optionB, category = 'travel') => ({ category, quality, optionA, optionB });
@@ -13,6 +13,26 @@ test('validatePlan rejects near-duplicate questions', () => { const questions = 
   question({ text: 'Own a mountain cabin', searchQuery: 'snow cabin' }, { text: 'Own a beach villa', searchQuery: 'tropical villa' }, 'dream homes'),
 ]; assert.throws(() => validatePlan({ topic: 'Homes', questions }, 2), /too similar/); });
 test('illustrative percentages are deterministic and complementary', () => { const plan = validatePlan({ topic: 'Travel', questions: [question({ text: 'Mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1); const first = addIllustrativePercentages(plan); const second = addIllustrativePercentages(plan); assert.deepEqual(first, second); assert.equal(first.questions[0].optionA.percentage + first.questions[0].optionB.percentage, 100); assert.equal(first.percentages.mode, 'illustrative'); });
+
+test('paraphrased options given the same conceptKey normalize to the same identifier', () => {
+  const planA = validatePlan({ topic: 'Travel', questions: [question({ text: 'Open a portal anywhere', searchQuery: 'magic portal doorway', conceptKey: 'Teleportation' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1);
+  const planB = validatePlan({ topic: 'Travel', questions: [question({ text: 'Travel instantly to any country', searchQuery: 'instant travel glow', conceptKey: 'Teleportation' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1);
+  assert.equal(planA.questions[0].optionA.conceptKey, 'teleportation');
+  assert.equal(planB.questions[0].optionA.conceptKey, 'teleportation');
+});
+
+test('conceptKey falls back to a derived slug when the provider omits it', () => {
+  const plan = validatePlan({ topic: 'Travel', questions: [question({ text: 'Become invisible forever', searchQuery: 'invisible person' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1);
+  assert.match(plan.questions[0].optionA.conceptKey, /^[a-z0-9]+(-[a-z0-9]+)*$/);
+  assert.ok(plan.questions[0].optionA.conceptKey.length > 0);
+});
+
+test('dilemmaStyle is normalized against the supported style list with a safe default', () => {
+  const styled = validatePlan({ topic: 'Travel', questions: [{ ...question({ text: 'Mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' }), dilemmaStyle: 'Discovery' }] }, 1);
+  assert.equal(styled.questions[0].dilemmaStyle, 'discovery');
+  const unstyled = validatePlan({ topic: 'Travel', questions: [question({ text: 'Mountain cabin', searchQuery: 'mountain cabin' }, { text: 'Beach villa', searchQuery: 'beach villa' })] }, 1);
+  assert.ok(DILEMMA_STYLES.includes(unstyled.questions[0].dilemmaStyle));
+});
 
 const categories = ['dream homes', 'adventure', 'fantasy', 'luxury', 'ocean', 'impossible choices', 'fame', 'travel'];
 const generatedPlan = () => ({ topic: 'Dream adventures', questions: [

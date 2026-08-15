@@ -14,13 +14,30 @@ export const CONTENT_CATEGORIES = Object.freeze([
 export const QUALITY_DIMENSIONS = Object.freeze([
   'dilemmaStrength', 'curiosity', 'emotionalPull', 'visualPotential', 'readability',
 ]);
+export const DILEMMA_STYLES = Object.freeze([
+  'tradeoff', 'power', 'discovery', 'emotional choice', 'future technology', 'weird/funny',
+  'lifestyle', 'fantasy', 'consequence', 'adventure', 'social', 'impossible scenario',
+]);
 
 const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+const CONCEPT_KEY_PATTERN = /^[a-z0-9]+(-[a-z0-9]+){0,3}$/;
+const CONCEPT_KEY_FILLER = new Set(['the', 'and', 'for', 'you', 'your', 'with', 'every', 'own', 'have', 'can', 'into', 'anywhere', 'instantly', 'forever', 'always', 'never']);
+const conceptKeyFallback = text => {
+  const words = String(text || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !CONCEPT_KEY_FILLER.has(word));
+  return words.slice(0, 3).join('-') || 'concept';
+};
+const normalizeConceptKey = (value, fallbackText) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (normalized && normalized.length <= 40 && CONCEPT_KEY_PATTERN.test(normalized)) return normalized;
+  return conceptKeyFallback(fallbackText);
+};
+const normalizeDilemmaStyle = value => { const style = normalize(value).toLowerCase(); return DILEMMA_STYLES.includes(style) ? style : DILEMMA_STYLES[0]; };
 const normalizeOption = (option, index, label) => {
   const text = normalize(option?.text); const searchQuery = normalize(option?.searchQuery);
   if (text.length < 3 || text.length > 500) throw new Error(`Question ${index + 1} option ${label} text must contain 3–500 characters before visual fitting.`);
   if (searchQuery.length < 3 || searchQuery.length > 100) throw new Error(`Question ${index + 1} option ${label} search query must contain 3–100 characters.`);
-  return { text, searchQuery };
+  const conceptKey = normalizeConceptKey(option?.conceptKey, text);
+  return { text, searchQuery, conceptKey };
 };
 
 const normalizeQuality = (quality, index) => {
@@ -49,12 +66,13 @@ export const validatePlan = (input, questionCount) => {
     const category = normalize(question?.category).toLowerCase();
     if (!CONTENT_CATEGORIES.includes(category)) throw new Error(`Question ${index + 1} category must be one of the supported production categories.`);
     const quality = normalizeQuality(question?.quality, index);
+    const dilemmaStyle = normalizeDilemmaStyle(question?.dilemmaStyle);
     if (optionA.text.toLowerCase() === optionB.text.toLowerCase()) throw new Error(`Question ${index + 1} has identical options.`);
     const signature = [optionA.text, optionB.text].map(text => text.toLowerCase()).sort().join('|');
     if (seen.has(signature)) throw new Error(`Question ${index + 1} duplicates another question.`);
     const words = significantWords(signature);
     if (previousWordSets.some(previous => similarity(words, previous) >= 0.65)) throw new Error(`Question ${index + 1} is too similar to another question.`);
-    seen.add(signature); previousWordSets.push(words); return { index, category, quality, optionA, optionB };
+    seen.add(signature); previousWordSets.push(words); return { index, category, quality, dilemmaStyle, optionA, optionB };
   });
   return { version: 1, topic, percentages: null, questions };
 };
@@ -81,22 +99,25 @@ export const groqRateLimitDetails = error => {
 };
 
 const planSchema = () => {
-  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' } }, required: ['text', 'searchQuery'], additionalProperties: false };
+  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' }, conceptKey: { type: 'string' } }, required: ['text', 'searchQuery', 'conceptKey'], additionalProperties: false };
   const quality = { type: 'object', properties: Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => [dimension, { type: 'integer', minimum: 1, maximum: 10 }])), required: QUALITY_DIMENSIONS, additionalProperties: false };
-  const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, quality, optionA: option, optionB: option }, required: ['category', 'quality', 'optionA', 'optionB'], additionalProperties: false };
+  const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, dilemmaStyle: { type: 'string', enum: DILEMMA_STYLES }, quality, optionA: option, optionB: option }, required: ['category', 'dilemmaStyle', 'quality', 'optionA', 'optionB'], additionalProperties: false };
   return { type: 'object', properties: { topic: { type: 'string' }, questions: { type: 'array', items: question } }, required: ['topic', 'questions'], additionalProperties: false };
 };
 
 const contextText = context => {
   const categories = Array.isArray(context?.categories) ? context.categories.filter(category => CONTENT_CATEGORIES.includes(category)) : [];
   const exclusions = Array.isArray(context?.exclusions) ? context.exclusions.slice(-80) : [];
-  return `${categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : ''}${exclusions.length ? ` Do not repeat or paraphrase these prior dilemmas: ${exclusions.join('; ')}.` : ''}`;
+  const motifs = Array.isArray(context?.excludedMotifs) ? [...new Set(context.excludedMotifs)].slice(-150) : [];
+  const styles = Array.isArray(context?.styles) ? context.styles.filter(style => DILEMMA_STYLES.includes(style)) : [];
+  return `${categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : ''}${styles.length ? ` Use these dilemma styles once each, matched to the same order: ${styles.join(', ')}.` : ''}${exclusions.length ? ` Do not repeat or paraphrase these prior dilemmas: ${exclusions.join('; ')}.` : ''}${motifs.length ? ` Do not reuse these core concepts/motifs even with different wording (e.g. teleportation, mind-reading, invisibility, time-freeze, dragon, private-island, mars, flying-car, million-dollars, memory-loss, robot-companion, alien-city, lost-civilization, underwater-world, or any other already-used idea): ${motifs.join(', ')}.` : ''}`;
 };
-const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} exceptionally engaging English Would You Rather dilemmas for short-form video.${contextText(context)} Both options must be tempting, surprising, funny, or emotionally compelling; neither may be obviously superior. Prefer 2–8 words per option and never exceed 55 characters. Avoid generic pairs such as coffee/tea, cats/dogs, summer/winter, or city/countryside. Avoid politics, graphic violence, sexual or hateful content, dangerous challenges, and complicated conditions. Give each question one supported category and honest integer 1–10 scores for dilemmaStrength, curiosity, emotionalPull, visualPotential, and readability. Every score should be at least 7 only when the candidate truly earns it. Each Pexels searchQuery must be 2–5 concrete visual words that clearly distinguish the two choices. Return no percentages or explanations.`;
+const CONCEPT_KEY_INSTRUCTIONS = 'For each option also produce a conceptKey: a short, stable, normalized machine-readable identifier (1–3 lowercase hyphenated words, e.g. "teleportation", "mind-reading", "private-island") describing the actual core concept, independent of exact wording — paraphrases of the same idea must produce the same conceptKey. Also give each question a dilemmaStyle chosen from the supported style list, and vary style across the set — avoid making most questions feel like superpower-vs-superpower, luxury-vs-luxury, destination-vs-destination, or own-X-vs-own-Y; mix tradeoffs, power, discovery, emotional choices, future technology, weird/funny, lifestyle, fantasy, consequence, adventure, social, and impossible-scenario framings.';
+const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} exceptionally engaging English Would You Rather dilemmas for short-form video.${contextText(context)} Both options must be tempting, surprising, funny, or emotionally compelling; neither may be obviously superior. Prefer 2–8 words per option and never exceed 55 characters. Avoid generic pairs such as coffee/tea, cats/dogs, summer/winter, or city/countryside. Avoid politics, graphic violence, sexual or hateful content, dangerous challenges, and complicated conditions. Give each question one supported category and honest integer 1–10 scores for dilemmaStrength, curiosity, emotionalPull, visualPotential, and readability. Every score should be at least 7 only when the candidate truly earns it. Each Pexels searchQuery must be 2–5 concrete visual words that clearly distinguish the two choices. ${CONCEPT_KEY_INSTRUCTIONS} Return no percentages or explanations.`;
 const repairPrompt = (questionCount, attempt, context) => attempt === 2
-  ? `Return exactly ${questionCount} strong, distinct dilemmas in the required JSON schema.${contextText(context)} Use supported categories and all five honest integer quality scores. Each option must be instantly readable, ideally 2–8 words and under 55 characters. Both sides must be compelling. Use concrete 2–5 word image queries. No percentages or extra fields.`
-  : `JSON only. Exactly ${questionCount} distinct high-quality dilemmas.${contextText(context)} Include category, all five quality scores, optionA and optionB with short text and concrete searchQuery.`;
-const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, 3, context)} Shape: {"topic":"...","questions":[{"category":"fantasy","quality":{"dilemmaStrength":8,"curiosity":8,"emotionalPull":8,"visualPotential":8,"readability":9},"optionA":{"text":"...","searchQuery":"..."},"optionB":{"text":"...","searchQuery":"..."}}]}`;
+  ? `Return exactly ${questionCount} strong, distinct dilemmas in the required JSON schema.${contextText(context)} Use supported categories and all five honest integer quality scores. Each option must be instantly readable, ideally 2–8 words and under 55 characters. Both sides must be compelling. Use concrete 2–5 word image queries. ${CONCEPT_KEY_INSTRUCTIONS} No percentages or extra fields.`
+  : `JSON only. Exactly ${questionCount} distinct high-quality dilemmas.${contextText(context)} Include category, dilemmaStyle, all five quality scores, optionA and optionB with short text, concrete searchQuery, and conceptKey. ${CONCEPT_KEY_INSTRUCTIONS}`;
+const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, 3, context)} Shape: {"topic":"...","questions":[{"category":"fantasy","dilemmaStyle":"discovery","quality":{"dilemmaStrength":8,"curiosity":8,"emotionalPull":8,"visualPotential":8,"readability":9},"optionA":{"text":"...","searchQuery":"...","conceptKey":"..."},"optionB":{"text":"...","searchQuery":"...","conceptKey":"..."}}]}`;
 
 const groqErrorFromResponse = async response => {
   const raw = await response.text(); let payload;

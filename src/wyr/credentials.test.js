@@ -73,9 +73,9 @@ test('pipeline defaults to a slower natural Edge speaking rate', () => {
   finally { original === undefined ? delete process.env.WYR_EDGE_VOICE_RATE : process.env.WYR_EDGE_VOICE_RATE = original; }
 });
 
-test('pipeline allows scenes to grow for slower narration and countdown pacing', () => {
+test('pipeline caps scene growth tightly enough to keep the finished video under 60 seconds', () => {
   const original = process.env.WYR_MAX_SCENE_DURATION;
-  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 15); }
+  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 7.25); }
   finally { original === undefined ? delete process.env.WYR_MAX_SCENE_DURATION : process.env.WYR_MAX_SCENE_DURATION = original; }
 });
 
