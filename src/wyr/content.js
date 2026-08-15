@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { fetchWithTimeout } from './utils.js';
+import { fetchWithTimeout, log } from './utils.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const STRUCTURED_ATTEMPTS = 3;
@@ -133,6 +133,35 @@ const detectLimitType = (message, fallbackType) => {
   return fallbackType === 'tokens' || fallbackType === 'requests' ? fallbackType : null;
 };
 
+// Groq returns x-ratelimit-reset-tokens/requests as a short duration string (e.g. "7.66s",
+// "1m7.66s", "500ms"), not an absolute timestamp. Parses it to milliseconds; returns null (never
+// throws) for anything unrecognized so an unexpected format can only disable proactive throttling,
+// not corrupt it — the reactive 429 retry path remains the authoritative fallback either way.
+export const parseGroqResetDuration = value => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const plainSeconds = Number(text);
+  if (Number.isFinite(plainSeconds)) return Math.max(0, plainSeconds * 1000);
+  const match = text.match(/^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$/i);
+  if (!match || !(match[1] || match[2] || match[3] || match[4])) return null;
+  const [, hours, minutes, seconds, millis] = match;
+  const totalMs = (Number(hours || 0) * 3600 + Number(minutes || 0) * 60 + Number(seconds || 0)) * 1000 + Number(millis || 0);
+  return Number.isFinite(totalMs) ? Math.max(0, totalMs) : null;
+};
+
+// Proactive throttling, layered on top of (not instead of) the reactive 429 retry in
+// content-engine.js. Groq returns remaining-capacity headers on EVERY response, success or not —
+// previously that information was only captured on 429s and only logged, never used to avoid the
+// next 429. A measured worst-case request costs ~3500 tokens (prompt + schema + completion
+// budget); 4000 leaves a safety margin. The wait is deliberately capped well under a full ~60s
+// TPM window: this is a best-effort front-line reduction in 429 frequency, not a guarantee — if
+// it's insufficient or the header is stale/unparseable, the bounded reactive retry in
+// content-engine.js (7 retries / 150s) remains the authoritative safety net.
+const MIN_SAFE_REMAINING_TOKENS = 4000;
+const MAX_PROACTIVE_WAIT_MS = 20_000;
+const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 const planSchema = () => {
   const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' }, conceptKey: { type: 'string' } }, required: ['text', 'searchQuery', 'conceptKey'], additionalProperties: false };
   const quality = { type: 'object', properties: Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => [dimension, { type: 'integer', minimum: 1, maximum: 10 }])), required: QUALITY_DIMENSIONS, additionalProperties: false };
@@ -200,9 +229,41 @@ const validateGeneratedPlan = (text, questionCount) => {
 };
 
 export class GroqContentProvider extends ContentProvider {
-  constructor({ apiKey, model, timeoutMs }) { super(); this.apiKey = apiKey; this.model = model; this.timeoutMs = timeoutMs; this.requestCount = 0; this.rateLimitCount = 0; }
+  constructor({ apiKey, model, timeoutMs, sleep = defaultSleep }) {
+    super(); this.apiKey = apiKey; this.model = model; this.timeoutMs = timeoutMs; this.sleep = sleep;
+    this.requestCount = 0; this.rateLimitCount = 0; this.proactiveThrottleCount = 0; this.proactiveThrottleWaitedMs = 0;
+    this.rateLimitSnapshot = null;
+  }
+  // Records the capacity Groq reported as of THIS response, for the next call to consult.
+  recordRateLimitSnapshot(response) {
+    const headers = extractRateLimitHeaders(response);
+    const remainingTokens = headers['x-ratelimit-remaining-tokens'] !== undefined ? Number(headers['x-ratelimit-remaining-tokens']) : null;
+    if (!Number.isFinite(remainingTokens)) return;
+    this.rateLimitSnapshot = {
+      capturedAt: Date.now(),
+      remainingTokens,
+      remainingRequests: headers['x-ratelimit-remaining-requests'] !== undefined ? Number(headers['x-ratelimit-remaining-requests']) : null,
+      resetTokensMs: parseGroqResetDuration(headers['x-ratelimit-reset-tokens']),
+    };
+  }
+  // Consults the last known snapshot BEFORE firing a request; waits (bounded) if capacity looks
+  // too low to safely fit another request, instead of firing and predictably getting a 429.
+  async throttleForCapacity() {
+    const snapshot = this.rateLimitSnapshot;
+    if (!snapshot || !Number.isFinite(snapshot.remainingTokens) || !Number.isFinite(snapshot.resetTokensMs)) return false;
+    if (snapshot.remainingTokens >= MIN_SAFE_REMAINING_TOKENS) return false;
+    const elapsedMs = Date.now() - snapshot.capturedAt;
+    const waitMs = Math.min(MAX_PROACTIVE_WAIT_MS, Math.max(0, snapshot.resetTokensMs - elapsedMs));
+    if (waitMs <= 0) return false;
+    this.proactiveThrottleCount += 1; this.proactiveThrottleWaitedMs += waitMs;
+    log('content.groq_proactive_throttle', { remainingTokens: snapshot.remainingTokens, minSafeRemainingTokens: MIN_SAFE_REMAINING_TOKENS, waitMs, snapshotAgeMs: elapsedMs });
+    await this.sleep(waitMs);
+    this.rateLimitSnapshot = null; // stale; the next response will provide a fresh reading
+    return true;
+  }
   async requestPlan({ questionCount, mode, attempt = 1, context = {} }) {
     const structured = mode === 'json_schema';
+    await this.throttleForCapacity();
     this.requestCount += 1;
     const response = await fetchWithTimeout(GROQ_URL, {
       method: 'POST',
@@ -224,6 +285,7 @@ export class GroqContentProvider extends ContentProvider {
           : { type: 'json_object' },
       }),
     }, this.timeoutMs);
+    this.recordRateLimitSnapshot(response);
     if (!response.ok) { if (response.status === 429) this.rateLimitCount += 1; throw await groqErrorFromResponse(response); }
     let payload;
     try { payload = await response.json(); }
@@ -246,6 +308,7 @@ export class GroqContentProvider extends ContentProvider {
     }
   }
   async generateVisualQueries({ optionText, attemptedQueries = [], maxQueries = 3 }) {
+    await this.throttleForCapacity();
     const response = await fetchWithTimeout(GROQ_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
@@ -260,6 +323,7 @@ export class GroqContentProvider extends ContentProvider {
         response_format: { type: 'json_object' },
       }),
     }, this.timeoutMs);
+    this.recordRateLimitSnapshot(response);
     if (!response.ok) throw await groqErrorFromResponse(response);
     let payload;
     try { payload = await response.json(); } catch { throw new GroqGenerationError('Groq returned an invalid visual-query response.', 'invalid_generation'); }

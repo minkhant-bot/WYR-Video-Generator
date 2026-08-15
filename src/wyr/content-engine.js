@@ -162,7 +162,12 @@ export class ContentRateLimitError extends ContentGenerationError {
 // Free-tier Groq rate limits can take longer than 60s to clear; bounded but wide enough
 // (~2.5 minutes, 7 retries) to ride out a burst without failing an otherwise-healthy job.
 export const DEFAULT_GROQ_RATE_LIMIT_POLICY = Object.freeze({ maxRetries: 7, maxWaitMs: 150_000, baseDelayMs: 1_000, maxDelayMs: 15_000, jitterMs: 250 });
-const providerRequestStats = provider => ({ totalGroqRequests: Number.isFinite(provider?.requestCount) ? provider.requestCount : null, rateLimitCount: Number.isFinite(provider?.rateLimitCount) ? provider.rateLimitCount : null });
+const providerRequestStats = provider => ({
+  totalGroqRequests: Number.isFinite(provider?.requestCount) ? provider.requestCount : null,
+  rateLimitCount: Number.isFinite(provider?.rateLimitCount) ? provider.rateLimitCount : null,
+  proactiveThrottleCount: Number.isFinite(provider?.proactiveThrottleCount) ? provider.proactiveThrottleCount : null,
+  proactiveThrottleWaitedMs: Number.isFinite(provider?.proactiveThrottleWaitedMs) ? provider.proactiveThrottleWaitedMs : null,
+});
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const rateLimitFailure = ({ accepted, questionCount, retries, waitedMs, maxRetries, maxWaitMs, lastProviderError }) => new ContentRateLimitError(
   `Groq rate limit did not recover within the bounded policy (${maxRetries} retries, ${maxWaitMs}ms maximum cumulative wait): accepted ${accepted.length} of ${questionCount} required distinct high-quality dilemmas. No incomplete video was rendered.${lastProviderError ? ` Last provider error: ${lastProviderError.message}` : ''}`,

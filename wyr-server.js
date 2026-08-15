@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './src/wyr/config.js';
 import { createJobStore } from './src/wyr/jobs.js';
-import { prepareImageSelection, runFixturePipeline, runPipeline } from './src/wyr/pipeline.js';
+import { runAutomaticPipeline, runFixturePipeline, runPipeline } from './src/wyr/pipeline.js';
 import { expandImageSelection, replaceImageSelection, selectImageCandidate } from './src/wyr/image-picker.js';
 import { publicJob, log } from './src/wyr/utils.js';
 import { PUBLIC_DIR } from './src/wyr/runtime.js';
@@ -39,7 +39,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/jobs') {
       const job = store.create(); const jobConfig = getConfig();
       log('job.queued', { jobId: job.id });
-      const runner = process.env.WYR_FIXTURE_MODE === 'true' ? runFixturePipeline : prepareImageSelection;
+      const runner = process.env.WYR_FIXTURE_MODE === 'true' ? runFixturePipeline : runAutomaticPipeline;
       setImmediate(() => void runner({ job, store, config: jobConfig }));
       return json(res, 202, publicJob(job));
     }

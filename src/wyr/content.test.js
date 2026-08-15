@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addIllustrativePercentages, DILEMMA_STYLES, GroqContentProvider, validatePlan } from './content.js';
+import { addIllustrativePercentages, DILEMMA_STYLES, GroqContentProvider, parseGroqResetDuration, validatePlan } from './content.js';
 
 const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
 const question = (optionA, optionB, category = 'travel') => ({ category, quality, optionA, optionB });
@@ -46,6 +46,7 @@ const generatedPlan = () => ({ topic: 'Dream adventures', questions: [
   { optionA: { text: 'Camp in a forest', searchQuery: 'forest camping tent' }, optionB: { text: 'Sleep under desert stars', searchQuery: 'desert stars camping' } },
 ].map((item, index) => ({ ...item, category: categories[index], quality })) });
 const successfulResponse = (plan = generatedPlan()) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+const successfulResponseWithHeaders = (headers, plan = generatedPlan()) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200, headers: { 'content-type': 'application/json', ...headers } });
 const failedGenerationResponse = () => new Response(JSON.stringify({ error: { message: 'Failed to generate JSON', code: 'failed_generation', failed_generation: 'PRIVATE-GENERATION-DIAGNOSTIC' } }), { status: 400, headers: { 'content-type': 'application/json' } });
 const rateLimitResponse = retryAfter => new Response(JSON.stringify({ error: { message: 'Rate limit reached', code: 'rate_limit_exceeded' } }), { status: 429, headers: { 'content-type': 'application/json', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) } });
 const tokenRateLimitResponse = () => new Response(JSON.stringify({ error: { message: 'Rate limit reached for model `openai/gpt-oss-20b` on tokens per minute (TPM): Limit 8000, Used 7600, Requested 1800. Please try again in 10.5s.', type: 'tokens', code: 'rate_limit_exceeded' } }), {
@@ -215,4 +216,67 @@ test('Groq visual-query reformulation is one bounded request and preserves the o
 test('Groq visual-query reformulation exposes HTTP 429 without retrying', async () => withMockedFetch([rateLimitResponse('1.5')], async requests => {
   await assert.rejects(() => provider().generateVisualQueries({ optionText: 'Control Gravity' }), error => { assert.equal(error.status, 429); assert.equal(error.retryAfterMs, 1500); return true; });
   assert.equal(requests.length, 1);
+}));
+
+test('parseGroqResetDuration handles the documented Groq duration formats', () => {
+  assert.equal(parseGroqResetDuration('7.66s'), 7660);
+  assert.equal(parseGroqResetDuration('1m7.66s'), 67660);
+  assert.equal(parseGroqResetDuration('500ms'), 500);
+  assert.equal(parseGroqResetDuration('2h'), 7_200_000);
+  assert.equal(parseGroqResetDuration('3'), 3000); // plain number treated as seconds
+  assert.equal(parseGroqResetDuration(''), null);
+  assert.equal(parseGroqResetDuration(undefined), null);
+  assert.equal(parseGroqResetDuration('not-a-duration'), null);
+});
+
+test('a low remaining-token reading from a prior response proactively throttles the next request instead of risking a 429', async () => withMockedFetch([
+  successfulResponseWithHeaders({ 'x-ratelimit-remaining-tokens': '500', 'x-ratelimit-reset-tokens': '3s' }),
+  successfulResponse(),
+], async requests => {
+  const waits = [];
+  const client = new GroqContentProvider({ apiKey: 'test-key', model: 'openai/gpt-oss-20b', timeoutMs: 1000, sleep: async ms => waits.push(ms) });
+  await client.generatePlan(8);
+  assert.deepEqual(waits, []); // no prior snapshot on the very first call — nothing to throttle against
+  await client.generatePlan(8);
+  assert.equal(waits.length, 1);
+  assert.ok(waits[0] > 0 && waits[0] <= 3000, `expected a bounded wait, got ${waits[0]}`);
+  assert.equal(client.proactiveThrottleCount, 1);
+  assert.equal(client.proactiveThrottleWaitedMs, waits[0]);
+  assert.equal(requests.length, 2); // throttling delays the request, it never skips or duplicates it
+}));
+
+test('healthy remaining-token capacity never triggers a proactive wait', async () => withMockedFetch([
+  successfulResponseWithHeaders({ 'x-ratelimit-remaining-tokens': '7500', 'x-ratelimit-reset-tokens': '3s' }),
+  successfulResponse(),
+], async () => {
+  const waits = [];
+  const client = new GroqContentProvider({ apiKey: 'test-key', model: 'openai/gpt-oss-20b', timeoutMs: 1000, sleep: async ms => waits.push(ms) });
+  await client.generatePlan(8);
+  await client.generatePlan(8);
+  assert.deepEqual(waits, []);
+  assert.equal(client.proactiveThrottleCount, 0);
+}));
+
+test('the proactive wait is bounded well under a full reset window even when the reported reset is long', async () => withMockedFetch([
+  successfulResponseWithHeaders({ 'x-ratelimit-remaining-tokens': '100', 'x-ratelimit-reset-tokens': '58s' }),
+  successfulResponse(),
+], async () => {
+  const waits = [];
+  const client = new GroqContentProvider({ apiKey: 'test-key', model: 'openai/gpt-oss-20b', timeoutMs: 1000, sleep: async ms => waits.push(ms) });
+  await client.generatePlan(8);
+  await client.generatePlan(8);
+  assert.equal(waits.length, 1);
+  assert.ok(waits[0] <= 20_000, `expected the wait to be capped at 20s, got ${waits[0]}`);
+}));
+
+test('a missing or unparseable reset-tokens header fails open (no throttle, no crash) and relies on the reactive retry path', async () => withMockedFetch([
+  successfulResponseWithHeaders({ 'x-ratelimit-remaining-tokens': '100' }), // no reset-tokens header at all
+  successfulResponse(),
+], async () => {
+  const waits = [];
+  const client = new GroqContentProvider({ apiKey: 'test-key', model: 'openai/gpt-oss-20b', timeoutMs: 1000, sleep: async ms => waits.push(ms) });
+  await client.generatePlan(8);
+  const plan = await client.generatePlan(8);
+  assert.deepEqual(waits, []);
+  assert.equal(plan.questions.length, 8);
 }));

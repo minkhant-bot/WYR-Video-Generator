@@ -106,6 +106,10 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
   }
 };
 
+// Internal/debug only: generates content and an image selection, then stops for human review
+// (reviewing_images) instead of rendering. Not used by the normal production entry point
+// (POST /api/jobs uses runAutomaticPipeline below) — kept only for manual debugging of image
+// selection via the /selection, /images/:slot, /replace, /select, and /more endpoints.
 export const prepareImageSelection = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   try {
@@ -118,6 +122,29 @@ export const prepareImageSelection = async ({ job, store, config }) => {
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
     update({ status: 'reviewing_images', stage: 'reviewing_images', progress: 35, selection });
+  } catch (error) {
+    log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
+  }
+};
+
+// Normal production entry point: generates content, automatically searches/scores/selects all 16
+// images (same createImageSelection auto-selection used by the debug path above — Pixabay
+// primary, Pexels fallback, unchanged scoring), then immediately hands off to the existing
+// runPipeline (unchanged) to lock assets, generate voice, build the timeline, render, and verify.
+// No human approval step; never stops at reviewing_images.
+export const runAutomaticPipeline = async ({ job, store, config }) => {
+  const update = changes => store.update(job.id, changes);
+  try {
+    assertProviderConfig(config);
+    update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
+    const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
+    const historyStore = new ContentHistoryStore(config.contentHistoryPath);
+    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
+    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+    update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
+    const selection = await createImageSelection({ plan, config });
+    if (selection.selectedCount !== 16) throw new Error(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`);
+    await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection });
   } catch (error) {
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }
