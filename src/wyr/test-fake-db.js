@@ -21,6 +21,14 @@ export const createFakeDb = () => {
       const count = [...state.questions.values()].filter(row => row.status === 'ready').length;
       return { rows: [{ count }] };
     }
+    if (text.startsWith('SELECT status, count(*)::int AS count FROM wyr_questions GROUP BY status')) {
+      const counts = new Map();
+      for (const row of state.questions.values()) counts.set(row.status, (counts.get(row.status) || 0) + 1);
+      return { rows: [...counts.entries()].map(([status, count]) => ({ status, count })) };
+    }
+    if (text.startsWith('SELECT count(*)::int AS count FROM wyr_videos')) {
+      return { rows: [{ count: state.videos.size }] };
+    }
     if (text.startsWith('INSERT INTO wyr_questions')) {
       const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionBText, optionBSearchQuery, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider] = params;
       const existing = [...state.questions.values()].find(row => row.dedupe_key === dedupeKey);

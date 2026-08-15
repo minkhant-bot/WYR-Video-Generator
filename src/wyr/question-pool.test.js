@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
-import { commitPlanUsage, countReady, insertQuestions, releaseReservation, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
+import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -99,6 +99,25 @@ test('a successful job commits usage: used_count increments and the question ret
   assert.equal(usedRow.used_count, 1);
   assert.ok(usedRow.last_used_at);
   assert.equal(fake.state.videoQuestions.length, 8);
+}));
+
+test('getPoolStats reports ready/reserved/used/total for the admin status endpoint', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const reservation = await selectAndReservePlan({ jobId: 'job-1', count: 3 });
+  assert.ok(reservation);
+  const plan = await selectPlanForJob({ jobId: 'job-2', count: 2 });
+  assert.ok(plan);
+  await commitPlanUsage({ jobId: 'job-2', plan, duration: 57 });
+  const stats = await getPoolStats();
+  assert.equal(stats.reserved, 3, '3 questions remain reserved by job-1');
+  assert.equal(stats.ready, 5, '8 - 3 reserved = 5 ready (job-2\'s 2 returned to ready after commit)');
+  assert.equal(stats.used, 1, 'one video has been committed');
+  assert.equal(stats.total, 8);
+}));
+
+test('getPoolStats never throws or exposes secrets when the pool is empty', () => withFakeDb(async () => {
+  const stats = await getPoolStats();
+  assert.deepEqual(stats, { ready: 0, reserved: 0, used: 0, total: 0 });
 }));
 
 test('a DB-selected plan is shaped for the automatic image/TTS/render path with no manual review fields', () => withFakeDb(async () => {

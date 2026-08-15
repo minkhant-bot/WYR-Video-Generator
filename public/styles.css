@@ -26,6 +26,16 @@ progress{width:100%;height:14px;accent-color:#6d8cff}
 .error{border:1px solid #7a3040;background:#35151d;color:#ffb7c4;padding:12px;border-radius:10px;margin:18px 0}
 .result{display:grid;gap:14px;margin-top:24px}
 .result video{width:min(360px,100%);aspect-ratio:9/16;border-radius:12px;background:#000}
+.pool-panel{margin-top:24px;max-width:420px}
+.pool-stats{display:flex;gap:20px;margin:10px 0}
+.pool-stats div{display:flex;flex-direction:column}
+.pool-stats span{font-size:28px;font-weight:800}
+.pool-stats small{color:#9da7bd;font-size:11px;letter-spacing:.04em}
+.pool-status{color:#b8bfd0;font-size:13px;margin:8px 0}
+.pool-panel input{width:100%;border-radius:10px;border:1px solid #30364a;background:#0e1119;color:inherit;padding:11px 12px;font:inherit;margin-bottom:10px}
+.pool-actions{display:flex;gap:10px}
+.pool-actions button{flex:1}
+.secondary{background:#303b58}
 @media(max-width:430px){
   main{width:min(100% - 16px,1100px);padding-top:12px}
   .panel{padding:18px}

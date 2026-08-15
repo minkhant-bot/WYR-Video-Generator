@@ -28,6 +28,21 @@
     <a id="download" class="button" download>Download MP4</a>
     <video id="video" controls playsinline></video>
   </section>
+
+  <section id="pool-panel" class="panel pool-panel">
+    <p class="eyebrow">CONTENT POOL</p>
+    <div class="pool-stats">
+      <div><span id="pool-ready">–</span><small>Ready</small></div>
+      <div><span id="pool-total">–</span><small>Total</small></div>
+    </div>
+    <p id="pool-refill-status" class="pool-status">Status: unknown</p>
+    <input id="pool-admin-token" type="password" placeholder="Admin token" autocomplete="off">
+    <div class="pool-actions">
+      <button id="pool-refresh" class="secondary" type="button">Refresh</button>
+      <button id="pool-refill" type="button">Refill to 200</button>
+    </div>
+    <p id="pool-error" class="error" hidden></p>
+  </section>
 </main>
 <script src="/app.js" type="module"></script>
 </body>

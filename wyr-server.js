@@ -9,6 +9,9 @@ import { publicJob, log } from './src/wyr/utils.js';
 import { PUBLIC_DIR } from './src/wyr/runtime.js';
 import { CredentialInputError, getCredentialStatus, saveLocalCredentials } from './src/wyr/credentials.js';
 import { runStartupMigrations } from './src/wyr/startup.js';
+import { isAdminRequestAuthorized } from './src/wyr/admin-auth.js';
+import { getPoolStats } from './src/wyr/question-pool.js';
+import { getRefillStatus, triggerAdminRefill } from './src/wyr/refill.js';
 
 const startupConfig = getConfig(); const store = createJobStore(startupConfig.rootDir); const publicDir = PUBLIC_DIR;
 const json = (res, status, body) => { const payload = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'cache-control': 'no-store' }); res.end(payload); };
@@ -36,6 +39,25 @@ const server = http.createServer(async (req, res) => {
       const submitted = await readJsonBody(req);
       const status = saveLocalCredentials({ groqApiKey: submitted?.groqApiKey, pexelsApiKey: submitted?.pexelsApiKey });
       return json(res, 200, { saved: true, ...status });
+    }
+    if (url.pathname === '/api/admin/content-pool/status' || url.pathname === '/api/admin/content-pool/refill') {
+      const adminConfig = getConfig();
+      if (!isAdminRequestAuthorized(req.headers, adminConfig)) return json(res, adminConfig.adminToken ? 401 : 503, { error: adminConfig.adminToken ? 'Unauthorized.' : 'Admin endpoints are not configured.' });
+      if (req.method === 'GET' && url.pathname === '/api/admin/content-pool/status') {
+        const stats = await getPoolStats();
+        return json(res, 200, { ...stats, ...getRefillStatus() });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/admin/content-pool/refill') {
+        if (!adminConfig.groqApiKey) return json(res, 503, { error: 'GROQ_API_KEY is not configured; cannot refill the question pool.' });
+        let body = {};
+        try { body = await readJsonBody(req); } catch { body = {}; }
+        const requestedTarget = Number(body?.target);
+        const target = Number.isInteger(requestedTarget) && requestedTarget >= 8 && requestedTarget <= 5000 ? requestedTarget : adminConfig.poolTarget;
+        const outcome = triggerAdminRefill({ apiKey: adminConfig.groqApiKey, model: adminConfig.groqModel, timeoutMs: adminConfig.timeoutMs, target, maxBatches: adminConfig.poolRefillMaxBatchesPerRun });
+        const stats = await getPoolStats();
+        return json(res, outcome.started ? 202 : 200, { started: outcome.started, ...stats, ...outcome.status });
+      }
+      return json(res, 404, { error: 'Not found.' });
     }
     if (req.method === 'POST' && url.pathname === '/api/jobs') {
       const job = store.create(); const jobConfig = getConfig();

@@ -11,6 +11,17 @@ export const countReady = async () => {
   return rows[0].count;
 };
 
+// Admin/status-panel read model. "used" counts completed videos (each one consumes a full set of
+// pool questions) rather than summing used_count, since a question rotates back to 'ready' after
+// use and used_count alone wouldn't distinguish "healthy rotating pool" from "pool being drained".
+export const getPoolStats = async () => withClient(async client => {
+  const { rows: statusRows } = await client.query('SELECT status, count(*)::int AS count FROM wyr_questions GROUP BY status');
+  const { rows: videoRows } = await client.query('SELECT count(*)::int AS count FROM wyr_videos');
+  const byStatus = Object.fromEntries(statusRows.map(row => [row.status, row.count]));
+  const total = statusRows.reduce((sum, row) => sum + row.count, 0);
+  return { ready: byStatus.ready || 0, reserved: byStatus.reserved || 0, used: videoRows[0].count, total };
+});
+
 // Validates and inserts a raw Groq (or fixture) batch. Rejections never throw -- a bad candidate
 // is just excluded, so one malformed item in a batch can't discard the rest. A dedupe_key
 // collision (already in the pool, worded differently or not) is treated as a rejection too, via

@@ -73,6 +73,9 @@ export const getConfig = () => {
     // lower than a normal CLI refill run -- a user pressing "Create WYR" must never wait minutes.
     poolEmergencyRefillMaxBatches: integer('WYR_POOL_EMERGENCY_REFILL_MAX_BATCHES', 1, 1, 3),
     poolRefillMaxBatchesPerRun: integer('WYR_POOL_REFILL_MAX_BATCHES_PER_RUN', 10, 1, 100),
+    // Gates the /api/admin/content-pool/* routes (see admin-auth.js). Left unset, those routes
+    // refuse every request instead of falling open -- there is no default admin token.
+    adminToken: process.env.WYR_ADMIN_TOKEN || '',
     pexelsApiKey: credentials.pexelsApiKey,
     pixabayApiKey: process.env.PIXABAY_API_KEY || '',
     edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
 import { countReady } from './question-pool.js';
-import { maybeTriggerBackgroundRefill, refillPool, __resetBackgroundRefillForTests } from './refill.js';
+import { getRefillStatus, maybeTriggerBackgroundRefill, refillPool, triggerAdminRefill, __resetBackgroundRefillForTests } from './refill.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -15,6 +15,21 @@ const withFakeDb = async operation => {
 const validPlan = () => ({ questions: [
   { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } },
   { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },
+] });
+
+// triggerAdminRefill (unlike refillPool directly) never forwards a custom batchSize -- it always
+// uses refillPool's default of 8, matching the fixed WYR_QUESTION_COUNT=8 the real admin route
+// also relies on -- so admin-refill tests need a fixture plan with 8 questions distinct enough to
+// clear GroqContentProvider's own near-duplicate-wording check (see content.js `similarity`).
+const eightQuestionPlan = () => ({ questions: [
+  { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } },
+  { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },
+  { category: 'travel', optionA: { text: 'Backpack Europe', searchQuery: 'backpacking europe streets' }, optionB: { text: 'Cruise the Caribbean', searchQuery: 'cruise ship caribbean' } },
+  { category: 'food', optionA: { text: 'Eat at a 5-star restaurant', searchQuery: 'fine dining restaurant' }, optionB: { text: 'Cook with a chef', searchQuery: 'chef cooking kitchen' } },
+  { category: 'adventure', optionA: { text: 'Skydive', searchQuery: 'skydiving freefall' }, optionB: { text: 'Scuba dive', searchQuery: 'scuba diving reef' } },
+  { category: 'space', optionA: { text: 'Visit the ISS', searchQuery: 'international space station' }, optionB: { text: 'Visit the moon', searchQuery: 'moon surface astronaut' } },
+  { category: 'ocean', optionA: { text: 'Swim with sharks', searchQuery: 'swimming with sharks' }, optionB: { text: 'Swim with whales', searchQuery: 'swimming with whales' } },
+  { category: 'fame', optionA: { text: 'Be a movie star', searchQuery: 'movie star red carpet' }, optionB: { text: 'Be a rock star', searchQuery: 'rock star concert stage' } },
 ] });
 
 test('refillPool inserts a small bounded batch and stops once the target is reached', () => withFakeDb(async fake => {
@@ -80,6 +95,57 @@ test('maybeTriggerBackgroundRefill is a no-op when the pool is already at/above 
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(fetchCalled, false);
   } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('triggerAdminRefill starts immediately, reports running status, then records the completed result', () => withFakeDb(async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(eightQuestionPlan()) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const outcome = triggerAdminRefill({ apiKey: 'test-key', target: 8, maxBatches: 5 });
+    assert.equal(outcome.started, true);
+    assert.equal(outcome.status.refillRunning, true);
+    assert.equal(outcome.status.source, 'admin');
+    assert.equal(outcome.status.target, 8);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const finalStatus = getRefillStatus();
+    assert.equal(finalStatus.refillRunning, false);
+    assert.equal(finalStatus.lastRefillStatus.source, 'admin');
+    assert.equal(finalStatus.lastRefillStatus.stoppedReason, 'target_reached');
+    assert.equal(finalStatus.lastRefillStatus.finalReady, 8);
+  } finally { globalThis.fetch = originalFetch; }
+}));
+
+test('triggerAdminRefill never starts a duplicate run while one is already in flight, and preserves the original run\'s status', () => withFakeDb(async () => {
+  let releaseFetch;
+  const gate = new Promise(resolve => { releaseFetch = resolve; });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { await gate; return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(eightQuestionPlan()) } }] }), { status: 200, headers: { 'content-type': 'application/json' } }); };
+  try {
+    const first = triggerAdminRefill({ apiKey: 'test-key', target: 2, maxBatches: 1 });
+    assert.equal(first.started, true);
+    const second = triggerAdminRefill({ apiKey: 'test-key', target: 999, maxBatches: 1 });
+    assert.equal(second.started, false, 'a refill already in flight must refuse to start a duplicate');
+    assert.equal(second.status.refillRunning, true);
+    assert.equal(second.status.target, 2, 'the in-flight run\'s target must not be overwritten by the rejected duplicate call');
+  } finally { releaseFetch(); await new Promise(resolve => setTimeout(resolve, 20)); globalThis.fetch = originalFetch; }
+}));
+
+test('an in-flight background refill blocks a concurrent admin-triggered refill (shared guard, never hits Groq twice at once)', () => withFakeDb(async () => {
+  let releaseFetch;
+  const gate = new Promise(resolve => { releaseFetch = resolve; });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { await gate; return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(eightQuestionPlan()) } }] }), { status: 200, headers: { 'content-type': 'application/json' } }); };
+  try {
+    maybeTriggerBackgroundRefill({ apiKey: 'test-key', target: 10, lowWaterMark: 5, maxBatches: 1 });
+    assert.equal(getRefillStatus().refillRunning, true, 'the background trigger must reserve the guard synchronously');
+    const attempt = triggerAdminRefill({ apiKey: 'test-key', target: 999, maxBatches: 1 });
+    assert.equal(attempt.started, false);
+  } finally { releaseFetch(); await new Promise(resolve => setTimeout(resolve, 20)); globalThis.fetch = originalFetch; }
+}));
+
+test('triggerAdminRefill throws immediately (without touching refillRunning) when no refill is in flight and no Groq API key is configured', () => withFakeDb(async () => {
+  assert.throws(() => triggerAdminRefill({ apiKey: '', target: 10, maxBatches: 1 }), /GROQ_API_KEY is required/);
+  assert.equal(getRefillStatus().refillRunning, false);
 }));
 
 test('empty-pool emergency scenario: refillPool with maxBatches=1 makes exactly one bounded attempt', () => withFakeDb(async () => {
