@@ -1,9 +1,19 @@
 import { withClient, withTransaction } from './db.js';
-import { computeInsertionFields, selectDiversePlan, buildPlanFromPoolRows } from './pool-selection.js';
+import { computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
+import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { log } from './utils.js';
 
 export class ContentPoolExhaustedError extends Error {
   constructor(message, details = {}) { super(message); this.code = 'CONTENT_POOL_EMPTY'; Object.assign(this, details); }
+}
+
+// Thrown when a diverse 8-question set WAS found, but even after locally swapping the
+// longest-projected questions for shorter ready ones (see repairPlanForDuration), the estimated
+// total still can't fit under budget. Deliberately distinct from ContentPoolExhaustedError: the
+// caller (content-source.js) must never respond to this by calling Groq -- see requirement to keep
+// duration repair a purely local, DB-only retry.
+export class DurationBudgetExceededError extends Error {
+  constructor(message, details = {}) { super(message); this.code = 'DURATION_BUDGET_EXCEEDED'; Object.assign(this, details); }
 }
 
 export const countReady = async () => {
@@ -67,32 +77,48 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
   return motifs;
 };
 
-// Atomically reserves exactly `count` diverse, non-recently-used questions for one job.
-// FOR UPDATE SKIP LOCKED lets concurrent jobs each grab their own candidate window without
-// blocking on or double-selecting rows another in-flight job already has locked. Returns null
-// (never throws) when the ready pool can't currently fill a full video -- the caller decides
-// whether that means "try an emergency refill" or "fail with CONTENT_POOL_EMPTY".
-export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80 }) => withTransaction(async client => {
+// Atomically reserves exactly `count` diverse, non-recently-used, duration-budgeted questions for
+// one job. FOR UPDATE SKIP LOCKED lets concurrent jobs each grab their own candidate window
+// without blocking on or double-selecting rows another in-flight job already has locked. The
+// candidate query is ordered LRU-first (rotation fairness) with hook_score as a tie-break --
+// hook_score already rewards concise option text (see scoring.js's concisionBonus), so on a fresh
+// or evenly-rotated pool this naturally favors shorter questions for normal generation, before
+// duration repair ever needs to run. Returns null (never throws) when the ready pool can't
+// currently fill a full video at all -- the caller decides whether that means "try an emergency
+// refill" or "fail with CONTENT_POOL_EMPTY". Throws DurationBudgetExceededError (never returns
+// null for this case) when a diverse set WAS found but couldn't be brought under the duration
+// budget using only this candidate window -- that failure must never trigger a Groq call.
+export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
   const { rows: candidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready'
-     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, id ASC
+     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
      LIMIT $1 FOR UPDATE SKIP LOCKED`,
     [candidateWindowSize],
   );
   const blockedMotifs = await recentMotifsFromDb(client);
   const result = selectDiversePlan(candidates, { count, blockedMotifs });
   if (!result) return null;
-  const ids = result.selected.map(row => row.id);
+  const repair = repairPlanForDuration({ selected: result.selected, candidates, blockedMotifs, count, targetTotalSeconds, baseDuration });
+  if (!repair.fits) {
+    throw new DurationBudgetExceededError(
+      `Could not select ${count} questions projected under ${targetTotalSeconds.toFixed(1)}s using only the current ready pool; the best local substitution still projected ${repair.projectedTotalSeconds.toFixed(1)}s. Seed or refill the pool with more concise questions.`,
+      { projectedTotalSeconds: repair.projectedTotalSeconds, targetTotalSeconds },
+    );
+  }
+  const selected = repair.selected;
+  const ids = selected.map(row => row.id);
   await client.query(
     "UPDATE wyr_questions SET status = 'reserved', reserved_by_job = $1, reserved_at = now(), updated_at = now() WHERE id = ANY($2::bigint[])",
     [jobId, ids],
   );
-  log('pool.reserved', { jobId, count: result.selected.length, distinctFamilies: result.distinctFamilies, fantasyCount: result.fantasyCount });
-  return result;
+  const distinctFamilies = new Set(selected.map(row => row.content_family)).size;
+  const fantasyCount = selected.filter(row => row.is_fantasy).length;
+  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds });
+  return { selected, distinctFamilies, fantasyCount };
 });
 
-export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80 }) => {
-  const reservation = await selectAndReservePlan({ jobId, count, candidateWindowSize });
+export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
+  const reservation = await selectAndReservePlan({ jobId, count, candidateWindowSize, baseDuration, targetTotalSeconds });
   if (!reservation) return null;
   return buildPlanFromPoolRows(reservation.selected);
 };

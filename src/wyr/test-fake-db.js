@@ -45,7 +45,7 @@ export const createFakeDb = () => {
     if (text.startsWith('SELECT * FROM wyr_questions')) {
       const [limit] = params;
       const ready = [...state.questions.values()].filter(row => row.status === 'ready')
-        .sort((left, right) => (left.last_used_at ? 1 : 0) - (right.last_used_at ? 1 : 0) || left.used_count - right.used_count || left.id - right.id);
+        .sort((left, right) => (left.last_used_at ? 1 : 0) - (right.last_used_at ? 1 : 0) || left.used_count - right.used_count || right.hook_score - left.hook_score || left.id - right.id);
       return { rows: ready.slice(0, limit) };
     }
     if (text.startsWith('SELECT q.motif_key_a, q.motif_key_b')) {

@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { PexelsImageProvider, assessImageCandidate, buildImageQueries, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency } from './utils.js';
+import { deterministicImageQueries } from './image-query.js';
+import { isFantasyQuestion } from './content-engine.js';
 
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
@@ -102,16 +104,28 @@ const simpleVisualQuery = option => {
   return text.split(' ').slice(0, 6).join(' ');
 };
 
-const selectionQueries = option => {
+// Most-specific-first: the curated/imported searchQuery (if any), then the deterministic literal
+// subject of the option text (see image-query.js -- e.g. "treehouse" for "Live in a treehouse",
+// "pizza" for "Eat pizza forever"), THEN the existing broader/decorative fallbacks
+// (simpleVisualQuery, buildImageQueries' hardcoded phrase groups). The "fantasy cinematic" style
+// suffix is reserved for questions actually classified as fantasy -- appending it to every
+// realistic option (as before) biased Pixabay/Pexels toward stylized art instead of a literal photo.
+const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
+  const deterministic = deterministicImageQueries(option, { category });
   const built = buildImageQueries(option);
   const simple = simpleVisualQuery(option);
   const subject = simple.split(' ').slice(-4).join(' ');
+  // The stylized suffix is only meaningful (and only added) for fantasy-coded questions, so it's
+  // placed right after the deterministic literal-subject queries -- high enough that a rich set of
+  // broader/decorative fallbacks below it can't crowd it out of the bounded 8-query list.
+  const stylized = fantasy && subject ? `${subject} fantasy cinematic` : '';
   return [...new Set([
     String(option.searchQuery || '').trim(),
+    ...deterministic,
+    stylized,
     simple,
     ...built,
     subject,
-    subject ? `${subject} fantasy cinematic` : '',
   ].filter(query => query && query.length >= 3))].slice(0, 8);
 };
 
@@ -236,6 +250,7 @@ export const createImageSelection = async ({ plan, config }) => {
   const slots = {};
 
   for (const question of plan.questions) {
+    const fantasy = isFantasyQuestion(question);
     for (const slot of ['A', 'B']) {
       const key = `Q${question.index + 1}${slot}`;
       const option = slot === 'A' ? question.optionA : question.optionB;
@@ -244,7 +259,7 @@ export const createImageSelection = async ({ plan, config }) => {
         questionIndex: question.index,
         slot,
         optionText: option.text,
-        queries: selectionQueries(option),
+        queries: selectionQueries(option, { category: question.category, fantasy }),
         queryIndex: 0,
         providerIndex: 0,
         pages: {},

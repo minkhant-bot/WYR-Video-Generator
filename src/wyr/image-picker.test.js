@@ -47,6 +47,36 @@ test('Pexels fallback still works when no Pixabay key is configured', async () =
   } finally { global.fetch = originalFetch; }
 });
 
+test('DB-first image selection tries the deterministic option-specific subject query before broader/decorative fallback queries, and never calls Groq', async () => {
+  const originalFetch = global.fetch; let counter = 0; const requestedUrls = [];
+  try {
+    global.fetch = async url => {
+      requestedUrls.push(String(url));
+      if (String(url).includes('groq.com')) throw new Error('DB-first image selection must never call Groq');
+      counter += 1;
+      return { ok: true, async json() { return { photos: [{ id: counter, width: 1600, height: 900, alt: 'treehouse forest wooden ladder', url: `https://pexels.test/${counter}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${counter}-large.jpg`, original: `https://pexels.test/${counter}.jpg` } }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a houseboat', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    assert.equal(selection.slots.Q1A.queries[0], 'treehouse', 'the deterministic literal-subject query must be tried before any decorative/broader fallback query');
+    assert.ok(selection.slots.Q1A.selectedId);
+    assert.equal(requestedUrls.some(url => url.includes('groq.com')), false, 'normal DB-first image selection must make zero Groq calls');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('a fantasy-coded question still gets a stylized fallback query, but a realistic one does not', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: true, async json() { return { photos: [] }; } });
+    const fantasyPlan = { questions: [{ index: 0, category: 'superpowers', optionA: { text: 'Fly through the sky', searchQuery: '' }, optionB: { text: 'Turn invisible', searchQuery: '' } }] };
+    const realisticPlan = { questions: [{ index: 0, category: 'food', optionA: { text: 'Eat pizza forever', searchQuery: '' }, optionB: { text: 'Never eat pizza again', searchQuery: '' } }] };
+    const fantasySelection = await createImageSelection({ plan: fantasyPlan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    const realisticSelection = await createImageSelection({ plan: realisticPlan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    assert.ok(fantasySelection.slots.Q1A.queries.some(query => query.includes('fantasy cinematic')), 'a fantasy-coded question may still use the stylized fallback query');
+    assert.equal(realisticSelection.slots.Q1A.queries.some(query => query.includes('fantasy cinematic')), false, 'a realistic question must never get the fantasy-styled query');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('auto-selection logs a diagnostic line per slot with query, provider, and scores', async () => {
   const originalFetch = global.fetch; const originalInfo = console.info; let counter = 0; const logs = [];
   try {

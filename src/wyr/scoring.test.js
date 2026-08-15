@@ -38,3 +38,21 @@ test('hook score rewards short option text over a longer, still-valid option', (
   const longer = question('See the northern lights over the mountains tonight', 'Watch a volcano erupt in the distance');
   assert.ok(computeHookScore(short) >= computeHookScore(longer), 'short/concise option should not score below a longer one');
 });
+
+test('a fantasy/superpower question scores lower than an equivalent relatable one, but is never fully zeroed out', () => {
+  const relatable = { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } };
+  const fantasy = { category: 'superpowers', optionA: { text: 'Fly through the sky', searchQuery: 'person flying sky superhero' }, optionB: { text: 'Turn invisible', searchQuery: 'invisible person disappearing' } };
+  assert.ok(computeHookScore(fantasy) < computeHookScore(relatable), 'fantasy-coded content should score below an equivalent realistic/relatable dilemma');
+  assert.ok(computeHookScore(fantasy) > 0, 'the fantasy penalty must never zero out an otherwise-valid question');
+});
+
+test('sharply contrasting options score higher on hook than accepted-but-fairly-similar ones', () => {
+  const sharp = question('Own a yacht', 'Own a jet');
+  const similar = question('Eat spicy tacos for every meal', 'Eat mild tacos for every meal');
+  assert.ok(computeHookScore(sharp) > computeHookScore(similar), 'clearly distinct options should out-score a more "samey" tradeoff');
+});
+
+test('computeHookScore never returns a negative number', () => {
+  const q = { category: 'superpowers', optionA: { text: 'Read every single stranger nearby mind', searchQuery: 'telepathy mind reading glow' }, optionB: { text: 'Turn completely invisible near every other person nearby', searchQuery: 'invisible person disappearing slowly' } };
+  assert.ok(computeHookScore(q) >= 0);
+});

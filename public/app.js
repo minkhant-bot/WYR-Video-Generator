@@ -150,4 +150,34 @@ poolSeedButton.onclick = async () => {
   }
 };
 
+const poolImportFileInput = document.querySelector('#pool-import-file');
+const poolImportStatusEl = document.querySelector('#pool-import-status');
+
+// Mobile file pickers (Android/iOS) trigger `change` as soon as a file is chosen, so importing
+// starts immediately on selection rather than requiring a separate "upload" tap.
+poolImportFileInput.onchange = async () => {
+  const file = poolImportFileInput.files?.[0];
+  if (!file) return;
+  clearPoolError();
+  poolImportFileInput.disabled = true;
+  poolImportStatusEl.textContent = `Importing ${file.name}…`;
+  try {
+    const text = await file.text();
+    const data = await adminRequest('/api/admin/content-pool/import-json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+    });
+    poolTotalEl.textContent = data.total ?? '–';
+    poolImportStatusEl.textContent = `Inserted: ${data.inserted} | Skipped duplicates: ${data.skipped} | Rejected: ${data.rejected} | Pool total: ${data.total}`;
+    await refreshPoolStatus(); // authoritative ready/total + refill status refresh
+  } catch (error) {
+    poolImportStatusEl.textContent = '';
+    showPoolError(error.message);
+  } finally {
+    poolImportFileInput.disabled = false;
+    poolImportFileInput.value = '';
+  }
+};
+
 if (poolTokenInput.value) void refreshPoolStatus();

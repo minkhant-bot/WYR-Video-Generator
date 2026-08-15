@@ -9,7 +9,7 @@ import { log } from './utils.js';
 // still isn't enough, it fails clearly with CONTENT_POOL_EMPTY instead of retrying Groq for
 // minutes during a user-triggered request.
 export const selectContentPlan = async ({ job, config }) => {
-  let plan = await selectPlanForJob({ jobId: job.id, count: config.questionCount });
+  let plan = await selectPlanForJob({ jobId: job.id, count: config.questionCount, baseDuration: config.secondsPerQuestion });
   if (!plan) {
     const ready = await countReady();
     log('content.pool_below_minimum', { ready, required: config.questionCount });
@@ -17,7 +17,7 @@ export const selectContentPlan = async ({ job, config }) => {
       try {
         await refillPool({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs, target: config.poolTarget, batchSize: config.questionCount, maxBatches: config.poolEmergencyRefillMaxBatches });
       } catch (error) { log('content.emergency_refill_failed', { message: error.message }); }
-      plan = await selectPlanForJob({ jobId: job.id, count: config.questionCount });
+      plan = await selectPlanForJob({ jobId: job.id, count: config.questionCount, baseDuration: config.secondsPerQuestion });
     }
   }
   if (!plan) {

@@ -32,7 +32,7 @@ const exactOption = text => cleanText(text);
 export const canonicalDilemma = question => [compactOption(question.optionA.text), compactOption(question.optionB.text)].sort().join(' | ');
 export const exactDilemma = question => [exactOption(question.optionA.text), exactOption(question.optionB.text)].sort().join(' | ');
 
-const optionSimilarity = (left, right) => {
+export const optionSimilarity = (left, right) => {
   const leftTokens = tokens(left, CONCEPT_FILLER); const rightTokens = tokens(right, CONCEPT_FILLER);
   if (leftTokens.join(' ') === rightTokens.join(' ') && leftTokens.length) return 1;
   return setSimilarity(leftTokens, rightTokens);

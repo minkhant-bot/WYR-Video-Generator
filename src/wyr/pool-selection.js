@@ -5,6 +5,7 @@
 import { canonicalDilemma, canonicalMotifKey, deriveTopic, isFantasyQuestion, questionMotifs } from './content-engine.js';
 import { computeHookScore, computeQualityScore, computeVisualScore } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
+import { estimateSceneDurationFromText } from './duration-estimate.js';
 
 // The 20 Groq-facing categories bucketed into broader "content families" purely locally -- Groq
 // never supplies or needs to know about this grouping. Chosen so a normal 8-question selection can
@@ -69,6 +70,61 @@ export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new S
   if (result.selected.length < count) result = attempt(true);
   if (result.selected.length < count) return null;
   return result;
+};
+
+// Duration-aware repair pass, applied AFTER selectDiversePlan has already chosen `count` rows.
+// Estimates each selected row's scene duration from its option text (see duration-estimate.js,
+// which mirrors the real buildSceneTimeline math) and, if the projected total leaves too little
+// margin under the Shorts limit, greedily swaps the single longest-projected row for the shortest
+// valid substitute drawn from the SAME already-fetched candidate window -- never a new DB query,
+// never Groq. A substitute must belong to the SAME content_family as the row it replaces (a strict
+// like-for-like swap): without this, a substitute is only checked against the aggregate family cap,
+// which lets it fill a DIFFERENT family's freed-up capacity than the one it displaced, silently
+// dropping one family from the plan while a different family ends up represented twice (e.g. two
+// 'space' rows and zero 'time' rows) -- same-family-count-preserved, still 8 questions, still under
+// the cap, yet a real diversity regression the cap alone doesn't catch. Every hard diversity rule
+// (motif blocklist + within-plan motif cooldown, fantasy cap) is also re-checked for the substitute,
+// so a duration repair can never quietly undo the diversity guarantees selectDiversePlan already
+// enforced. Runs before arrangeForHook, so Scene 1 selection (strongest hook score) still operates
+// on the final, duration-repaired set -- that logic itself is untouched.
+export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = new Set(), count = 8, targetTotalSeconds, baseDuration } = {}) => {
+  const durationOf = row => estimateSceneDurationFromText(row.option_a_text, row.option_b_text, { baseDuration });
+  let working = [...selected];
+  let swapped = false;
+  const total = () => working.reduce((sum, row) => sum + durationOf(row), 0);
+
+  const canSubstitute = (candidate, outgoing) => {
+    if (working.some(row => row.id === candidate.id)) return false;
+    if (candidate.content_family !== outgoing.content_family) return false;
+    if (candidate.motif_key_a && blockedMotifs.has(candidate.motif_key_a)) return false;
+    if (candidate.motif_key_b && blockedMotifs.has(candidate.motif_key_b)) return false;
+    const motifsElsewhereInPlan = new Set();
+    for (const row of working) {
+      if (row.id === outgoing.id) continue;
+      if (row.motif_key_a) motifsElsewhereInPlan.add(row.motif_key_a);
+      if (row.motif_key_b) motifsElsewhereInPlan.add(row.motif_key_b);
+    }
+    if (candidate.motif_key_a && motifsElsewhereInPlan.has(candidate.motif_key_a)) return false;
+    if (candidate.motif_key_b && motifsElsewhereInPlan.has(candidate.motif_key_b)) return false;
+    const fantasyCountWithoutOutgoing = working.filter(row => row.is_fantasy && row.id !== outgoing.id).length;
+    if (candidate.is_fantasy && fantasyCountWithoutOutgoing >= 1) return false;
+    return true;
+  };
+
+  for (let iteration = 0; iteration < count; iteration += 1) {
+    if (total() <= targetTotalSeconds) break;
+    const outgoing = [...working].sort((a, b) => durationOf(b) - durationOf(a))[0];
+    const incoming = candidates
+      .filter(row => canSubstitute(row, outgoing))
+      .sort((a, b) => durationOf(a) - durationOf(b))
+      .find(row => durationOf(row) < durationOf(outgoing));
+    if (!incoming) break; // no valid shorter substitute available locally -- stop, let the caller decide
+    working = working.map(row => (row.id === outgoing.id ? incoming : row));
+    swapped = true;
+  }
+
+  const projectedTotalSeconds = total();
+  return { selected: working, swapped, projectedTotalSeconds, fits: projectedTotalSeconds <= targetTotalSeconds };
 };
 
 // Scene 1 is the highest-priority slot: whichever selected question has the strongest hook score

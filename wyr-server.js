@@ -13,6 +13,7 @@ import { isAdminRequestAuthorized } from './src/wyr/admin-auth.js';
 import { getPoolStats } from './src/wyr/question-pool.js';
 import { getRefillStatus, triggerAdminRefill } from './src/wyr/refill.js';
 import { seedStaticPool } from './src/wyr/seed.js';
+import { importQuestionPack, PackFormatError } from './src/wyr/pack-import.js';
 
 const startupConfig = getConfig(); const store = createJobStore(startupConfig.rootDir); const publicDir = PUBLIC_DIR;
 const json = (res, status, body) => { const payload = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'cache-control': 'no-store' }); res.end(payload); };
@@ -31,6 +32,27 @@ const readJsonBody = req => new Promise((resolve, reject) => {
   });
   req.on('error', () => reject(new Error('Could not read settings request.')));
 });
+// JSON question pack import needs a much larger (but still bounded) body limit than the small
+// settings/candidate-selection bodies above -- up to MAX_QUESTIONS_PER_PACK questions of plain
+// text, no images/binary data. 1MB comfortably covers that with room to spare while staying a
+// firm, reasonable ceiling (never an arbitrary/unbounded read).
+const MAX_IMPORT_BODY_BYTES = 1_000_000;
+const readImportBody = req => new Promise((resolve, reject) => {
+  const chunks = []; let size = 0; let tooLarge = false;
+  req.on('data', chunk => {
+    size += chunk.length;
+    if (size > MAX_IMPORT_BODY_BYTES) tooLarge = true;
+    else chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (tooLarge) { reject(new CredentialInputError(`Import file exceeds the ${MAX_IMPORT_BODY_BYTES} byte limit.`)); return; }
+    let payload;
+    try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { reject(new PackFormatError('Import file must be valid JSON.')); return; }
+    resolve(payload);
+  });
+  req.on('error', () => reject(new Error('Could not read import request.')));
+});
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -41,7 +63,7 @@ const server = http.createServer(async (req, res) => {
       const status = saveLocalCredentials({ groqApiKey: submitted?.groqApiKey, pexelsApiKey: submitted?.pexelsApiKey });
       return json(res, 200, { saved: true, ...status });
     }
-    if (url.pathname === '/api/admin/content-pool/status' || url.pathname === '/api/admin/content-pool/refill' || url.pathname === '/api/admin/content-pool/seed-static') {
+    if (url.pathname === '/api/admin/content-pool/status' || url.pathname === '/api/admin/content-pool/refill' || url.pathname === '/api/admin/content-pool/seed-static' || url.pathname === '/api/admin/content-pool/import-json') {
       const adminConfig = getConfig();
       if (!isAdminRequestAuthorized(req.headers, adminConfig)) return json(res, adminConfig.adminToken ? 401 : 503, { error: adminConfig.adminToken ? 'Unauthorized.' : 'Admin endpoints are not configured.' });
       if (req.method === 'GET' && url.pathname === '/api/admin/content-pool/status') {
@@ -60,6 +82,14 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && url.pathname === '/api/admin/content-pool/seed-static') {
         return json(res, 200, await seedStaticPool());
+      }
+      // JSON question pack import: canonical { packVersion: 1, questions: [...] } or a plain
+      // array of the same question objects (see pack-import.js). Goes through the SAME
+      // insertQuestions()/quality-gate pipeline as seed/refill; never deletes or overwrites
+      // anything already in the pool; never calls Groq; idempotent on re-upload.
+      if (req.method === 'POST' && url.pathname === '/api/admin/content-pool/import-json') {
+        const payload = await readImportBody(req);
+        return json(res, 200, await importQuestionPack(payload));
       }
       return json(res, 404, { error: 'Not found.' });
     }
@@ -126,6 +156,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: 'Not found.' });
   } catch (error) {
     if (error instanceof CredentialInputError) return json(res, 400, { error: error.message });
+    if (error instanceof PackFormatError) return json(res, 400, { error: error.message });
     log('http.error', { message: error.message });
     return json(res, 500, { error: 'The request could not be completed.' });
   }

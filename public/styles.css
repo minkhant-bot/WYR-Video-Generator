@@ -36,6 +36,9 @@ progress{width:100%;height:14px;accent-color:#6d8cff}
 .pool-actions{display:flex;gap:10px}
 .pool-actions button{flex:1}
 .secondary{background:#303b58}
+.pool-import{margin-top:14px;border-top:1px solid #30364a;padding-top:14px}
+.pool-import-label{display:block;font-size:12px;font-weight:700;color:#b8bfd0;margin-bottom:8px}
+.pool-import input[type=file]{width:100%;border-radius:10px;border:1px dashed #30364a;background:#0e1119;color:inherit;padding:11px 12px;font-size:13px}
 @media(max-width:430px){
   main{width:min(100% - 16px,1100px);padding-top:12px}
   .panel{padding:18px}

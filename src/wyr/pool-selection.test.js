@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { arrangeForHook, buildPlanFromPoolRows, computeInsertionFields, contentFamilyForCategory, selectDiversePlan } from './pool-selection.js';
+import { arrangeForHook, buildPlanFromPoolRows, computeInsertionFields, contentFamilyForCategory, repairPlanForDuration, selectDiversePlan } from './pool-selection.js';
+import { estimateSceneDurationFromText, DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 
 let nextId = 1;
 const row = ({ category, a, b, aq, bq, hookScore = 50, lastUsedAt = null, usedCount = 0, isFantasy = null, motifA = null, motifB = null }) => {
@@ -183,6 +184,95 @@ test('a weak hook is never selected over a stronger hook for scene 1', () => {
   ];
   const arranged = arrangeForHook(weakFirst);
   assert.equal(arranged[0].id, weakFirst[1].id);
+});
+
+// Eight long-narration questions across 8 distinct families (so the family cap of 2 never blocks
+// any of them) whose combined estimated duration lands well over DEFAULT_DURATION_BUDGET_TOTAL_SECONDS
+// -- an in-repo stand-in for the production "61.933s" failure, but built from estimated (not
+// TTS-measured) duration so it's deterministic and DB-free.
+const LONG_SELECTED = [
+  row({ category: 'superpowers', a: 'Read the minds of every single stranger nearby', b: 'Turn completely invisible near every other person', isFantasy: false, motifA: 'mind-reading-long', motifB: 'invisibility-long' }),
+  row({ category: 'time', a: 'Travel back to relive your entire early childhood', b: 'Travel forward to witness the distant unknown future', motifA: 'time-travel-past-long', motifB: 'time-travel-future-long' }),
+  row({ category: 'dream lifestyle', a: 'Wake up early and productive every single morning', b: 'Sleep in late and relaxed every single day', motifA: 'morning-routine-long', motifB: 'sleep-routine-long' }),
+  row({ category: 'food', a: 'Eat extremely spicy food at every single meal', b: 'Eat extremely sweet food at every single meal', motifA: 'spicy-food-long', motifB: 'sweet-food-long' }),
+  row({ category: 'travel', a: 'Visit five different countries across all of Europe', b: 'Visit five different countries across all of Asia', motifA: 'europe-trip-long', motifB: 'asia-trip-long' }),
+  row({ category: 'space', a: 'Float weightlessly inside a real orbiting spacecraft', b: 'Walk slowly across the surface of the moon', motifA: 'zero-gravity-long', motifB: 'moonwalk-long' }),
+  row({ category: 'survival-lite', a: 'Build a small shelter alone deep in a forest', b: 'Start a warm fire alone without any matches', motifA: 'shelter-building-long', motifB: 'fire-starting-long' }),
+  row({ category: 'money', a: 'Own a small private island somewhere in the Pacific', b: 'Own a tall penthouse somewhere in a big city', motifA: 'private-island-long', motifB: 'penthouse-long' }),
+];
+
+// Short, valid substitutes: one per family represented above, so a straightforward swap never
+// needs to relax the family cap. Motifs are distinct from everything in LONG_SELECTED.
+const SHORT_CANDIDATES = [
+  row({ category: 'superpowers', a: 'Fly fast', b: 'Turn invisible', motifA: 'flight-short', motifB: 'invisibility-short' }),
+  row({ category: 'time', a: 'Freeze time', b: 'Rewind time', motifA: 'freeze-time-short', motifB: 'rewind-time-short' }),
+  row({ category: 'dream lifestyle', a: 'Nap daily', b: 'Travel monthly', motifA: 'nap-short', motifB: 'travel-monthly-short' }),
+  row({ category: 'food', a: 'Eat sushi', b: 'Eat pizza', motifA: 'sushi-short', motifB: 'pizza-short' }),
+  row({ category: 'travel', a: 'Visit Rome', b: 'Visit Cairo', motifA: 'rome-short', motifB: 'cairo-short' }),
+  row({ category: 'space', a: 'Visit the ISS', b: 'Visit the moon', motifA: 'iss-short', motifB: 'moonvisit-short' }),
+  row({ category: 'survival-lite', a: 'Start a fire', b: 'Find fresh water', motifA: 'firestart-short', motifB: 'freshwater-short' }),
+  row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', motifA: 'yacht-short', motifB: 'jet-short' }),
+];
+
+test('repairPlanForDuration leaves an already-under-budget selection unchanged', () => {
+  const selected = SHORT_CANDIDATES;
+  const result = repairPlanForDuration({ selected, candidates: [...selected, ...LONG_SELECTED], count: 8, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 });
+  assert.equal(result.swapped, false);
+  assert.equal(result.fits, true);
+  assert.deepEqual(result.selected.map(r => r.id), selected.map(r => r.id));
+});
+
+test('a long, over-budget 8-question selection is automatically repaired by swapping the longest questions for shorter ready ones', () => {
+  const initialTotal = LONG_SELECTED.reduce((sum, r) => sum + estimateSceneDurationFromText(r.option_a_text, r.option_b_text, { baseDuration: 7 }), 0);
+  assert.ok(initialTotal > DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, `test fixture must start over budget; got ${initialTotal}s`);
+
+  const result = repairPlanForDuration({ selected: LONG_SELECTED, candidates: [...LONG_SELECTED, ...SHORT_CANDIDATES], count: 8, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 });
+
+  assert.equal(result.swapped, true);
+  assert.equal(result.fits, true);
+  assert.ok(result.projectedTotalSeconds <= DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, `repaired total ${result.projectedTotalSeconds}s must be under budget`);
+  assert.ok(result.projectedTotalSeconds < initialTotal, 'the repaired total must be strictly shorter than the original');
+  assert.equal(result.selected.length, 8);
+
+  // Diversity rules preserved: distinct ids, family cap of 2, at most 1 fantasy, no motif reused.
+  assert.equal(new Set(result.selected.map(r => r.id)).size, 8, 'no question should be selected twice');
+  const familyCounts = new Map();
+  for (const r of result.selected) familyCounts.set(r.content_family, (familyCounts.get(r.content_family) || 0) + 1);
+  for (const [family, count] of familyCounts) assert.ok(count <= 2, `family ${family} appears ${count} times, exceeding the cap of 2`);
+  assert.ok(result.selected.filter(r => r.is_fantasy).length <= 1, 'fantasy cap of 1 must be preserved');
+  const motifs = result.selected.flatMap(r => [r.motif_key_a, r.motif_key_b]).filter(Boolean);
+  assert.equal(new Set(motifs).size, motifs.length, 'no motif should be used twice across the repaired selection');
+
+  // Narration is never truncated: every selected question's option text is verbatim one of the
+  // original candidate texts, never a shortened/modified variant.
+  const knownTexts = new Set([...LONG_SELECTED, ...SHORT_CANDIDATES].flatMap(r => [r.option_a_text, r.option_b_text]));
+  for (const r of result.selected) { assert.ok(knownTexts.has(r.option_a_text), `unexpected/altered option A text: "${r.option_a_text}"`); assert.ok(knownTexts.has(r.option_b_text), `unexpected/altered option B text: "${r.option_b_text}"`); }
+});
+
+test('repairPlanForDuration never picks a substitute that would violate the family cap or reuse a motif, even if it is shorter', () => {
+  // 'money' and 'luxury' both map to the wealth_and_luxury family (see CONTENT_FAMILY_BY_CATEGORY)
+  // and are already SHORT -- they will never be picked as the "outgoing" (longest) row, so
+  // wealth_and_luxury stays pinned at its cap of 2 throughout repair. The other 6 slots are LONG
+  // rows from 6 different families, each with a valid same-family short substitute available.
+  const shortMoney = row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', motifA: 'yacht-cap', motifB: 'jet-cap' });
+  const shortLuxury = row({ category: 'luxury', a: 'Live in a mansion', b: 'Live in a penthouse', motifA: 'mansion-cap', motifB: 'penthouse-cap' });
+  const selected = [shortMoney, shortLuxury, ...LONG_SELECTED.filter(r => r.category !== 'money').slice(0, 6)];
+  assert.equal(selected.length, 8);
+
+  // 'cars' ALSO maps to wealth_and_luxury -- a short cars candidate must be refused even though
+  // it is shorter than every long row, because the family is already full.
+  const blockedCarsCandidate = row({ category: 'cars', a: 'Own a sports car', b: 'Own a classic car', motifA: 'sportscar-cap', motifB: 'classiccar-cap' });
+  const validSubstitutes = SHORT_CANDIDATES.filter(r => r.category !== 'money');
+  const result = repairPlanForDuration({ selected, candidates: [...selected, blockedCarsCandidate, ...validSubstitutes], count: 8, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 });
+
+  assert.equal(result.selected.some(r => r.id === blockedCarsCandidate.id), false, 'a same-family substitute must never push a family past its cap of 2');
+  assert.ok(result.selected.some(r => r.id === shortMoney.id) && result.selected.some(r => r.id === shortLuxury.id), 'the two already-at-cap wealth_and_luxury rows must remain untouched');
+});
+
+test('repairPlanForDuration reports fits:false (never throws, never fabricates a fit) when no valid shorter substitute exists locally', () => {
+  const result = repairPlanForDuration({ selected: LONG_SELECTED, candidates: LONG_SELECTED, count: 8, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 });
+  assert.equal(result.fits, false);
+  assert.equal(result.selected.length, 8, 'the (still over-budget) selection must still be returned so the caller has full information');
 });
 
 test('buildPlanFromPoolRows produces a plan shape compatible with addIllustrativePercentages / the image pipeline', () => {
