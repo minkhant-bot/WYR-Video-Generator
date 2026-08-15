@@ -8,6 +8,7 @@ import { expandImageSelection, replaceImageSelection, selectImageCandidate } fro
 import { publicJob, log } from './src/wyr/utils.js';
 import { PUBLIC_DIR } from './src/wyr/runtime.js';
 import { CredentialInputError, getCredentialStatus, saveLocalCredentials } from './src/wyr/credentials.js';
+import { runStartupMigrations } from './src/wyr/startup.js';
 
 const startupConfig = getConfig(); const store = createJobStore(startupConfig.rootDir); const publicDir = PUBLIC_DIR;
 const json = (res, status, body) => { const payload = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'cache-control': 'no-store' }); res.end(payload); };
@@ -103,4 +104,14 @@ const server = http.createServer(async (req, res) => {
     return json(res, 500, { error: 'The request could not be completed.' });
   }
 });
+// Migrations must fully apply before the server accepts a single request -- run them here,
+// synchronously blocking listen(), rather than lazily on first DB access from a request handler.
+// No seed/refill runs here; that stays a separate, manually-triggered step.
+try {
+  await runStartupMigrations();
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+
 server.listen(startupConfig.port, '0.0.0.0', () => log('server.started', { port: startupConfig.port, rootDir: startupConfig.rootDir, pexelsConcurrency: startupConfig.pexelsConcurrency, ttsConcurrency: startupConfig.ttsConcurrency, sceneRenderConcurrency: startupConfig.sceneRenderConcurrency, ffmpegThreads: startupConfig.ffmpegThreads }));
