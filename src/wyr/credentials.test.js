@@ -83,10 +83,10 @@ test('content history and bounded retry configuration support a persistent volum
   const names = ['WYR_CONTENT_HISTORY_DIR', 'WYR_CONTENT_GENERATION_RETRIES'];
   const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
-    process.env.WYR_CONTENT_HISTORY_DIR = '/data/wyr-content-history'; process.env.WYR_CONTENT_GENERATION_RETRIES = '6';
+    process.env.WYR_CONTENT_HISTORY_DIR = '/data/wyr-content-history'; process.env.WYR_CONTENT_GENERATION_RETRIES = '3';
     const config = getConfig();
     assert.equal(config.contentHistoryPath, '/data/wyr-content-history/history.json');
-    assert.equal(config.contentGenerationRetries, 6);
+    assert.equal(config.contentGenerationRetries, 3);
   } finally {
     for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
   }
@@ -97,7 +97,7 @@ test('Groq rate-limit recovery has bounded production defaults', () => {
   const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
     for (const name of names) delete process.env[name];
-    const config = getConfig(); assert.equal(config.groqRateLimitRetries, 7); assert.equal(config.groqRateLimitMaxWaitMs, 150_000);
+    const config = getConfig(); assert.equal(config.groqRateLimitRetries, 1); assert.equal(config.groqRateLimitMaxWaitMs, 30_000);
   } finally {
     for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
   }

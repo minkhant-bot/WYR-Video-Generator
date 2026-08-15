@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONTENT_CATEGORIES, CONTENT_FAMILIES, DILEMMA_STYLES, FANTASY_CONTENT_FAMILIES, QUALITY_DIMENSIONS, groqRateLimitDetails } from './content.js';
+import { CONTENT_CATEGORIES, groqRateLimitDetails } from './content.js';
 import { log, writeJsonAtomic } from './utils.js';
 
 const HISTORY_VERSION = 1;
-const QUALITY_THRESHOLD = 7;
 const GENERIC_WORDS = new Set(['a', 'an', 'the', 'your', 'you', 'to', 'of', 'in', 'on', 'at', 'with', 'for', 'and', 'or']);
 const CONCEPT_FILLER = new Set([...GENERIC_WORDS, 'always', 'never', 'every', 'forever', 'private', 'own', 'owns', 'owned', 'have', 'has', 'having', 'get', 'gets', 'getting', 'live', 'lives', 'living', 'be', 'being', 'become', 'choose', 'control']);
 const TOKEN_ALIASES = Object.freeze({ automobiles: 'car', automobile: 'car', cars: 'car', vehicle: 'car', vehicles: 'car', cash: 'money', dollars: 'money', dollar: 'money', riches: 'money', wealthy: 'wealth', aeroplane: 'plane', airplane: 'plane', aircraft: 'plane', jets: 'jet', islands: 'island', homes: 'home', houses: 'home', mansion: 'home', mansions: 'home', invisible: 'invisibility', strength: 'strength', strong: 'strength', flying: 'fly', flies: 'fly', teleports: 'teleport', teleporting: 'teleport', lightning: 'lightning', oceans: 'ocean', seas: 'ocean', sea: 'ocean', underwater: 'underwater', languages: 'language', years: 'year', months: 'month', travelling: 'travel', traveling: 'travel', travelled: 'travel', traveled: 'travel' });
@@ -49,12 +48,12 @@ export const compareDilemmas = (left, right) => {
   return { duplicate: Math.min(...best) >= 0.62 && similarity >= 0.72, kind: 'near', similarity };
 };
 
-// Exact conceptKey equality misses obvious paraphrases (Groq may name the same idea differently
-// across two calls). This alias table canonicalizes well-known collision-prone motifs so
-// "teleport anywhere" / "open a portal anywhere" / "instant travel anywhere" all land on the
-// same bucket, purely deterministically (no extra Groq/embedding calls). It also doubles as the
-// legacy-history backfill: entries created before conceptKey existed still resolve a motif from
-// their stored option text alone, so old videos participate in duplicate protection immediately.
+// Deterministic, local semantic-motif fingerprinting — no Groq field required. Well-known
+// collision-prone motifs are recognized by pattern so "teleport anywhere" / "open a portal
+// anywhere" / "instant travel anywhere" all land on the same bucket; anything else falls back to
+// a slug derived from the option's own significant words. Because this reads only option text, it
+// works identically for brand-new plans and for legacy history entries from before any
+// conceptKey field ever existed — nothing to migrate, nothing that can corrupt history.json.
 const MOTIF_ALIAS_RULES = Object.freeze([
   { motif: 'teleportation', test: t => /\bteleport|\bportal\b|\binstant(?:ly)?\s+travel|\btravel\s+instant|\bwarp\b/.test(t) },
   { motif: 'time-control', test: t => /\bfreeze\s+time|\bstop\s+time|\bpause\s+time|\btime\s+freeze|\bfrozen\s+time/.test(t) },
@@ -78,11 +77,22 @@ export const canonicalMotifKey = ({ conceptKey, text } = {}) => {
   return motifSlugFromText(text);
 };
 
+// Fantasy/superpower classification is now entirely local: a question counts as fantasy-like if
+// its category is one of the two fantasy-coded categories, OR if either option's motif is one of
+// the inherently-impossible motifs above (teleportation, time manipulation, invisibility,
+// mind-reading, a mythical-creature bond, super-strength, or flight). No extra Groq field needed.
+export const FANTASY_CATEGORIES = new Set(['superpowers', 'fantasy']);
+export const FANTASY_MOTIFS = new Set(['teleportation', 'time-control', 'time-travel', 'invisibility', 'mind-reading', 'mythical-creature-bond', 'super-strength', 'flight']);
+export const questionMotifs = question => [canonicalMotifKey({ text: question.optionA.text }), canonicalMotifKey({ text: question.optionB.text })].filter(Boolean);
+export const isFantasyQuestion = (question, motifs = questionMotifs(question)) => FANTASY_CATEGORIES.has(question.category) || motifs.some(motif => FANTASY_MOTIFS.has(motif));
+
 const optionWordCount = text => cleanText(text).split(' ').filter(Boolean).length;
 const queryWordCount = text => cleanText(text).split(' ').filter(Boolean).length;
+// Local quality heuristics replace Groq's previous self-reported 1-10 quality scores entirely —
+// readability/length/distinguishability/safety are all mechanically checkable, so there was
+// nothing genuinely subjective being validated by asking the model to grade its own output.
 export const assessQuestionQuality = question => {
   const reasons = [];
-  for (const dimension of QUALITY_DIMENSIONS) if (!Number.isInteger(question.quality?.[dimension]) || question.quality[dimension] < QUALITY_THRESHOLD) reasons.push(`${dimension} must score at least ${QUALITY_THRESHOLD}`);
   for (const [label, option] of [['A', question.optionA], ['B', question.optionB]]) {
     const words = optionWordCount(option?.text);
     if (words < 1 || words > 9) reasons.push(`option ${label} must contain 1–9 instantly readable words`);
@@ -94,7 +104,7 @@ export const assessQuestionQuality = question => {
   if (BORING_PAIRS.has(boring)) reasons.push('generic low-stakes dilemma is blocked');
   if (BLOCKED_CONTENT.test(`${question.optionA.text} ${question.optionB.text}`)) reasons.push('unsafe or excluded subject matter is blocked');
   if (optionSimilarity(question.optionA.text, question.optionB.text) >= 0.8) reasons.push('options are not clearly distinguishable');
-  return { accepted: reasons.length === 0, reasons, threshold: QUALITY_THRESHOLD, scores: question.quality };
+  return { accepted: reasons.length === 0, reasons };
 };
 
 const emptyHistory = () => ({ version: HISTORY_VERSION, videos: [] });
@@ -116,7 +126,7 @@ export class ContentHistoryStore {
       if (checked.some(previous => compareDilemmas(question, previous).duplicate)) throw new ContentGenerationError('Content history changed during generation and now contains a duplicate; the job will not render.');
       checked.push(question);
     }
-    history.videos.push({ generatedAt, topic: plan.topic, categories: plan.questions.map(question => question.category), contentFamilies: plan.questions.map(question => question.contentFamily || null), questions: plan.questions.map(question => ({ category: question.category, dilemmaStyle: question.dilemmaStyle || null, contentFamily: question.contentFamily || null, optionA: question.optionA.text, optionB: question.optionB.text, conceptKeyA: canonicalMotifKey({ conceptKey: question.optionA.conceptKey, text: question.optionA.text }), conceptKeyB: canonicalMotifKey({ conceptKey: question.optionB.conceptKey, text: question.optionB.text }), exact: exactDilemma(question), canonical: canonicalDilemma(question) })) });
+    history.videos.push({ generatedAt, topic: plan.topic, categories: plan.questions.map(question => question.category), questions: plan.questions.map(question => ({ category: question.category, optionA: question.optionA.text, optionB: question.optionB.text, conceptKeyA: canonicalMotifKey({ text: question.optionA.text }), conceptKeyB: canonicalMotifKey({ text: question.optionB.text }), exact: exactDilemma(question), canonical: canonicalDilemma(question) })) });
     writeJsonAtomic(this.filePath, history);
     return history;
   }
@@ -135,23 +145,29 @@ export const recentMotifs = (history, windowSize = MOTIF_HISTORY_WINDOW) => new 
     canonicalMotifKey({ conceptKey: question.conceptKeyB, text: question.optionB }),
   ].filter(Boolean))),
 );
+// Two of the 20 categories ('superpowers', 'fantasy') are themselves fantasy-coded; selecting
+// both in the same least-recently-used batch would guarantee an extra repair round every time
+// (the fantasy cap below would reject the second one). Capping the target list itself at one
+// fantasy-coded category — purely local, no extra Groq field — keeps the common case at one call.
 export const selectCategories = (history, count) => {
   const lastUsed = new Map(CONTENT_CATEGORIES.map(category => [category, -1]));
   history.videos.forEach((video, videoIndex) => video.categories.forEach(category => lastUsed.set(category, videoIndex)));
-  return [...CONTENT_CATEGORIES].sort((left, right) => lastUsed.get(left) - lastUsed.get(right) || CONTENT_CATEGORIES.indexOf(left) - CONTENT_CATEGORIES.indexOf(right)).slice(0, count);
+  const ranked = [...CONTENT_CATEGORIES].sort((left, right) => lastUsed.get(left) - lastUsed.get(right) || CONTENT_CATEGORIES.indexOf(left) - CONTENT_CATEGORIES.indexOf(right));
+  const selected = []; let fantasyPicked = false;
+  for (const category of ranked) {
+    if (selected.length >= count) break;
+    if (FANTASY_CATEGORIES.has(category)) { if (fantasyPicked) continue; fantasyPicked = true; }
+    selected.push(category);
+  }
+  return selected;
 };
-// Mirrors selectCategories' least-recently-used rotation, but caps the fantasy-like slice of the
-// target list at 1 slot so fantasy stays optional/occasional by construction, not just by a
-// post-hoc reject — while still leaving room for the hard per-video caps below as a safety net.
-export const selectContentFamilies = (history, count) => {
-  const lastUsed = new Map(CONTENT_FAMILIES.map(family => [family, -1]));
-  history.videos.forEach((video, videoIndex) => (video.contentFamilies || []).forEach(family => { if (family) lastUsed.set(family, videoIndex); }));
-  const ranked = [...CONTENT_FAMILIES].sort((left, right) => lastUsed.get(left) - lastUsed.get(right) || CONTENT_FAMILIES.indexOf(left) - CONTENT_FAMILIES.indexOf(right));
-  const realistic = ranked.filter(family => !FANTASY_CONTENT_FAMILIES.includes(family));
-  const fantasy = ranked.filter(family => FANTASY_CONTENT_FAMILIES.includes(family));
-  const selected = [...realistic.slice(0, Math.max(0, count - 1)), ...fantasy.slice(0, 1)];
-  for (const family of ranked) { if (selected.length >= count) break; if (!selected.includes(family)) selected.push(family); }
-  return selected.slice(0, count).sort((left, right) => CONTENT_FAMILIES.indexOf(left) - CONTENT_FAMILIES.indexOf(right));
+
+// Topic is cosmetic display text only (job list / result screen) — deriving it locally from the
+// accepted categories removes the need to ask Groq for it at all.
+const titleCase = word => word.replace(/(^|[\s/-])([a-z])/g, (_, separator, letter) => `${separator}${letter.toUpperCase()}`);
+export const deriveTopic = questions => {
+  const categories = [...new Set(questions.map(question => question.category))].slice(0, 3).map(titleCase);
+  return categories.length ? `Would You Rather: ${categories.join(', ')}` : 'Would You Rather';
 };
 
 export class ContentGenerationError extends Error {}
@@ -159,9 +175,10 @@ export class ContentRateLimitError extends ContentGenerationError {
   constructor(message, { acceptedCount, requiredCount, retries, waitedMs } = {}) { super(message); this.code = 'groq_rate_limit_exceeded'; this.acceptedCount = acceptedCount; this.requiredCount = requiredCount; this.retries = retries; this.waitedMs = waitedMs; }
 }
 
-// Free-tier Groq rate limits can take longer than 60s to clear; bounded but wide enough
-// (~2.5 minutes, 7 retries) to ride out a burst without failing an otherwise-healthy job.
-export const DEFAULT_GROQ_RATE_LIMIT_POLICY = Object.freeze({ maxRetries: 7, maxWaitMs: 150_000, baseDelayMs: 1_000, maxDelayMs: 15_000, jitterMs: 250 });
+// Lightweight-flow default: respect Retry-After once, wait for the reported reset, retry once.
+// Bounded and finite — this is not meant to ride out a sustained outage, only a single transient
+// 429 (the schema/prompt-size reduction is what's supposed to prevent 429s from recurring at all).
+export const DEFAULT_GROQ_RATE_LIMIT_POLICY = Object.freeze({ maxRetries: 1, maxWaitMs: 30_000, baseDelayMs: 1_000, maxDelayMs: 15_000, jitterMs: 250 });
 const providerRequestStats = provider => ({
   totalGroqRequests: Number.isFinite(provider?.requestCount) ? provider.requestCount : null,
   rateLimitCount: Number.isFinite(provider?.rateLimitCount) ? provider.rateLimitCount : null,
@@ -174,7 +191,10 @@ const rateLimitFailure = ({ accepted, questionCount, retries, waitedMs, maxRetri
   { acceptedCount: accepted.length, requiredCount: questionCount, retries, waitedMs },
 );
 
-export const generateProductionPlan = async ({ provider, historyStore, questionCount = 8, maxAttempts = 4, rateLimitPolicy = {}, sleep = wait, random = Math.random }) => {
+// Lightweight flow: one request for all 8, local validation, and — if some are rejected — exactly
+// one repair request for only the still-missing count (maxAttempts defaults to 2: initial +
+// one repair round). Never regenerates the whole batch just because part of it was rejected.
+export const generateProductionPlan = async ({ provider, historyStore, questionCount = 8, maxAttempts = 2, rateLimitPolicy = {}, sleep = wait, random = Math.random }) => {
   if (!provider || typeof provider.generatePlan !== 'function') throw new TypeError('A content provider is required.');
   if (!historyStore || typeof historyStore.load !== 'function' || typeof historyStore.appendPlan !== 'function') throw new TypeError('A persistent content history store is required.');
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new TypeError('maxAttempts must be a positive integer.');
@@ -183,28 +203,17 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
   if (!Number.isInteger(policy.maxRetries) || policy.maxRetries < 0 || !Number.isFinite(policy.maxWaitMs) || policy.maxWaitMs < 0 || !Number.isFinite(policy.baseDelayMs) || policy.baseDelayMs < 0 || !Number.isFinite(policy.maxDelayMs) || policy.maxDelayMs < 0 || !Number.isFinite(policy.jitterMs) || policy.jitterMs < 0) throw new TypeError('Groq rate-limit policy values must be non-negative numbers, and maxRetries must be an integer.');
   const history = historyStore.load(); const priorQuestions = historyQuestions(history); const accepted = []; const rejectionSummary = [];
   const targetCategories = selectCategories(history, questionCount);
-  const targetFamilies = selectContentFamilies(history, questionCount);
   const blockedMotifs = recentMotifs(history);
-  const styleOffset = history.videos.length % DILEMMA_STYLES.length;
-  const targetStyles = Array.from({ length: questionCount }, (_, offset) => DILEMMA_STYLES[(styleOffset + offset) % DILEMMA_STYLES.length]);
-  const MAX_STYLE_REPEATS_PER_VIDEO = 2;
-  const MAX_FAMILY_REPEATS_PER_VIDEO = 2;
   const MAX_FANTASY_PER_VIDEO = 1;
-  let lastProviderError = null; let topic = null; let attempt = 0; let rateLimitRetries = 0; let rateLimitWaitedMs = 0;
+  let lastProviderError = null; let attempt = 0; let rateLimitRetries = 0; let rateLimitWaitedMs = 0;
   while (attempt < maxAttempts && accepted.length < questionCount) {
     const missingCategories = targetCategories.filter(category => !accepted.some(question => question.category === category));
-    const acceptedMotifs = new Set(accepted.flatMap(question => [
-      canonicalMotifKey({ conceptKey: question.optionA.conceptKey, text: question.optionA.text }),
-      canonicalMotifKey({ conceptKey: question.optionB.conceptKey, text: question.optionB.text }),
-    ]));
-    const styleCounts = accepted.reduce((counts, question) => { if (question.dilemmaStyle) counts[question.dilemmaStyle] = (counts[question.dilemmaStyle] || 0) + 1; return counts; }, {});
-    const familyCounts = accepted.reduce((counts, question) => { if (question.contentFamily) counts[question.contentFamily] = (counts[question.contentFamily] || 0) + 1; return counts; }, {});
-    let fantasyAccepted = accepted.filter(question => FANTASY_CONTENT_FAMILIES.includes(question.contentFamily)).length;
+    const acceptedMotifs = new Set(accepted.flatMap(questionMotifs));
+    let fantasyAccepted = accepted.filter(question => isFantasyQuestion(question)).length;
     try {
       const requestedCount = missingCategories.length; const acceptedBeforeRequest = accepted.length;
-      const candidates = await provider.generatePlan(requestedCount, { categories: missingCategories, styles: targetStyles, families: targetFamilies, exclusions: [...recentExclusions(history), ...accepted.map(question => `${question.optionA.text} OR ${question.optionB.text}`)], excludedMotifs: [...blockedMotifs, ...acceptedMotifs] });
+      const candidates = await provider.generatePlan(requestedCount, { categories: missingCategories });
       attempt += 1;
-      topic ||= candidates.topic;
       let rejectedThisRound = 0; const reasonsThisRound = new Set();
       for (const candidate of candidates.questions) {
         if (accepted.length >= questionCount) break;
@@ -214,24 +223,17 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
         const comparisons = [...priorQuestions, ...accepted].map(question => compareDilemmas(candidate, question));
         const duplicate = comparisons.find(result => result.duplicate);
         if (duplicate) reasons.push(`${duplicate.kind} duplicate detected`);
-        const candidateMotifs = [
-          canonicalMotifKey({ conceptKey: candidate.optionA?.conceptKey, text: candidate.optionA?.text }),
-          canonicalMotifKey({ conceptKey: candidate.optionB?.conceptKey, text: candidate.optionB?.text }),
-        ].filter(Boolean);
+        const candidateMotifs = questionMotifs(candidate);
         const reusedMotif = candidateMotifs.find(motif => blockedMotifs.has(motif));
         if (reusedMotif) reasons.push(`concept motif "${reusedMotif}" was used in a recent video`);
         const duplicateMotifInVideo = candidateMotifs.find(motif => acceptedMotifs.has(motif));
         if (duplicateMotifInVideo) reasons.push(`concept motif "${duplicateMotifInVideo}" duplicates another question in this video`);
-        if (candidate.dilemmaStyle && (styleCounts[candidate.dilemmaStyle] || 0) >= MAX_STYLE_REPEATS_PER_VIDEO) reasons.push(`dilemma style "${candidate.dilemmaStyle}" is overused in this video`);
-        const isFantasyFamily = FANTASY_CONTENT_FAMILIES.includes(candidate.contentFamily);
-        if (isFantasyFamily && fantasyAccepted >= MAX_FANTASY_PER_VIDEO) reasons.push(`fantasy/superpower content family "${candidate.contentFamily}" exceeds the ${MAX_FANTASY_PER_VIDEO}-per-video cap`);
-        else if (candidate.contentFamily && (familyCounts[candidate.contentFamily] || 0) >= MAX_FAMILY_REPEATS_PER_VIDEO) reasons.push(`content family "${candidate.contentFamily}" exceeds the ${MAX_FAMILY_REPEATS_PER_VIDEO}-per-video cap`);
+        const isFantasy = isFantasyQuestion(candidate, candidateMotifs);
+        if (isFantasy && fantasyAccepted >= MAX_FANTASY_PER_VIDEO) reasons.push(`fantasy/superpower question exceeds the ${MAX_FANTASY_PER_VIDEO}-per-video cap`);
         if (reasons.length) { rejectionSummary.push({ attempt, dilemma: `${candidate.optionA.text} OR ${candidate.optionB.text}`, reasons }); rejectedThisRound += 1; for (const reason of reasons) reasonsThisRound.add(reason); continue; }
         accepted.push({ ...candidate, duplicateCheck: { status: 'clear', comparedAgainst: priorQuestions.length + accepted.length } });
         for (const motif of candidateMotifs) acceptedMotifs.add(motif);
-        if (candidate.dilemmaStyle) styleCounts[candidate.dilemmaStyle] = (styleCounts[candidate.dilemmaStyle] || 0) + 1;
-        if (candidate.contentFamily) familyCounts[candidate.contentFamily] = (familyCounts[candidate.contentFamily] || 0) + 1;
-        if (isFantasyFamily) fantasyAccepted += 1;
+        if (isFantasy) fantasyAccepted += 1;
       }
       log('content.groq_request', { attempt, requestedCount, acceptedFromRequest: accepted.length - acceptedBeforeRequest, rejectedFromRequest: rejectedThisRound, remaining: questionCount - accepted.length, totalAccepted: accepted.length, required: questionCount, rejectionReasons: [...reasonsThisRound].slice(0, 8), ...providerRequestStats(provider) });
     } catch (error) {
@@ -256,10 +258,9 @@ export const generateProductionPlan = async ({ provider, historyStore, questionC
     log('content.generation_failed', { attemptsUsed: attempt, maxAttempts, accepted: accepted.length, required: questionCount, rateLimitRetries, rateLimitWaitedMs, ...providerRequestStats(provider) });
     throw new ContentGenerationError(`Content generation failed after ${maxAttempts} bounded attempt(s): accepted ${accepted.length} of ${questionCount} required distinct high-quality dilemmas.${lastProviderError ? ` Last provider error: ${lastProviderError.message}` : ''}`);
   }
-  const distinctFamilies = new Set(accepted.map(question => question.contentFamily).filter(Boolean)).size;
-  const fantasyCount = accepted.filter(question => FANTASY_CONTENT_FAMILIES.includes(question.contentFamily)).length;
-  const plan = { version: 1, topic: topic || 'High-stakes dream choices', percentages: null, contentQuality: { threshold: QUALITY_THRESHOLD, attemptsAllowed: maxAttempts, attemptsUsed: attempt, rejectedCandidates: rejectionSummary.filter(rejection => rejection.dilemma).length, providerFailures: rejectionSummary.filter(rejection => rejection.providerError).length, rateLimitRetries, rateLimitWaitedMs, categoryStrategy: 'least-recently-used', distinctContentFamilies: distinctFamilies, fantasyFamilyCount: fantasyCount }, questions: accepted.map((question, index) => ({ ...question, index })) };
-  log('content.generation_summary', { attemptsUsed: attempt, accepted: accepted.length, required: questionCount, rateLimitRetries, rateLimitWaitedMs, distinctContentFamilies: distinctFamilies, fantasyFamilyCount: fantasyCount, ...providerRequestStats(provider) });
+  const fantasyCount = accepted.filter(question => isFantasyQuestion(question)).length;
+  const plan = { version: 1, topic: deriveTopic(accepted), percentages: null, contentQuality: { attemptsAllowed: maxAttempts, attemptsUsed: attempt, rejectedCandidates: rejectionSummary.filter(rejection => rejection.dilemma).length, providerFailures: rejectionSummary.filter(rejection => rejection.providerError).length, rateLimitRetries, rateLimitWaitedMs, categoryStrategy: 'least-recently-used', fantasyCount }, questions: accepted.map((question, index) => ({ ...question, index })) };
+  log('content.generation_summary', { attemptsUsed: attempt, accepted: accepted.length, required: questionCount, rateLimitRetries, rateLimitWaitedMs, fantasyCount, ...providerRequestStats(provider) });
   historyStore.appendPlan(plan);
   return plan;
 };

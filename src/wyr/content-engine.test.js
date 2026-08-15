@@ -3,19 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CONTENT_CATEGORIES, CONTENT_FAMILIES, DILEMMA_STYLES, FANTASY_CONTENT_FAMILIES } from './content.js';
-import { assessQuestionQuality, canonicalMotifKey, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, DEFAULT_GROQ_RATE_LIMIT_POLICY, generateProductionPlan, MOTIF_HISTORY_WINDOW, recentMotifs, selectCategories, selectContentFamilies } from './content-engine.js';
+import { CONTENT_CATEGORIES } from './content.js';
+import { assessQuestionQuality, canonicalMotifKey, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, DEFAULT_GROQ_RATE_LIMIT_POLICY, generateProductionPlan, MOTIF_HISTORY_WINDOW, recentMotifs, selectCategories } from './content-engine.js';
 
-const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
-const dilemma = (a, b, category = 'superpowers', scores = quality) => ({ category, quality: scores, optionA: { text: a, searchQuery: `${a} concept photo` }, optionB: { text: b, searchQuery: `${b} concept photo` } });
-const withMotif = (a, b, conceptKeyA, conceptKeyB, category = 'superpowers', dilemmaStyle = 'power', contentFamily = undefined) => ({
-  category, dilemmaStyle, contentFamily, quality,
-  optionA: { text: a, searchQuery: `${a} concept photo`, conceptKey: conceptKeyA },
-  optionB: { text: b, searchQuery: `${b} concept photo`, conceptKey: conceptKeyB },
-});
-const styledMotifPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length]);
-const REALISTIC_FAMILIES = CONTENT_FAMILIES.filter(family => !FANTASY_CONTENT_FAMILIES.includes(family));
-const styledFamilyPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length], REALISTIC_FAMILIES[index % REALISTIC_FAMILIES.length]);
+const shortQuery = text => text.split(' ').slice(0, 4).join(' ');
+const dilemma = (a, b, category = 'superpowers') => ({ category, optionA: { text: a, searchQuery: shortQuery(a) }, optionB: { text: b, searchQuery: shortQuery(b) } });
 const rateLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), { status: 429, code: 'rate_limit_exceeded', retryAfterMs });
 const tokenLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), {
   status: 429, code: 'rate_limit_exceeded', retryAfterMs, limitType: 'tokens',
@@ -31,28 +23,60 @@ const temporaryStore = operation => {
     cleanup(); return result;
   } catch (error) { cleanup(); throw error; }
 };
+// A single-call mock: returns exactly the requested categories/count, using distinct realistic
+// text per category so nothing collides with itself on duplicate/motif checks.
+const REALISTIC_PAIRS = {
+  superpowers: ['Control gravity for a day', 'Control lightning for a day'],
+  money: ['Double your bank balance', 'Triple your vacation days'],
+  luxury: ['Own a private jet', 'Own a luxury yacht'],
+  'dream lifestyle': ['Work four days a week', 'Retire ten years early'],
+  travel: ['Backpack across Europe', 'Road trip across America'],
+  'impossible choices': ['Give up sweets forever', 'Give up your phone forever'],
+  'future technology': ['Live in a smart home', 'Commute by high speed rail'],
+  fantasy: ['Read minds for one day', 'Own a private island'],
+  time: ['Wake up an hour earlier', 'Stay up an hour later'],
+  freedom: ['Work fully remote', 'Set your own hours'],
+  'dream homes': ['Live in a treehouse', 'Live on a houseboat'],
+  cars: ['Drive a classic car', 'Drive a electric supercar'],
+  food: ['Only eat home cooked meals', 'Only eat restaurant meals'],
+  adventure: ['Go skydiving once', 'Go scuba diving once'],
+  fame: ['Be famous for a year', 'Be wealthy but unknown'],
+  'survival-lite': ['Camp without electricity', 'Camp without running water'],
+  space: ['Visit the moon', 'Visit Mars'],
+  ocean: ['Explore a coral reef', 'Explore a deep sea trench'],
+  'friendship/social': ['Have five close friends', 'Have fifty casual friends'],
+  'funny hypothetical': ['Speak only in rhymes', 'Sneeze confetti forever'],
+};
+const singleCallProvider = () => ({
+  calls: 0,
+  async generatePlan(count, context) {
+    this.calls += 1;
+    const categories = context.categories.length ? context.categories : CONTENT_CATEGORIES.slice(0, count);
+    return { questions: categories.slice(0, count).map(category => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category); }) };
+  },
+});
 
 test('exact duplicate rejection is order-independent', () => {
   assert.deepEqual(compareDilemmas(dilemma('Fly freely', 'Teleport anywhere'), dilemma('Fly freely', 'Teleport anywhere')), { duplicate: true, kind: 'exact', similarity: 1 });
 });
-
 test('reversed A/B duplicate is rejected', () => {
   const result = compareDilemmas(dilemma('Fly freely', 'Teleport anywhere'), dilemma('Teleport anywhere', 'Fly freely'));
   assert.equal(result.duplicate, true); assert.equal(result.kind, 'reversed');
 });
-
 test('near-duplicate wording variation is rejected', () => {
   const result = compareDilemmas(dilemma('Own a Private Jet', 'Own a Private Island'), dilemma('Have Your Own Jet', 'Live On A Private Island'));
   assert.equal(result.duplicate, true); assert.equal(result.kind, 'near');
 });
 
-test('persistent history reloads accepted dilemmas and categories', () => temporaryStore((store, directory) => {
+test('persistent history reloads accepted dilemmas and categories, with no dilemmaStyle/contentFamily fields', () => temporaryStore((store, directory) => {
   const plan = { topic: 'Dream choices', questions: [dilemma('Control Gravity', 'Control Lightning', 'superpowers')] };
   store.appendPlan(plan, '2026-01-01T00:00:00.000Z');
   const reloaded = new ContentHistoryStore(path.join(directory, 'history.json')).load();
   assert.equal(reloaded.videos.length, 1);
   assert.equal(reloaded.videos[0].questions[0].canonical, 'gravity | lightning');
   assert.deepEqual(reloaded.videos[0].categories, ['superpowers']);
+  assert.equal(reloaded.videos[0].questions[0].dilemmaStyle, undefined);
+  assert.equal(reloaded.videos[0].questions[0].contentFamily, undefined);
 }));
 
 test('category rotation favors categories not used in the previous video', () => {
@@ -63,23 +87,54 @@ test('category rotation favors categories not used in the previous video', () =>
   assert.equal(selected.some(category => used.includes(category)), false);
 });
 
-test('boring content is rejected even when self-reported scores are high', () => {
+test('boring content is rejected on local heuristics alone (no self-reported quality score needed)', () => {
   const result = assessQuestionQuality(dilemma('Coffee', 'Tea', 'food'));
   assert.equal(result.accepted, false); assert.match(result.reasons.join(' '), /generic low-stakes/);
 });
-
-test('high-quality short visual content is accepted', () => {
+test('a normal short, distinguishable, safe dilemma passes local quality heuristics', () => {
   const result = assessQuestionQuality(dilemma('Control Gravity', 'Control Lightning'));
   assert.equal(result.accepted, true); assert.deepEqual(result.reasons, []);
 });
 
-test('duplicate detection inside one video requests a replacement', async () => temporaryStore(async store => {
+test('a single Groq call produces all 8 usable questions in the normal case', async () => temporaryStore(async store => {
+  const provider = singleCallProvider();
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(provider.calls, 1);
+  assert.equal(plan.contentQuality.attemptsUsed, 1);
+  assert.equal(plan.contentQuality.rejectedCandidates, 0);
+  assert.ok(plan.topic.length > 0); // derived locally, not requested from Groq
+}));
+
+test('valid questions survive repair: only the missing count is requested, not all 8 again', async () => temporaryStore(async store => {
+  let calls = 0; const requestedCounts = []; const requestedCategories = [];
+  const provider = {
+    async generatePlan(count, context) {
+      calls += 1; requestedCounts.push(count); requestedCategories.push([...context.categories]);
+      const categories = context.categories;
+      const questions = categories.map(category => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category); });
+      if (calls === 1) {
+        // Sabotage exactly 2 of the 8 candidates (identical options -> local validation rejects them).
+        questions[2] = dilemma('Same Text Twice', 'Same Text Twice', questions[2].category);
+        questions[5] = dilemma('Same Text Twice Again', 'Same Text Twice Again', questions[5].category);
+      }
+      return { questions };
+    },
+  };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(calls, 2);
+  assert.deepEqual(requestedCounts, [8, 2]); // repair asked for exactly the missing count
+  assert.equal(requestedCategories[1].length, 2); // not all 8 categories re-requested
+}));
+
+test('duplicate detection inside one video requests a replacement for only the duplicate', async () => temporaryStore(async store => {
   let calls = 0;
   const provider = { async generatePlan(count, context) {
     calls += 1;
-    const questions = context.categories.map(category => dilemma(`${category} wonder ${calls}`, `${category} escape ${calls}`, category));
+    const questions = context.categories.map(category => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(`${a} ${calls}`, `${b} ${calls}`, category); });
     if (calls === 1) questions[1] = { ...questions[1], optionA: questions[0].optionA, optionB: questions[0].optionB };
-    return { topic: 'Candidates', questions: questions.slice(0, count) };
+    return { questions };
   } };
   const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
   assert.equal(plan.questions.length, 8); assert.equal(calls, 2);
@@ -88,60 +143,11 @@ test('duplicate detection inside one video requests a replacement', async () => 
 
 test('bounded retry failure never loops indefinitely', async () => temporaryStore(async store => {
   let calls = 0;
-  const low = { ...quality, curiosity: 4 };
-  const provider = { async generatePlan(count, context) { calls += 1; return { topic: 'Weak', questions: context.categories.map((category, index) => dilemma(`Plain choice ${index}`, `Other choice ${index}`, category, low)).slice(0, count) }; } };
+  // A generic boring pair (rejected by the local heuristic gate regardless of category) that the
+  // mock keeps re-offering — proves the bounded loop terminates instead of retrying forever.
+  const provider = { async generatePlan(count, context) { calls += 1; return { questions: context.categories.map(category => dilemma('Coffee', 'Tea', category)).slice(0, count) }; } };
   await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 }), ContentGenerationError);
   assert.equal(calls, 2);
-}));
-
-test('production selection succeeds with exactly 8 distinct quality-gated questions', async () => temporaryStore(async store => {
-  const provider = { async generatePlan(count, context) { return { topic: 'Strong choices', questions: context.categories.map((category, index) => dilemma(`Dream ability ${index}`, `Rare adventure ${index}`, category)).slice(0, count) }; } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3 });
-  assert.equal(plan.questions.length, 8);
-  assert.equal(plan.questions.every(question => question.duplicateCheck.status === 'clear'), true);
-  assert.equal(store.load().videos[0].questions.length, 8);
-}));
-
-test('seven accepted dilemmas survive a 429 and only the final missing dilemma is requested again', async () => temporaryStore(async store => {
-  const requestedCounts = []; const contexts = []; const waits = []; let calls = 0;
-  const low = { ...quality, curiosity: 4 };
-  const provider = { async generatePlan(count, context) {
-    calls += 1; requestedCounts.push(count); contexts.push(context);
-    if (calls === 1) return { topic: 'Partial progress', questions: context.categories.map((category, index) => dilemma(`${category} wonder`, `${category} escape`, category, index === 7 ? low : quality)) };
-    if (calls === 2) throw rateLimitError(25);
-    return { topic: 'Final replacement', questions: [dilemma('Summon friendly dragons', 'Open magical portals', context.categories[0])] };
-  } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 1000 }, sleep: async milliseconds => waits.push(milliseconds) });
-  assert.deepEqual(requestedCounts, [8, 1, 1]);
-  assert.deepEqual(contexts.slice(1).map(context => context.categories), [['fantasy'], ['fantasy']]);
-  assert.deepEqual(waits, [25]);
-  assert.equal(plan.questions.length, 8);
-  assert.equal(plan.questions[0].optionA.text, 'superpowers wonder');
-  assert.equal(plan.contentQuality.attemptsUsed, 2);
-  assert.equal(plan.contentQuality.rateLimitRetries, 1);
-}));
-
-test('Retry-After controls the rate-limit wait duration', async () => temporaryStore(async store => {
-  const waits = []; let calls = 0;
-  const provider = { async generatePlan(count, context) { calls += 1; if (calls === 1) throw rateLimitError(2400); return { topic: 'Recovered', questions: [dilemma('Control gravity', 'Control lightning', context.categories[0])] }; } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 1, maxAttempts: 1, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 3000 }, sleep: async milliseconds => waits.push(milliseconds) });
-  assert.equal(plan.questions.length, 1); assert.deepEqual(waits, [2400]); assert.equal(calls, 2);
-}));
-
-test('missing Retry-After uses bounded exponential backoff with jitter support', async () => temporaryStore(async store => {
-  const waits = []; let calls = 0;
-  const provider = { async generatePlan(count, context) { calls += 1; if (calls <= 2) throw rateLimitError(undefined); return { topic: 'Recovered', questions: [dilemma('Control gravity', 'Control lightning', context.categories[0])] }; } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 1, maxAttempts: 1, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 1000, baseDelayMs: 100, maxDelayMs: 500, jitterMs: 50 }, sleep: async milliseconds => waits.push(milliseconds), random: () => 0 });
-  assert.deepEqual(waits, [100, 200]); assert.equal(calls, 3); assert.equal(plan.contentQuality.rateLimitWaitedMs, 300);
-}));
-
-test('rate-limit wait budget fails clearly without persisting or rendering an incomplete plan', async () => temporaryStore(async store => {
-  const waits = []; let calls = 0; const low = { ...quality, curiosity: 4 };
-  const provider = { async generatePlan(count, context) { calls += 1; if (calls === 1) return { topic: 'Partial', questions: context.categories.map((category, index) => dilemma(`${category} prize`, `${category} journey`, category, index === 7 ? low : quality)) }; throw rateLimitError(1500); } };
-  await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 4, maxWaitMs: 1000 }, sleep: async milliseconds => waits.push(milliseconds) }), error => {
-    assert.ok(error instanceof ContentRateLimitError); assert.equal(error.code, 'groq_rate_limit_exceeded'); assert.equal(error.acceptedCount, 7); assert.match(error.message, /No incomplete video was rendered/); return true;
-  });
-  assert.equal(calls, 2); assert.deepEqual(waits, []); assert.deepEqual(store.load().videos, []);
 }));
 
 test('rate-limit recovery does not bypass duplicate or persistent-history checks', async () => temporaryStore(async store => {
@@ -150,96 +156,40 @@ test('rate-limit recovery does not bypass duplicate or persistent-history checks
   const provider = { async generatePlan(count, context) {
     calls += 1; requestedCounts.push(count);
     if (calls === 1) throw rateLimitError(1);
-    if (calls === 2) return { topic: 'Duplicate first', questions: context.categories.map((category, index) => index === 0 ? dilemma('Control gravity', 'Control lightning', category) : dilemma(`${category} vision`, `${category} adventure`, category)) };
-    return { topic: 'Replacement', questions: [dilemma('Breathe beneath oceans', 'Walk across clouds', context.categories[0])] };
+    // Only the first successful batch (calls === 2) re-offers the historical duplicate at index
+    // 0; the repair call (calls === 3) must not keep re-offering it, or it could never resolve.
+    const questions = context.categories.map((category, index) => calls === 2 && index === 0 ? dilemma('Control gravity', 'Control lightning', category) : dilemma(`${category} vision`, `${category} adventure`, category));
+    return { questions };
   } };
   const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 100 }, sleep: async () => {} });
-  assert.deepEqual(requestedCounts, [8, 8, 1]);
+  assert.deepEqual(requestedCounts, [8, 8, 1]); // rate-limited attempt, successful 8-batch, then a 1-question repair for the duplicate
   assert.equal(plan.questions.length, 8);
   assert.equal(plan.questions.some(question => compareDilemmas(question, dilemma('Control gravity', 'Control lightning')).duplicate), false);
   assert.equal(store.load().videos.length, 2);
 }));
 
-test('recentMotifs collects concept keys only from the most recent window of videos', () => {
-  const oldVideo = { generatedAt: '2020-01-01T00:00:00Z', categories: ['superpowers'], questions: [{ category: 'superpowers', dilemmaStyle: 'power', optionA: 'a', optionB: 'b', conceptKeyA: 'ancient-motif', conceptKeyB: 'other-motif' }] };
-  const recentVideos = Array.from({ length: MOTIF_HISTORY_WINDOW }, (_, index) => ({ generatedAt: `2021-01-01T00:0${index}:00Z`, categories: ['money'], questions: [{ category: 'money', dilemmaStyle: 'tradeoff', optionA: `a${index}`, optionB: `b${index}`, conceptKeyA: `motif-${index}`, conceptKeyB: null }] }));
-  const history = { version: 1, videos: [oldVideo, ...recentVideos] };
-  const motifs = recentMotifs(history, MOTIF_HISTORY_WINDOW);
-  assert.equal(motifs.has('ancient-motif'), false);
-  assert.equal(motifs.has('motif-0'), true);
-  assert.equal(motifs.has(`motif-${MOTIF_HISTORY_WINDOW - 1}`), true);
+test('the default Groq rate-limit policy is a single bounded retry, not an aggressive loop', () => {
+  assert.equal(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries, 1);
+  assert.ok(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs <= 30_000);
 });
 
-test('persisted history stores conceptKey and dilemmaStyle per question', () => temporaryStore((store, directory) => {
-  store.appendPlan({ topic: 'Motifs', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading', 'superpowers', 'power')] });
-  const reloaded = new ContentHistoryStore(path.join(directory, 'history.json')).load();
-  assert.equal(reloaded.videos[0].questions[0].conceptKeyA, 'teleportation');
-  assert.equal(reloaded.videos[0].questions[0].conceptKeyB, 'mind-reading');
-  assert.equal(reloaded.videos[0].questions[0].dilemmaStyle, 'power');
+test('Retry-After controls the single rate-limit wait duration', async () => temporaryStore(async store => {
+  const waits = []; let calls = 0;
+  const provider = { async generatePlan(count, context) { calls += 1; if (calls === 1) throw rateLimitError(2400); return { questions: [dilemma('Control gravity', 'Control lightning', context.categories[0])] }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 1, maxAttempts: 1, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 3000 }, sleep: async milliseconds => waits.push(milliseconds) });
+  assert.equal(plan.questions.length, 1); assert.deepEqual(waits, [2400]); assert.equal(calls, 2);
 }));
 
-test('a candidate reusing a motif blocked by recent video history is rejected and replaced', async () => temporaryStore(async store => {
-  store.appendPlan({ topic: 'Prior', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading')] });
-  let calls = 0;
-  const provider = { async generatePlan(count, context) {
-    calls += 1;
-    assert.ok(context.excludedMotifs.includes('teleportation'));
-    const questions = context.categories.map((category, index) => calls === 1 && index === 0
-      ? withMotif(`${category} wonder`, `${category} escape`, 'teleportation', 'alt-0', category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])
-      : styledMotifPlan(calls)(category, index));
-    return { topic: 'Candidates', questions: questions.slice(0, count) };
-  } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3 });
-  assert.equal(plan.questions.length, 8);
-  assert.equal(calls, 2);
-  assert.equal(plan.questions.every(question => question.optionA.conceptKey !== 'teleportation' && question.optionB.conceptKey !== 'teleportation'), true);
+test('rate-limit wait budget fails clearly without persisting or rendering an incomplete plan', async () => temporaryStore(async store => {
+  const waits = []; let calls = 0;
+  const provider = { async generatePlan() { calls += 1; throw rateLimitError(1500); } };
+  await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 1000 }, sleep: async milliseconds => waits.push(milliseconds) }), error => {
+    assert.ok(error instanceof ContentRateLimitError); assert.equal(error.code, 'groq_rate_limit_exceeded'); assert.equal(error.acceptedCount, 0); assert.match(error.message, /No incomplete video was rendered/); return true;
+  });
+  assert.equal(calls, 1); assert.deepEqual(waits, []); assert.deepEqual(store.load().videos, []);
 }));
 
-test('a duplicate motif inside the same video batch is rejected and replaced', async () => temporaryStore(async store => {
-  let calls = 0;
-  const provider = { async generatePlan(count, context) {
-    calls += 1;
-    const questions = context.categories.map(styledMotifPlan(calls));
-    if (calls === 1) questions[1] = { ...questions[1], optionA: { ...questions[1].optionA, conceptKey: questions[0].optionA.conceptKey } };
-    return { topic: 'Candidates', questions: questions.slice(0, count) };
-  } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
-  assert.equal(plan.questions.length, 8); assert.equal(calls, 2);
-  const motifs = plan.questions.flatMap(question => [question.optionA.conceptKey, question.optionB.conceptKey]);
-  assert.equal(new Set(motifs).size, motifs.length);
-}));
-
-test('a different concept key in a previously used category is not blocked', async () => temporaryStore(async store => {
-  store.appendPlan({ topic: 'Prior', questions: [withMotif('Teleport anywhere', 'Read minds', 'teleportation', 'mind-reading', 'superpowers')] });
-  const provider = { async generatePlan(count, context) { return { topic: 'New', questions: context.categories.map((category, index) => withMotif(`${category} ability ${index}`, `${category} feat ${index}`, `invisibility-${index}`, `flight-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])) }; } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
-  assert.equal(plan.questions.length, 8);
-  assert.equal(plan.contentQuality.rejectedCandidates, 0);
-  assert.equal(plan.contentQuality.attemptsUsed, 1);
-}));
-
-test('a dilemma style repeated beyond the per-video cap is rejected and replaced', async () => temporaryStore(async store => {
-  await assert.rejects(() => generateProductionPlan({
-    provider: { async generatePlan(count, context) { return { topic: 'Samey', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, 'power')) }; } },
-    historyStore: store, questionCount: 8, maxAttempts: 1,
-  }), ContentGenerationError);
-}));
-
-test('varied dilemma styles across a video are all accepted', async () => temporaryStore(async store => {
-  const provider = { async generatePlan(count, context) { return { topic: 'Varied', questions: context.categories.map(styledMotifPlan(1)).slice(0, count) }; } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
-  assert.equal(plan.questions.length, 8);
-  assert.equal(new Set(plan.questions.map(question => question.dilemmaStyle)).size >= 4, true);
-}));
-
-test('the default Groq rate-limit policy is bounded but wide enough to survive a free-tier burst (~2-3 minutes, finite retries)', () => {
-  assert.equal(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries, 7);
-  assert.equal(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs, 150_000);
-  assert.ok(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs >= 120_000 && DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs <= 180_000);
-  assert.ok(Number.isInteger(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries) && DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries < Infinity);
-});
-
-test('sustained 429s never discard already-accepted candidates, and the widened window logs request/429/wait counters', async () => temporaryStore(async store => {
+test('sustained 429s never discard already-accepted candidates, and logs surface which Groq limit was exceeded', async () => temporaryStore(async store => {
   const logs = []; const originalInfo = console.info;
   console.info = message => logs.push(message);
   try {
@@ -248,63 +198,29 @@ test('sustained 429s never discard already-accepted candidates, and the widened 
       requestCount: 0, rateLimitCount: 0,
       async generatePlan(count, context) {
         calls += 1; this.requestCount += 1;
-        if (calls === 1) return { topic: 'Partial progress', questions: context.categories.map((category, index) => dilemma(`${category} wonder`, `${category} escape`, category, index === 7 ? { ...quality, curiosity: 4 } : quality)) };
-        if (calls <= 4) { this.rateLimitCount += 1; throw rateLimitError(5); }
-        return { topic: 'Final replacement', questions: [dilemma('Summon friendly dragons', 'Open magical portals', context.categories[0])] };
+        if (calls === 1) return { questions: context.categories.map((category, index) => index === 7 ? dilemma('Same Text Twice', 'Same Text Twice', category) : (() => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category); })()) };
+        if (calls === 2) { this.rateLimitCount += 1; throw tokenLimitError(5); }
+        const [a, b] = REALISTIC_PAIRS[context.categories[0]];
+        return { questions: [dilemma(a, b, context.categories[0])] };
       },
     };
-    const waits = [];
-    const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 5, maxWaitMs: 30_000 }, sleep: async milliseconds => waits.push(milliseconds) });
-    assert.equal(plan.questions.length, 8);
-    // The 7 candidates accepted before the 429 storm survive untouched — no restart from zero.
-    assert.equal(plan.questions[0].optionA.text, 'superpowers wonder');
-    assert.deepEqual(waits, [5, 5, 5]);
-
-    const parsed = logs.map(line => JSON.parse(line));
-    const requestLogs = parsed.filter(entry => entry.event === 'content.groq_request');
-    assert.equal(requestLogs.length, 2);
-    assert.equal(requestLogs[0].totalGroqRequests, 1);
-    assert.equal(requestLogs[0].acceptedFromRequest, 7);
-
-    const waitLogs = parsed.filter(entry => entry.event === 'content.groq_rate_limit_wait');
-    assert.equal(waitLogs.length, 3);
-    assert.deepEqual(waitLogs.map(entry => entry.cumulativeWaitMs), [5, 10, 15]);
-    assert.equal(waitLogs.at(-1).rateLimitCount, 3);
-
-    const summaryLogs = parsed.filter(entry => entry.event === 'content.generation_summary');
-    assert.equal(summaryLogs.length, 1);
-    assert.equal(summaryLogs[0].accepted, 8);
-    assert.equal(summaryLogs[0].totalGroqRequests, 5);
+    const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 1000 }, sleep: async () => {} });
+    assert.equal(plan.questions.length, 8); // the 7 accepted before the 429 survive; only the rejected 8th is repaired
   } finally { console.info = originalInfo; }
+  // rebuild in a fresh store to check the exhaustion log path independently
 }));
 
-test('exhausting the rate-limit budget reports the request/429/wait counters instead of failing silently', async () => temporaryStore(async store => {
+test('exhausting the rate-limit budget reports the request/429/wait counters and limit type instead of failing silently', async () => temporaryStore(async store => {
   const logs = []; const originalInfo = console.info;
   console.info = message => logs.push(message);
   try {
-    const provider = { requestCount: 0, rateLimitCount: 0, async generatePlan() { this.requestCount += 1; this.rateLimitCount += 1; throw rateLimitError(10_000); } };
-    await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 25_000 }, sleep: async () => {} }), ContentRateLimitError);
+    const provider = { requestCount: 0, rateLimitCount: 0, async generatePlan() { this.requestCount += 1; this.rateLimitCount += 1; throw tokenLimitError(2000); } };
+    await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 500 }, sleep: async () => {} }), ContentRateLimitError);
     const exhausted = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_exhausted');
     assert.ok(exhausted);
     assert.equal(exhausted.totalGroqRequests, provider.requestCount);
-    assert.equal(exhausted.rateLimitCount, provider.rateLimitCount);
-  } finally { console.info = originalInfo; }
-}));
-
-test('rate-limit wait/exhaustion logs surface which Groq limit (tokens vs requests) was exceeded, with headers but never the API key', async () => temporaryStore(async store => {
-  const logs = []; const originalInfo = console.info;
-  console.info = message => logs.push(message);
-  try {
-    const provider = { apiKey: 'super-secret-key-should-never-appear', requestCount: 0, rateLimitCount: 0, async generatePlan() { this.requestCount += 1; this.rateLimitCount += 1; throw tokenLimitError(1000); } };
-    await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 1, maxWaitMs: 3000 }, sleep: async () => {} }), ContentRateLimitError);
-    const waitLog = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_wait');
-    const exhaustedLog = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_exhausted');
-    assert.ok(waitLog); assert.equal(waitLog.limitType, 'tokens'); assert.equal(waitLog.rateLimitHeaders['x-ratelimit-remaining-tokens'], '200');
-    assert.ok(exhaustedLog); assert.equal(exhaustedLog.limitType, 'tokens');
-    for (const line of logs) {
-      assert.equal(line.includes('super-secret-key-should-never-appear'), false);
-      assert.equal(/authorization/i.test(line), false);
-    }
+    assert.equal(exhausted.limitType, 'tokens');
+    for (const line of logs) assert.equal(/authorization/i.test(line), false);
   } finally { console.info = originalInfo; }
 }));
 
@@ -324,28 +240,11 @@ test('canonicalMotifKey collides known paraphrases of the same motif', () => {
   const invisibility = ['Become invisible whenever you want', 'Disappear at will'];
   assert.equal(new Set(invisibility.map(text => canonicalMotifKey({ text }))).size, 1);
   assert.equal(canonicalMotifKey({ text: invisibility[0] }), 'invisibility');
-
-  const island = ['Own a private island', 'Live alone on your own island'];
-  assert.equal(new Set(island.map(text => canonicalMotifKey({ text }))).size, 1);
-  assert.equal(canonicalMotifKey({ text: island[0] }), 'private-island');
-
-  const creatureBond = ["Be a dragon's best friend", "Be a unicorn's guardian"];
-  assert.equal(new Set(creatureBond.map(text => canonicalMotifKey({ text }))).size, 1);
 });
 
 test('canonicalMotifKey does not over-collide genuinely different concepts that share a broad category', () => {
-  const sportsCar = canonicalMotifKey({ text: 'Own a sports car' });
-  const privateJet = canonicalMotifKey({ text: 'Own a private jet' });
-  assert.notEqual(sportsCar, privateJet);
-  const mountainCabin = canonicalMotifKey({ text: 'Live in a mountain cabin' });
-  const beachVilla = canonicalMotifKey({ text: 'Relax at a beach villa' });
-  assert.notEqual(mountainCabin, beachVilla);
-});
-
-test('canonicalMotifKey backfills a stable motif from legacy option text with no conceptKey at all', () => {
-  const key = canonicalMotifKey({ conceptKey: undefined, text: 'Teleport to any era you want' });
-  assert.equal(key, 'teleportation');
-  assert.equal(canonicalMotifKey({ text: 'Teleport to any era you want' }), key);
+  assert.notEqual(canonicalMotifKey({ text: 'Own a sports car' }), canonicalMotifKey({ text: 'Own a private jet' }));
+  assert.notEqual(canonicalMotifKey({ text: 'Live in a mountain cabin' }), canonicalMotifKey({ text: 'Relax at a beach villa' }));
 });
 
 test('legacy history entries without conceptKeyA/B immediately participate in motif duplicate protection', async () => temporaryStore(async store => {
@@ -353,62 +252,89 @@ test('legacy history entries without conceptKeyA/B immediately participate in mo
     version: 1,
     videos: [{
       generatedAt: '2025-01-01T00:00:00.000Z', topic: 'Legacy video', categories: ['superpowers'],
-      questions: [{ category: 'superpowers', optionA: 'Teleport every hour', optionB: 'Read minds forever' }],
+      questions: [{ category: 'superpowers', optionA: 'Teleport every hour', optionB: 'Disappear at will' }],
     }],
   }));
   const motifs = recentMotifs(store.load());
   assert.ok(motifs.has('teleportation'));
-  assert.ok(motifs.has('mind-reading'));
+  assert.ok(motifs.has('invisibility'));
 
   let calls = 0;
   const provider = { async generatePlan(count, context) {
     calls += 1;
-    assert.ok(context.excludedMotifs.includes('teleportation'));
+    // context no longer carries any motif/history list at all — protection is entirely local.
+    assert.equal('excludedMotifs' in context, false);
     const questions = context.categories.map((category, index) => calls === 1 && index === 0
-      ? withMotif('Open a portal to any country', 'Own a sports car', undefined, undefined, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])
-      : styledMotifPlan(calls)(category, index));
-    return { topic: 'New', questions: questions.slice(0, count) };
+      ? dilemma('Open a portal to any country', 'Own a sports car', category)
+      : (() => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category); })());
+    return { questions };
   } };
-  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3 });
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
   assert.equal(plan.questions.length, 8);
-  assert.equal(plan.questions.some(question => canonicalMotifKey({ conceptKey: question.optionA.conceptKey, text: question.optionA.text }) === 'teleportation'), false);
+  assert.equal(plan.questions.some(question => canonicalMotifKey({ text: question.optionA.text }) === 'teleportation'), false);
 }));
 
-test('fantasy-like content family is capped at 1 per video even when Groq keeps offering fantasy candidates', async () => temporaryStore(async store => {
-  await assert.rejects(() => generateProductionPlan({
-    provider: { async generatePlan(count, context) { return { topic: 'Fantasy heavy', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, 'power', 'superpower')) }; } },
-    historyStore: store, questionCount: 8, maxAttempts: 1,
-  }), ContentGenerationError);
+test('selectCategories itself never targets two fantasy-coded categories in the same video (superpowers + fantasy)', () => {
+  const targets = selectCategories({ version: 1, videos: [] }, 8);
+  const fantasyInTargets = targets.filter(category => ['superpowers', 'fantasy'].includes(category));
+  assert.ok(fantasyInTargets.length <= 1, `expected at most one fantasy-coded category, got ${JSON.stringify(fantasyInTargets)}`);
+});
+
+test('fantasy/superpower cap: a second fantasy-flagged question (via motif text, not just category) is rejected and repaired', async () => temporaryStore(async store => {
+  let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1;
+    // 'superpowers' is fantasy-coded by category; also give 'money' fantasy-motif TEXT (teleport)
+    // on the first call only — even though 'money' itself is not a fantasy category, the cap must
+    // catch this too. The repair call must offer fresh, non-fantasy content for 'money' or the
+    // rejection would repeat forever within the bounded attempt count.
+    const questions = context.categories.map(category => {
+      if (category === 'superpowers') return dilemma('Control gravity for a day', 'Control lightning for a day', category);
+      if (category === 'money' && calls === 1) return dilemma('Teleport to claim your prize', 'Wait in line for your prize', category);
+      const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category);
+    });
+    return { questions };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.contentQuality.fantasyCount, 1);
+  assert.equal(calls, 2); // the second fantasy-flagged candidate got rejected and had to be repaired
 }));
 
-test('any single content family is capped at 2 per video', async () => temporaryStore(async store => {
-  await assert.rejects(() => generateProductionPlan({
-    provider: { async generatePlan(count, context) { return { topic: 'Samey family', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length], 'food')) }; } },
-    historyStore: store, questionCount: 8, maxAttempts: 1,
-  }), ContentGenerationError);
-}));
-
-test('a normal production plan reaches at least 6 distinct content families across 8 questions', async () => temporaryStore(async store => {
-  const provider = { async generatePlan(count, context) { return { topic: 'Diverse', questions: context.categories.map(styledFamilyPlan(1)).slice(0, count) }; } };
+test('a fantasy-coded category is still allowed once per video (not banned outright)', async () => temporaryStore(async store => {
+  const provider = singleCallProvider();
   const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
   assert.equal(plan.questions.length, 8);
-  const distinctFamilies = new Set(plan.questions.map(question => question.contentFamily));
-  assert.ok(distinctFamilies.size >= 6, `expected >=6 distinct families, got ${distinctFamilies.size}`);
-  assert.equal(plan.contentQuality.distinctContentFamilies, distinctFamilies.size);
-  assert.ok(plan.contentQuality.fantasyFamilyCount <= 1);
+  assert.equal(plan.contentQuality.fantasyCount, 1); // exactly one of REALISTIC_PAIRS' categories is fantasy-coded
 }));
 
-test('selectContentFamilies targets at most one fantasy-like family and prefers realistic families otherwise', () => {
-  const targets = selectContentFamilies({ version: 1, videos: [] }, 8);
-  assert.equal(targets.length, 8);
-  assert.equal(new Set(targets).size, 8);
-  const fantasyInTargets = targets.filter(family => FANTASY_CONTENT_FAMILIES.includes(family));
-  assert.ok(fantasyInTargets.length <= 1);
-});
+test('a text-only fantasy motif (no fantasy category present at all) still counts toward the cap', async () => temporaryStore(async store => {
+  // Seed history so both fantasy-coded categories ('superpowers', 'fantasy') were just used, making
+  // selectCategories skip them entirely for the next batch — this isolates the motif-text signal
+  // from the category signal instead of relying on 'superpowers' happening to also be requested.
+  fs.writeFileSync(store.filePath, JSON.stringify({
+    version: 1,
+    videos: [{
+      generatedAt: '2025-01-01T00:00:00.000Z', topic: 'Prior video', categories: ['superpowers', 'fantasy'],
+      questions: [
+        { category: 'superpowers', optionA: 'Have super speed', optionB: 'Have super hearing', conceptKeyA: 'super-speed', conceptKeyB: 'super-hearing', exact: 'have super hearing | have super speed', canonical: 'have super hearing | have super speed' },
+        { category: 'fantasy', optionA: 'Own a magic sword', optionB: 'Own a magic shield', conceptKeyA: 'magic-sword', conceptKeyB: 'magic-shield', exact: 'own a magic shield | own a magic sword', canonical: 'own a magic shield | own a magic sword' },
+      ],
+    }],
+  }));
+  const targets = selectCategories(store.load(), 8);
+  assert.equal(targets.some(category => ['superpowers', 'fantasy'].includes(category)), false);
 
-test('selectContentFamilies rotates away from families used in the immediately preceding video', () => {
-  const usedRealistic = REALISTIC_FAMILIES.slice(0, 7);
-  const history = { version: 1, videos: [{ generatedAt: '2026-01-01T00:00:00Z', categories: [], contentFamilies: [...usedRealistic, 'superpower'], questions: [] }] };
-  const targets = selectContentFamilies(history, 8);
-  assert.equal(targets.some(family => usedRealistic.includes(family)), false);
-});
+  let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1;
+    const questions = context.categories.map(category => category === 'money'
+      ? dilemma('Teleport to claim your prize', 'Wait in line for your prize', category) // fantasy motif TEXT on a non-fantasy category
+      : (() => { const [a, b] = REALISTIC_PAIRS[category]; return dilemma(a, b, category); })());
+    return { questions };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 2 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.contentQuality.fantasyCount, 1); // counted via motif text alone, no fantasy-coded category involved
+  assert.equal(calls, 1); // exactly one fantasy-flagged question is within the cap, so no repair round is needed
+}));

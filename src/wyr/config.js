@@ -36,11 +36,14 @@ export const getConfig = () => {
     port: integer('WYR_PORT', 3100, 1, 65535),
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
     questionCount: integer('WYR_QUESTION_COUNT', 8, 8, 8),
-    contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 4, 1, 8),
-    // Free-tier Groq 429s can take longer than 60s to clear; bounded but wide enough
-    // (~2.5 minutes, 7 retries) to survive a burst without failing an otherwise-healthy job.
-    groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 7, 0, 10),
-    groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 150_000, 1_000, 300_000),
+    // Lightweight flow: 1 initial batched request + at most 1 repair request for whatever's still
+    // missing. Do not raise this back toward an unbounded retry-everything loop.
+    contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 2, 1, 4),
+    // A single bounded retry after a 429: wait for Groq's reported reset, retry once, then fail
+    // clearly. The lightweight prompt/schema is what's meant to prevent 429s recurring at all —
+    // this is not meant to ride out a sustained outage by hammering Groq repeatedly.
+    groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 1, 0, 3),
+    groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 30_000, 1_000, 60_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
     // 8 scenes * 7.25s keeps the finished video at ~56-58s, safely under the 60s short-form limit.
@@ -61,6 +64,15 @@ export const getConfig = () => {
     ttsTimeoutMs: integer('WYR_TTS_TIMEOUT_MS', 60_000, 5_000, 120_000),
     groqApiKey: credentials.groqApiKey,
     groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
+    // The PostgreSQL question pool is now the primary content source; Groq (via GROQ_API_KEY) only
+    // ever refills it in the background or during a bounded emergency top-up, never per-video.
+    databaseUrl: process.env.DATABASE_URL || '',
+    poolTarget: integer('WYR_POOL_TARGET', 500, 8, 5000),
+    poolLowWaterMark: integer('WYR_POOL_LOW_WATER_MARK', 100, 8, 5000),
+    // Emergency top-up (triggered mid-request when the pool can't fill a video) is capped far
+    // lower than a normal CLI refill run -- a user pressing "Create WYR" must never wait minutes.
+    poolEmergencyRefillMaxBatches: integer('WYR_POOL_EMERGENCY_REFILL_MAX_BATCHES', 1, 1, 3),
+    poolRefillMaxBatchesPerRun: integer('WYR_POOL_REFILL_MAX_BATCHES_PER_RUN', 10, 1, 100),
     pexelsApiKey: credentials.pexelsApiKey,
     pixabayApiKey: process.env.PIXABAY_API_KEY || '',
     edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',
@@ -68,9 +80,12 @@ export const getConfig = () => {
   };
 };
 
+// GROQ_API_KEY is intentionally NOT required here: normal video generation is served from the
+// PostgreSQL question pool and must keep working even with no Groq key configured at all (Groq is
+// only needed to refill the pool). Callers that are about to make a live Groq call (pool refill,
+// or the manual/debug live-generation endpoints) check config.groqApiKey themselves.
 export const assertProviderConfig = config => {
   const missing = [];
-  if (!config.groqApiKey) missing.push('GROQ_API_KEY');
   if (!config.pixabayApiKey && !config.pexelsApiKey) missing.push('PIXABAY_API_KEY or PEXELS_API_KEY');
   if (missing.length) throw new Error(`Missing required API key configuration: ${missing.join(', ')}`);
 };

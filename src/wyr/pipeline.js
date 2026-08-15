@@ -9,6 +9,8 @@ import { buildComposition, DurationVerificationError, renderVideo, SHORTS_DURATI
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 import { createImageSelection, downloadSelectedCandidates } from './image-picker.js';
+import { selectContentPlan } from './content-source.js';
+import { commitPlanUsage, releaseReservation } from './question-pool.js';
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
 // Stay clear of the hard 60s ffprobe ceiling when judging the *projected* (pre-render) timeline.
@@ -55,7 +57,7 @@ const logSelectedImageDiagnostics = (assets, jobId) => {
   console.info(`WYR_IMAGE_JOB_SUMMARY | jobId=${plainLogValue(jobId)} | selected=${assets.length} | DuckDuckGo=${selectedCounts.DuckDuckGo} | Pexels=${selectedCounts.Pexels} | rejected=${rejected}`);
 };
 
-export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null }) => {
+export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null, poolReserved = false }) => {
   const update = changes => store.update(job.id, changes);
   try {
     assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'DuckDuckGo Images', imageFallbackProvider: 'Pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', providerOrder: IMAGE_SELECTION_DEFAULTS.providerOrder, imageRequestTimeoutMs: config.timeoutMs, imageSearchRetries: config.imageSearchRetries, imageCandidateLimit: IMAGE_SELECTION_DEFAULTS.maxRankedCandidates, imageQualityThreshold: IMAGE_SELECTION_DEFAULTS.pexelsQualityThreshold, imageMinimumResolution: `${IMAGE_SELECTION_DEFAULTS.minimumWidth}x${IMAGE_SELECTION_DEFAULTS.minimumHeight}`, imageRecoveryQueryRounds: config.imageRecoveryQueryRounds, imageRecoveryMaxRequests: config.imageRecoveryMaxRequests, imageRecoveryMaxMs: config.imageRecoveryMaxMs, voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
@@ -101,7 +103,11 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
     update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); logSelectedImageDiagnostics(assets, job.id); log('job.completed', { jobId: job.id, outputPath, verification });
+    // Pool bookkeeping only happens after a verified final MP4 -- a render/verify failure above
+    // never increments used_count, and the reservation is released instead (see the catch block).
+    if (poolReserved) await commitPlanUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration }).catch(error => log('pool.commit_failed', { jobId: job.id, message: error.message }));
   } catch (error) {
+    if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }
 };
@@ -127,25 +133,27 @@ export const prepareImageSelection = async ({ job, store, config }) => {
   }
 };
 
-// Normal production entry point: generates content, automatically searches/scores/selects all 16
-// images (same createImageSelection auto-selection used by the debug path above — Pixabay
-// primary, Pexels fallback, unchanged scoring), then immediately hands off to the existing
-// runPipeline (unchanged) to lock assets, generate voice, build the timeline, render, and verify.
-// No human approval step; never stops at reviewing_images.
+// Normal production entry point: selects 8 diverse, pre-validated questions straight from the
+// PostgreSQL pool (see content-source.js) -- no live Groq call in the common case -- automatically
+// searches/scores/selects all 16 images (same createImageSelection auto-selection used by the
+// debug path above — Pixabay primary, Pexels fallback, unchanged scoring), then immediately hands
+// off to the existing runPipeline to lock assets, generate voice, build the timeline, render, and
+// verify. No human approval step; never stops at reviewing_images.
 export const runAutomaticPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
+  let poolReserved = false;
   try {
     assertProviderConfig(config);
     update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
-    const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
-    const historyStore = new ContentHistoryStore(config.contentHistoryPath);
-    const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
-    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+    const plan = await selectContentPlan({ job, config });
+    poolReserved = true;
+    writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
     if (selection.selectedCount !== 16) throw new Error(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`);
-    await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection });
+    await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
   } catch (error) {
+    if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
     log('job.failed', { jobId: job.id, stage: store.get(job.id)?.stage, message: error.message, stack: error.stack }); update({ status: 'failed', stage: 'failed', error: error.message });
   }
 };

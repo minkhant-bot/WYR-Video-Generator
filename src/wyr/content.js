@@ -2,7 +2,10 @@ import crypto from 'node:crypto';
 import { fetchWithTimeout, log } from './utils.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const STRUCTURED_ATTEMPTS = 3;
+// Lightweight-flow ladder: 2 structured attempts (initial + one repair-shaped retry on malformed
+// JSON) + 1 json_object fallback = 3 HTTP requests worst case per generatePlan() call, down from
+// 4. The common case (valid JSON schema output) is exactly 1 request.
+const STRUCTURED_ATTEMPTS = 2;
 const TEMPERATURE = 0.8;
 
 export const CONTENT_CATEGORIES = Object.freeze([
@@ -11,55 +14,13 @@ export const CONTENT_CATEGORIES = Object.freeze([
   'adventure', 'fame', 'survival-lite', 'space', 'ocean', 'friendship/social',
   'funny hypothetical',
 ]);
-export const QUALITY_DIMENSIONS = Object.freeze([
-  'dilemmaStrength', 'curiosity', 'emotionalPull', 'visualPotential', 'readability',
-]);
-export const DILEMMA_STYLES = Object.freeze([
-  'tradeoff', 'power', 'discovery', 'emotional choice', 'future technology', 'weird/funny',
-  'lifestyle', 'fantasy', 'consequence', 'adventure', 'social', 'impossible scenario',
-]);
-// contentFamily is distinct from category/dilemmaStyle: it classifies how fantastical vs. relatable
-// a specific question actually is, so the fantasy-heavy family can be hard-capped independently.
-export const FANTASY_CONTENT_FAMILIES = Object.freeze([
-  'fantasy', 'superpower', 'magic', 'supernatural', 'mythical-creature', 'impossible-power', 'time-manipulation',
-]);
-export const CONTENT_FAMILIES = Object.freeze([
-  ...FANTASY_CONTENT_FAMILIES,
-  'food', 'social', 'relationships', 'work', 'lifestyle', 'money-tradeoff', 'privacy', 'technology', 'travel',
-  'adventure', 'entertainment', 'funny-awkward', 'memory', 'everyday-inconvenience', 'unusual-but-realistic',
-  'personal-habits', 'communication', 'comfort', 'skills', 'experiences',
-]);
-const DEFAULT_CONTENT_FAMILY = 'lifestyle';
 
 const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
-const CONCEPT_KEY_PATTERN = /^[a-z0-9]+(-[a-z0-9]+){0,3}$/;
-const CONCEPT_KEY_FILLER = new Set(['the', 'and', 'for', 'you', 'your', 'with', 'every', 'own', 'have', 'can', 'into', 'anywhere', 'instantly', 'forever', 'always', 'never']);
-const conceptKeyFallback = text => {
-  const words = String(text || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !CONCEPT_KEY_FILLER.has(word));
-  return words.slice(0, 3).join('-') || 'concept';
-};
-const normalizeConceptKey = (value, fallbackText) => {
-  const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (normalized && normalized.length <= 40 && CONCEPT_KEY_PATTERN.test(normalized)) return normalized;
-  return conceptKeyFallback(fallbackText);
-};
-const normalizeDilemmaStyle = value => { const style = normalize(value).toLowerCase(); return DILEMMA_STYLES.includes(style) ? style : DILEMMA_STYLES[0]; };
-const normalizeContentFamily = value => { const family = normalize(value).toLowerCase(); return CONTENT_FAMILIES.includes(family) ? family : DEFAULT_CONTENT_FAMILY; };
 const normalizeOption = (option, index, label) => {
   const text = normalize(option?.text); const searchQuery = normalize(option?.searchQuery);
   if (text.length < 3 || text.length > 500) throw new Error(`Question ${index + 1} option ${label} text must contain 3–500 characters before visual fitting.`);
   if (searchQuery.length < 3 || searchQuery.length > 100) throw new Error(`Question ${index + 1} option ${label} search query must contain 3–100 characters.`);
-  const conceptKey = normalizeConceptKey(option?.conceptKey, text);
-  return { text, searchQuery, conceptKey };
-};
-
-const normalizeQuality = (quality, index) => {
-  if (!quality || typeof quality !== 'object') throw new Error(`Question ${index + 1} must include quality scores.`);
-  return Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => {
-    const value = Number(quality[dimension]);
-    if (!Number.isInteger(value) || value < 1 || value > 10) throw new Error(`Question ${index + 1} quality.${dimension} must be an integer from 1–10.`);
-    return [dimension, value];
-  }));
+  return { text, searchQuery };
 };
 
 const significantWords = text => new Set(text.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !['the', 'and', 'for', 'you', 'your', 'with', 'every'].includes(word)));
@@ -68,27 +29,25 @@ const similarity = (left, right) => {
   return union === 0 ? 0 : intersection / union;
 };
 
+// Minimal Groq-facing plan shape: no topic, no conceptKey, no dilemmaStyle, no contentFamily, no
+// quality scores. Duplicate/motif/fantasy/quality checks all happen locally in content-engine.js
+// against this plain text — see canonicalMotifKey and assessQuestionQuality there.
 export const validatePlan = (input, questionCount) => {
   if (!input || typeof input !== 'object') throw new Error('Content plan must be an object.');
-  const topic = normalize(input.topic);
-  if (topic.length < 3 || topic.length > 80) throw new Error('Topic must contain 3–80 characters.');
   if (!Array.isArray(input.questions) || input.questions.length !== questionCount) throw new Error(`Content plan must contain exactly ${questionCount} questions.`);
   const seen = new Set(); const previousWordSets = [];
   const questions = input.questions.map((question, index) => {
     const optionA = normalizeOption(question?.optionA, index, 'A'); const optionB = normalizeOption(question?.optionB, index, 'B');
     const category = normalize(question?.category).toLowerCase();
     if (!CONTENT_CATEGORIES.includes(category)) throw new Error(`Question ${index + 1} category must be one of the supported production categories.`);
-    const quality = normalizeQuality(question?.quality, index);
-    const dilemmaStyle = normalizeDilemmaStyle(question?.dilemmaStyle);
-    const contentFamily = normalizeContentFamily(question?.contentFamily);
     if (optionA.text.toLowerCase() === optionB.text.toLowerCase()) throw new Error(`Question ${index + 1} has identical options.`);
     const signature = [optionA.text, optionB.text].map(text => text.toLowerCase()).sort().join('|');
     if (seen.has(signature)) throw new Error(`Question ${index + 1} duplicates another question.`);
     const words = significantWords(signature);
     if (previousWordSets.some(previous => similarity(words, previous) >= 0.65)) throw new Error(`Question ${index + 1} is too similar to another question.`);
-    seen.add(signature); previousWordSets.push(words); return { index, category, quality, dilemmaStyle, contentFamily, optionA, optionB };
+    seen.add(signature); previousWordSets.push(words); return { index, category, optionA, optionB };
   });
-  return { version: 1, topic, percentages: null, questions };
+  return { version: 1, questions };
 };
 
 export class ContentProvider { async generatePlan() { throw new Error('ContentProvider.generatePlan must be implemented.'); } }
@@ -151,47 +110,31 @@ export const parseGroqResetDuration = value => {
 };
 
 // Proactive throttling, layered on top of (not instead of) the reactive 429 retry in
-// content-engine.js. Groq returns remaining-capacity headers on EVERY response, success or not —
-// previously that information was only captured on 429s and only logged, never used to avoid the
-// next 429. A measured worst-case request costs ~3500 tokens (prompt + schema + completion
-// budget); 4000 leaves a safety margin. The wait is deliberately capped well under a full ~60s
-// TPM window: this is a best-effort front-line reduction in 429 frequency, not a guarantee — if
-// it's insufficient or the header is stale/unparseable, the bounded reactive retry in
-// content-engine.js (7 retries / 150s) remains the authoritative safety net.
-const MIN_SAFE_REMAINING_TOKENS = 4000;
+// content-engine.js. Groq returns remaining-capacity headers on EVERY response, success or not.
+// A measured lightweight-schema request now costs well under 1000 tokens; 1200 is a safety margin
+// above that. The wait is capped well under a full ~60s TPM window: best-effort front-line
+// reduction in 429 frequency, not a guarantee — the bounded reactive retry remains authoritative.
+const MIN_SAFE_REMAINING_TOKENS = 1200;
 const MAX_PROACTIVE_WAIT_MS = 20_000;
 const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const planSchema = () => {
-  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' }, conceptKey: { type: 'string' } }, required: ['text', 'searchQuery', 'conceptKey'], additionalProperties: false };
-  const quality = { type: 'object', properties: Object.fromEntries(QUALITY_DIMENSIONS.map(dimension => [dimension, { type: 'integer', minimum: 1, maximum: 10 }])), required: QUALITY_DIMENSIONS, additionalProperties: false };
-  const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, dilemmaStyle: { type: 'string', enum: DILEMMA_STYLES }, contentFamily: { type: 'string', enum: CONTENT_FAMILIES }, quality, optionA: option, optionB: option }, required: ['category', 'dilemmaStyle', 'contentFamily', 'quality', 'optionA', 'optionB'], additionalProperties: false };
-  return { type: 'object', properties: { topic: { type: 'string' }, questions: { type: 'array', items: question } }, required: ['topic', 'questions'], additionalProperties: false };
+  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' } }, required: ['text', 'searchQuery'], additionalProperties: false };
+  const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, optionA: option, optionB: option }, required: ['category', 'optionA', 'optionB'], additionalProperties: false };
+  return { type: 'object', properties: { questions: { type: 'array', items: question } }, required: ['questions'], additionalProperties: false };
 };
 
-// These are only an efficiency hint to help Groq avoid an obviously-wasted regeneration attempt.
-// Actual duplicate/motif protection is 100% enforced in content-engine.js against the FULL
-// history (compareDilemmas, blockedMotifs), independent of what's in the prompt — so these can
-// stay small without weakening protection. Kept deliberately small because a mature production
-// history's full exclusion/motif lists alone could consume most of a request's token budget
-// against Groq's tight per-minute token limit.
-const PROMPT_EXCLUSION_LIMIT = 20;
-const PROMPT_MOTIF_LIMIT = 40;
+// Only the category list is ever sent — no exclusion or motif history. Duplicate/motif protection
+// is 100% enforced locally in content-engine.js against the FULL history regardless of what's in
+// the prompt, so there is nothing to gain from spending tokens on a history dump here.
 const contextText = context => {
   const categories = Array.isArray(context?.categories) ? context.categories.filter(category => CONTENT_CATEGORIES.includes(category)) : [];
-  const exclusions = Array.isArray(context?.exclusions) ? context.exclusions.slice(-PROMPT_EXCLUSION_LIMIT) : [];
-  const motifs = Array.isArray(context?.excludedMotifs) ? [...new Set(context.excludedMotifs)].slice(-PROMPT_MOTIF_LIMIT) : [];
-  const styles = Array.isArray(context?.styles) ? context.styles.filter(style => DILEMMA_STYLES.includes(style)) : [];
-  const families = Array.isArray(context?.families) ? context.families.filter(family => CONTENT_FAMILIES.includes(family)) : [];
-  return `${categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : ''}${styles.length ? ` Use these dilemma styles once each, matched to the same order: ${styles.join(', ')}.` : ''}${families.length ? ` Use these contentFamily values once each, matched to the same order: ${families.join(', ')}. At most one of these may be a fantasy-like family (${FANTASY_CONTENT_FAMILIES.join(', ')}).` : ''}${exclusions.length ? ` Do not repeat or paraphrase these prior dilemmas: ${exclusions.join('; ')}.` : ''}${motifs.length ? ` Do not reuse these core concepts/motifs even with different wording (e.g. teleportation, mind-reading, invisibility, time-freeze, dragon, private-island, mars, flying-car, million-dollars, memory-loss, robot-companion, alien-city, lost-civilization, underwater-world, or any other already-used idea): ${motifs.join(', ')}.` : ''}`;
+  return categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : '';
 };
-const CONCEPT_KEY_INSTRUCTIONS = 'For each option also produce a conceptKey: a short, stable, normalized machine-readable identifier (1–3 lowercase hyphenated words, e.g. "teleportation", "mind-reading", "private-island") describing the actual core concept, independent of exact wording — paraphrases of the same idea must produce the same conceptKey. Also give each question a dilemmaStyle chosen from the supported style list, and vary style across the set — avoid making most questions feel like superpower-vs-superpower, luxury-vs-luxury, destination-vs-destination, or own-X-vs-own-Y; mix tradeoffs, power, discovery, emotional choices, future technology, weird/funny, lifestyle, fantasy, consequence, adventure, social, and impossible-scenario framings.';
-const CONTENT_FAMILY_INSTRUCTIONS = 'Also give each question a contentFamily from the supported family list. Fantasy is OPTIONAL and must NEVER be the default: across all 8 questions, at most ONE may come from a fantasy-like family (fantasy, superpower, magic, supernatural, mythical-creature, impossible-power, time-manipulation), and never default to superpowers, teleportation, telepathy, dragons, or other impossible-fantasy tropes for the rest. Strongly prefer realistic, relatable, everyday dilemmas (food, social, relationships, work, lifestyle, money-tradeoff, privacy, technology, travel, adventure, entertainment, funny-awkward, memory, everyday-inconvenience, unusual-but-realistic, personal-habits, communication, comfort, skills, experiences) that a real stock photograph can literally depict. Avoid famous overused Would You Rather tropes, avoid unnecessarily abstract concepts (like "infinite passive income" or "own a personal drone farm") that have no clear literal photograph, and never pair two options that both require impossible fantasy artwork unless it is the one permitted fantasy question.';
-const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} exceptionally engaging English Would You Rather dilemmas for short-form video.${contextText(context)} Both options must be tempting, surprising, funny, or emotionally compelling; neither may be obviously superior. Prefer 2–8 words per option and never exceed 55 characters. Avoid generic pairs such as coffee/tea, cats/dogs, summer/winter, or city/countryside. Avoid politics, graphic violence, sexual or hateful content, dangerous challenges, and complicated conditions. Give each question one supported category and honest integer 1–10 scores for dilemmaStrength, curiosity, emotionalPull, visualPotential, and readability. Every score should be at least 7 only when the candidate truly earns it. Each Pexels/Pixabay searchQuery must be 2–5 concrete, literal, photographable visual words that clearly distinguish the two choices — name the actual visible object, place, or action, not an abstract idea. ${CONCEPT_KEY_INSTRUCTIONS} ${CONTENT_FAMILY_INSTRUCTIONS} Return no percentages or explanations.`;
-const repairPrompt = (questionCount, attempt, context) => attempt === 2
-  ? `Return exactly ${questionCount} strong, distinct dilemmas in the required JSON schema.${contextText(context)} Use supported categories and all five honest integer quality scores. Each option must be instantly readable, ideally 2–8 words and under 55 characters. Both sides must be compelling. Use concrete 2–5 word literal, photographable image queries. ${CONCEPT_KEY_INSTRUCTIONS} ${CONTENT_FAMILY_INSTRUCTIONS} No percentages or extra fields.`
-  : `JSON only. Exactly ${questionCount} distinct high-quality dilemmas.${contextText(context)} Include category, dilemmaStyle, contentFamily, all five quality scores, optionA and optionB with short text, concrete literal searchQuery, and conceptKey. ${CONCEPT_KEY_INSTRUCTIONS} ${CONTENT_FAMILY_INSTRUCTIONS}`;
-const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, 3, context)} Shape: {"topic":"...","questions":[{"category":"food","dilemmaStyle":"discovery","contentFamily":"food","quality":{"dilemmaStrength":8,"curiosity":8,"emotionalPull":8,"visualPotential":8,"readability":9},"optionA":{"text":"...","searchQuery":"...","conceptKey":"..."},"optionB":{"text":"...","searchQuery":"...","conceptKey":"..."}}]}`;
+const CORE_INSTRUCTIONS = 'Each option: 2-8 words, under 55 characters, visually concrete, instantly readable. Both options tempting and roughly balanced — no obviously better choice. No politics, violence, sexual content, or hate speech. At most ONE question may involve a fantasy, superpower, or otherwise impossible ability; make the rest realistic, everyday choices. Avoid overused pairs like coffee/tea or cats/dogs. Give each option a short searchQuery: 2-5 concrete words naming a real, literal, photographable scene or object.';
+const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} short, punchy Would You Rather dilemmas for a vertical short-form video.${contextText(context)} ${CORE_INSTRUCTIONS} Return JSON only.`;
+const repairPrompt = (questionCount, context) => `Create exactly ${questionCount} more distinct Would You Rather dilemmas, different from anything already used.${contextText(context)} ${CORE_INSTRUCTIONS} Return JSON only.`;
+const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, context)} Shape: {"questions":[{"category":"food","optionA":{"text":"...","searchQuery":"..."},"optionB":{"text":"...","searchQuery":"..."}}]}`;
 
 const groqErrorFromResponse = async response => {
   const raw = await response.text(); let payload;
@@ -271,14 +214,12 @@ export class GroqContentProvider extends ContentProvider {
       body: JSON.stringify({
         model: this.model,
         temperature: TEMPERATURE,
-        // A realistic 8-question completion measures ~900-1100 tokens; 1500 leaves comfortable
-        // headroom while cutting the reserved/requested token budget by 40% versus the previous
-        // 2500, which mattered once Groq's TPM (tokens-per-minute) limit was identified as the
-        // actual binding constraint (not RPM) for this model tier.
-        max_completion_tokens: 1500,
+        // A minimal-schema 8-question completion measures well under 1000 tokens; 900 leaves
+        // headroom while keeping the reserved/requested token budget small.
+        max_completion_tokens: 900,
         messages: [
           { role: 'system', content: 'Return only the requested Would You Rather plan as JSON.' },
-          { role: 'user', content: structured ? (attempt === 1 ? initialPrompt(questionCount, context) : repairPrompt(questionCount, attempt, context)) : objectPrompt(questionCount, context) },
+          { role: 'user', content: structured ? (attempt === 1 ? initialPrompt(questionCount, context) : repairPrompt(questionCount, context)) : objectPrompt(questionCount, context) },
         ],
         response_format: structured
           ? { type: 'json_schema', json_schema: { name: 'would_you_rather_plan', strict: true, schema: planSchema() } }
