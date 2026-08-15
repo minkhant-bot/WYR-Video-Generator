@@ -3,17 +3,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CONTENT_CATEGORIES, DILEMMA_STYLES } from './content.js';
-import { assessQuestionQuality, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, generateProductionPlan, MOTIF_HISTORY_WINDOW, recentMotifs, selectCategories } from './content-engine.js';
+import { CONTENT_CATEGORIES, CONTENT_FAMILIES, DILEMMA_STYLES, FANTASY_CONTENT_FAMILIES } from './content.js';
+import { assessQuestionQuality, canonicalMotifKey, compareDilemmas, ContentGenerationError, ContentHistoryStore, ContentRateLimitError, DEFAULT_GROQ_RATE_LIMIT_POLICY, generateProductionPlan, MOTIF_HISTORY_WINDOW, recentMotifs, selectCategories, selectContentFamilies } from './content-engine.js';
 
 const quality = Object.freeze({ dilemmaStrength: 8, curiosity: 8, emotionalPull: 8, visualPotential: 8, readability: 9 });
 const dilemma = (a, b, category = 'superpowers', scores = quality) => ({ category, quality: scores, optionA: { text: a, searchQuery: `${a} concept photo` }, optionB: { text: b, searchQuery: `${b} concept photo` } });
-const withMotif = (a, b, conceptKeyA, conceptKeyB, category = 'superpowers', dilemmaStyle = 'power') => ({
-  category, dilemmaStyle, quality,
+const withMotif = (a, b, conceptKeyA, conceptKeyB, category = 'superpowers', dilemmaStyle = 'power', contentFamily = undefined) => ({
+  category, dilemmaStyle, contentFamily, quality,
   optionA: { text: a, searchQuery: `${a} concept photo`, conceptKey: conceptKeyA },
   optionB: { text: b, searchQuery: `${b} concept photo`, conceptKey: conceptKeyB },
 });
 const styledMotifPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length]);
+const REALISTIC_FAMILIES = CONTENT_FAMILIES.filter(family => !FANTASY_CONTENT_FAMILIES.includes(family));
+const styledFamilyPlan = calls => (category, index) => withMotif(`${category} wonder ${calls}`, `${category} escape ${calls}`, `motif-${calls}-${index}`, `alt-${calls}-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length], REALISTIC_FAMILIES[index % REALISTIC_FAMILIES.length]);
 const rateLimitError = retryAfterMs => Object.assign(new Error('Groq returned HTTP 429 (rate_limit_exceeded).'), { status: 429, code: 'rate_limit_exceeded', retryAfterMs });
 const temporaryStore = operation => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-content-history-'));
@@ -225,3 +227,167 @@ test('varied dilemma styles across a video are all accepted', async () => tempor
   assert.equal(plan.questions.length, 8);
   assert.equal(new Set(plan.questions.map(question => question.dilemmaStyle)).size >= 4, true);
 }));
+
+test('the default Groq rate-limit policy is bounded but wide enough to survive a free-tier burst (~2-3 minutes, finite retries)', () => {
+  assert.equal(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries, 7);
+  assert.equal(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs, 150_000);
+  assert.ok(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs >= 120_000 && DEFAULT_GROQ_RATE_LIMIT_POLICY.maxWaitMs <= 180_000);
+  assert.ok(Number.isInteger(DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries) && DEFAULT_GROQ_RATE_LIMIT_POLICY.maxRetries < Infinity);
+});
+
+test('sustained 429s never discard already-accepted candidates, and the widened window logs request/429/wait counters', async () => temporaryStore(async store => {
+  const logs = []; const originalInfo = console.info;
+  console.info = message => logs.push(message);
+  try {
+    let calls = 0;
+    const provider = {
+      requestCount: 0, rateLimitCount: 0,
+      async generatePlan(count, context) {
+        calls += 1; this.requestCount += 1;
+        if (calls === 1) return { topic: 'Partial progress', questions: context.categories.map((category, index) => dilemma(`${category} wonder`, `${category} escape`, category, index === 7 ? { ...quality, curiosity: 4 } : quality)) };
+        if (calls <= 4) { this.rateLimitCount += 1; throw rateLimitError(5); }
+        return { topic: 'Final replacement', questions: [dilemma('Summon friendly dragons', 'Open magical portals', context.categories[0])] };
+      },
+    };
+    const waits = [];
+    const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 5, maxWaitMs: 30_000 }, sleep: async milliseconds => waits.push(milliseconds) });
+    assert.equal(plan.questions.length, 8);
+    // The 7 candidates accepted before the 429 storm survive untouched — no restart from zero.
+    assert.equal(plan.questions[0].optionA.text, 'superpowers wonder');
+    assert.deepEqual(waits, [5, 5, 5]);
+
+    const parsed = logs.map(line => JSON.parse(line));
+    const requestLogs = parsed.filter(entry => entry.event === 'content.groq_request');
+    assert.equal(requestLogs.length, 2);
+    assert.equal(requestLogs[0].totalGroqRequests, 1);
+    assert.equal(requestLogs[0].acceptedFromRequest, 7);
+
+    const waitLogs = parsed.filter(entry => entry.event === 'content.groq_rate_limit_wait');
+    assert.equal(waitLogs.length, 3);
+    assert.deepEqual(waitLogs.map(entry => entry.cumulativeWaitMs), [5, 10, 15]);
+    assert.equal(waitLogs.at(-1).rateLimitCount, 3);
+
+    const summaryLogs = parsed.filter(entry => entry.event === 'content.generation_summary');
+    assert.equal(summaryLogs.length, 1);
+    assert.equal(summaryLogs[0].accepted, 8);
+    assert.equal(summaryLogs[0].totalGroqRequests, 5);
+  } finally { console.info = originalInfo; }
+}));
+
+test('exhausting the rate-limit budget reports the request/429/wait counters instead of failing silently', async () => temporaryStore(async store => {
+  const logs = []; const originalInfo = console.info;
+  console.info = message => logs.push(message);
+  try {
+    const provider = { requestCount: 0, rateLimitCount: 0, async generatePlan() { this.requestCount += 1; this.rateLimitCount += 1; throw rateLimitError(10_000); } };
+    await assert.rejects(() => generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3, rateLimitPolicy: { maxRetries: 2, maxWaitMs: 25_000 }, sleep: async () => {} }), ContentRateLimitError);
+    const exhausted = logs.map(line => JSON.parse(line)).find(entry => entry.event === 'content.groq_rate_limit_exhausted');
+    assert.ok(exhausted);
+    assert.equal(exhausted.totalGroqRequests, provider.requestCount);
+    assert.equal(exhausted.rateLimitCount, provider.rateLimitCount);
+  } finally { console.info = originalInfo; }
+}));
+
+test('canonicalMotifKey collides known paraphrases of the same motif', () => {
+  const teleport = ['Teleport anywhere instantly', 'Open a portal to any country', 'Instantly travel anywhere on Earth'];
+  assert.equal(new Set(teleport.map(text => canonicalMotifKey({ text }))).size, 1);
+  assert.equal(canonicalMotifKey({ text: teleport[0] }), 'teleportation');
+
+  const timeControl = ['Freeze time whenever you want', 'Stop time for one hour', 'Pause time to catch your breath'];
+  assert.equal(new Set(timeControl.map(text => canonicalMotifKey({ text }))).size, 1);
+  assert.equal(canonicalMotifKey({ text: timeControl[0] }), 'time-control');
+
+  const mindReading = ['Read minds forever', "Hear people's thoughts at will"];
+  assert.equal(new Set(mindReading.map(text => canonicalMotifKey({ text }))).size, 1);
+  assert.equal(canonicalMotifKey({ text: mindReading[0] }), 'mind-reading');
+
+  const invisibility = ['Become invisible whenever you want', 'Disappear at will'];
+  assert.equal(new Set(invisibility.map(text => canonicalMotifKey({ text }))).size, 1);
+  assert.equal(canonicalMotifKey({ text: invisibility[0] }), 'invisibility');
+
+  const island = ['Own a private island', 'Live alone on your own island'];
+  assert.equal(new Set(island.map(text => canonicalMotifKey({ text }))).size, 1);
+  assert.equal(canonicalMotifKey({ text: island[0] }), 'private-island');
+
+  const creatureBond = ["Be a dragon's best friend", "Be a unicorn's guardian"];
+  assert.equal(new Set(creatureBond.map(text => canonicalMotifKey({ text }))).size, 1);
+});
+
+test('canonicalMotifKey does not over-collide genuinely different concepts that share a broad category', () => {
+  const sportsCar = canonicalMotifKey({ text: 'Own a sports car' });
+  const privateJet = canonicalMotifKey({ text: 'Own a private jet' });
+  assert.notEqual(sportsCar, privateJet);
+  const mountainCabin = canonicalMotifKey({ text: 'Live in a mountain cabin' });
+  const beachVilla = canonicalMotifKey({ text: 'Relax at a beach villa' });
+  assert.notEqual(mountainCabin, beachVilla);
+});
+
+test('canonicalMotifKey backfills a stable motif from legacy option text with no conceptKey at all', () => {
+  const key = canonicalMotifKey({ conceptKey: undefined, text: 'Teleport to any era you want' });
+  assert.equal(key, 'teleportation');
+  assert.equal(canonicalMotifKey({ text: 'Teleport to any era you want' }), key);
+});
+
+test('legacy history entries without conceptKeyA/B immediately participate in motif duplicate protection', async () => temporaryStore(async store => {
+  fs.writeFileSync(store.filePath, JSON.stringify({
+    version: 1,
+    videos: [{
+      generatedAt: '2025-01-01T00:00:00.000Z', topic: 'Legacy video', categories: ['superpowers'],
+      questions: [{ category: 'superpowers', optionA: 'Teleport every hour', optionB: 'Read minds forever' }],
+    }],
+  }));
+  const motifs = recentMotifs(store.load());
+  assert.ok(motifs.has('teleportation'));
+  assert.ok(motifs.has('mind-reading'));
+
+  let calls = 0;
+  const provider = { async generatePlan(count, context) {
+    calls += 1;
+    assert.ok(context.excludedMotifs.includes('teleportation'));
+    const questions = context.categories.map((category, index) => calls === 1 && index === 0
+      ? withMotif('Open a portal to any country', 'Own a sports car', undefined, undefined, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length])
+      : styledMotifPlan(calls)(category, index));
+    return { topic: 'New', questions: questions.slice(0, count) };
+  } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 3 });
+  assert.equal(plan.questions.length, 8);
+  assert.equal(plan.questions.some(question => canonicalMotifKey({ conceptKey: question.optionA.conceptKey, text: question.optionA.text }) === 'teleportation'), false);
+}));
+
+test('fantasy-like content family is capped at 1 per video even when Groq keeps offering fantasy candidates', async () => temporaryStore(async store => {
+  await assert.rejects(() => generateProductionPlan({
+    provider: { async generatePlan(count, context) { return { topic: 'Fantasy heavy', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, 'power', 'superpower')) }; } },
+    historyStore: store, questionCount: 8, maxAttempts: 1,
+  }), ContentGenerationError);
+}));
+
+test('any single content family is capped at 2 per video', async () => temporaryStore(async store => {
+  await assert.rejects(() => generateProductionPlan({
+    provider: { async generatePlan(count, context) { return { topic: 'Samey family', questions: context.categories.map((category, index) => withMotif(`${category} wonder ${index}`, `${category} escape ${index}`, `motif-${index}`, `alt-${index}`, category, DILEMMA_STYLES[index % DILEMMA_STYLES.length], 'food')) }; } },
+    historyStore: store, questionCount: 8, maxAttempts: 1,
+  }), ContentGenerationError);
+}));
+
+test('a normal production plan reaches at least 6 distinct content families across 8 questions', async () => temporaryStore(async store => {
+  const provider = { async generatePlan(count, context) { return { topic: 'Diverse', questions: context.categories.map(styledFamilyPlan(1)).slice(0, count) }; } };
+  const plan = await generateProductionPlan({ provider, historyStore: store, questionCount: 8, maxAttempts: 1 });
+  assert.equal(plan.questions.length, 8);
+  const distinctFamilies = new Set(plan.questions.map(question => question.contentFamily));
+  assert.ok(distinctFamilies.size >= 6, `expected >=6 distinct families, got ${distinctFamilies.size}`);
+  assert.equal(plan.contentQuality.distinctContentFamilies, distinctFamilies.size);
+  assert.ok(plan.contentQuality.fantasyFamilyCount <= 1);
+}));
+
+test('selectContentFamilies targets at most one fantasy-like family and prefers realistic families otherwise', () => {
+  const targets = selectContentFamilies({ version: 1, videos: [] }, 8);
+  assert.equal(targets.length, 8);
+  assert.equal(new Set(targets).size, 8);
+  const fantasyInTargets = targets.filter(family => FANTASY_CONTENT_FAMILIES.includes(family));
+  assert.ok(fantasyInTargets.length <= 1);
+});
+
+test('selectContentFamilies rotates away from families used in the immediately preceding video', () => {
+  const usedRealistic = REALISTIC_FAMILIES.slice(0, 7);
+  const history = { version: 1, videos: [{ generatedAt: '2026-01-01T00:00:00Z', categories: [], contentFamilies: [...usedRealistic, 'superpower'], questions: [] }] };
+  const targets = selectContentFamilies(history, 8);
+  assert.equal(targets.some(family => usedRealistic.includes(family)), false);
+});

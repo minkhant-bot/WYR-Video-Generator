@@ -37,12 +37,16 @@ export const getConfig = () => {
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
     questionCount: integer('WYR_QUESTION_COUNT', 8, 8, 8),
     contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 4, 1, 8),
-    groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 4, 0, 8),
-    groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 60_000, 1_000, 300_000),
+    // Free-tier Groq 429s can take longer than 60s to clear; bounded but wide enough
+    // (~2.5 minutes, 7 retries) to survive a burst without failing an otherwise-healthy job.
+    groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 7, 0, 10),
+    groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 150_000, 1_000, 300_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
     // 8 scenes * 7.25s keeps the finished video at ~56-58s, safely under the 60s short-form limit.
-    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 7.25, 6, 15),
+    // The upper bound (7.4) is deliberately tight: 8 * 7.4 = 59.2s, so no environment-variable
+    // override can push a single misconfigured value past the hard 60s Shorts ceiling.
+    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 7.25, 6, 7.4),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     imageRecoveryQueryRounds: integer('WYR_IMAGE_RECOVERY_QUERY_ROUNDS', 3, 0, 3),

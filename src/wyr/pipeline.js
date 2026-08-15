@@ -5,12 +5,40 @@ import { GroqContentProvider, addIllustrativePercentages } from './content.js';
 import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
-import { buildComposition, renderVideo, verifyVideo } from './media.js';
+import { buildComposition, DurationVerificationError, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 import { createImageSelection, downloadSelectedCandidates } from './image-picker.js';
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
+// Stay clear of the hard 60s ffprobe ceiling when judging the *projected* (pre-render) timeline.
+const DURATION_SAFETY_MARGIN_SECONDS = 0.5;
+// One bounded, deliberately small relaxation step for the corrective retry: since most scenes
+// land well under their budget (short narration hits the 7s floor), a single scene needing a
+// little more room rarely pushes the 8-scene total anywhere near the 60s limit.
+const DURATION_RETRY_RELAXATION_SECONDS = 0.75;
+// Builds voice + timeline together against a duration budget, and — if even bounded TTS-rate
+// compression can't fit a scene inside the primary per-scene budget — makes exactly one bounded
+// corrective retry with a slightly relaxed budget before failing clearly. Never silently returns
+// a timeline projected to be at or near the 60s Shorts limit.
+const buildBudgetedVoiceTimeline = async ({ plan, config, workspace, onProgress }) => {
+  const attempts = [config.maximumSceneDuration, config.maximumSceneDuration + DURATION_RETRY_RELAXATION_SECONDS];
+  let lastError;
+  for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+    const sceneDurationBudget = attempts[attemptIndex];
+    try {
+      const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, sceneDurationBudget, onProgress });
+      const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds, maximumSceneDuration: sceneDurationBudget });
+      if (timeline.totalDuration >= SHORTS_DURATION_LIMIT_SECONDS - DURATION_SAFETY_MARGIN_SECONDS) throw new DurationVerificationError(`Projected total duration ${timeline.totalDuration.toFixed(3)}s is too close to the ${SHORTS_DURATION_LIMIT_SECONDS}s Shorts limit.`);
+      if (attemptIndex > 0) log('duration.corrective_retry_succeeded', { attemptIndex, sceneDurationBudget, totalDuration: timeline.totalDuration });
+      return { voiceovers, timeline };
+    } catch (error) {
+      lastError = error;
+      log('duration.budget_attempt_failed', { attemptIndex, sceneDurationBudget, message: error.message });
+    }
+  }
+  throw new DurationVerificationError(`Could not build a video projected under ${SHORTS_DURATION_LIMIT_SECONDS}s after ${attempts.length} bounded attempt(s). Last error: ${lastError?.message}`);
+};
 const plainLogValue = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
 const logSelectedImageDiagnostics = (assets, jobId) => {
   for (const asset of assets) {
@@ -57,11 +85,11 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: providers.length === 1 ? providers[0] : 'Mixed', providers, photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, provider: asset.provider, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.sourcePageUrl || asset.photoUrl, sourcePageUrl: asset.sourcePageUrl, originalImageUrl: asset.originalImageUrl, sourceDomain: asset.sourceDomain, width: asset.width, height: asset.height, license: asset.license || 'unknown', licenseUrl: asset.licenseUrl || null, usageRights: asset.usageRights || 'unknown', sha256: asset.sha256, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(job.workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, sceneDurationBudget: config.maximumSceneDuration, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
+    const { voiceovers, timeline } = await buildBudgetedVoiceTimeline({ plan, config, workspace: job.workspace, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
     writeJsonAtomic(path.join(job.workspace, 'voiceovers.json'), relativeMetadata(voiceovers, job.workspace));
 
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });
-    const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds, maximumSceneDuration: config.maximumSceneDuration });
+    log('timeline.built', { jobId: job.id, totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length, maximumSceneDuration: config.maximumSceneDuration });
     const sfx = await createLocalSfx({ audioDir: path.join(job.workspace, 'audio') });
     const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
     writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, entrance: { ...sfx.entrance, localPath: path.relative(job.workspace, sfx.entrance.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, countdownSequence: { ...sfx.countdownSequence, localPath: path.relative(job.workspace, sfx.countdownSequence.localPath) }, schedule: sfxSchedule, countdownSchedule });

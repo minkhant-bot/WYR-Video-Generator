@@ -140,10 +140,24 @@ test('local SFX always installs the production countdown sequence', async () => 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-'));
   try {
     const sfx = await createLocalSfx({ audioDir: dir });
-    assert.equal(sfx.countdownSequence.filename, 'reference-countdown-sequence.wav');
+    assert.equal(sfx.provider, 'procedurally-generated');
+    assert.equal(sfx.countdownSequence.filename, 'generated-countdown-sequence.wav');
     assert.equal(sfx.countdownSequence.duration, WYR_TEMPLATE.timing.countdownSequenceDuration);
-    assert.deepEqual(fs.readFileSync(sfx.countdownSequence.localPath), fs.readFileSync(path.resolve('assets/sfx/reference-countdown-sequence.wav')));
+    assert.deepEqual(fs.readFileSync(sfx.countdownSequence.localPath), fs.readFileSync(path.resolve('assets/sfx/generated-countdown-sequence.wav')));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('bundled SFX assets carry no reference-video/third-party provenance and no copyrighted background music is used', () => {
+  const sfxDir = path.resolve('assets/sfx');
+  const files = fs.readdirSync(sfxDir).filter(name => name.endsWith('.wav'));
+  assert.ok(files.length > 0);
+  for (const name of files) {
+    assert.doesNotMatch(name, /^reference-/, `${name} is named like an asset extracted from a reference video`);
+    const bytes = fs.readFileSync(path.join(sfxDir, name));
+    // A prior asset set embedded a short-form-video platform ID in its WAV metadata comment,
+    // proving it was extracted from someone else's video rather than generated in-house — the
+    // root cause of a real copyright takedown. Guard against that ever happening again.
+    assert.doesNotMatch(bytes.toString('latin1'), /\bvid:[a-z0-9]{10,}/i, `${name} contains a suspicious embedded video-ID tag`);
+  }
 });
 test('production and fixture audio validation cannot silently omit the countdown sequence', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });

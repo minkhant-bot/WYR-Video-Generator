@@ -154,6 +154,17 @@ const selectBestAvailable = state => {
   return candidate || null;
 };
 
+const logSafe = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
+// Diagnostics for why a specific image won or lost, without dumping the full candidate pool.
+const logSelectionResult = state => {
+  const selected = state.candidates.find(candidate => candidate.candidateKey === state.selectedId);
+  if (selected) {
+    console.info(`WYR_SELECTION_RESULT | ${state.key} | provider=${selected.provider} | query="${logSafe(selected.queryUsed)}" | finalScore=${selected.finalScore} | relevanceScore=${selected.relevanceScore} | qualityScore=${selected.qualityScore} | conceptClarity=${selected.conceptClarity ?? 'n/a'} | specificity=${selected.specificity ?? 'n/a'} | candidatesConsidered=${state.candidates.length}`);
+    return;
+  }
+  console.info(`WYR_SELECTION_RESULT | ${state.key} | NO CANDIDATE SELECTED | reason="${logSafe(state.error)}" | candidatesConsidered=${state.candidates.length} | providerRequestCount=${state.providerRequestCount}`);
+};
+
 const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_POOL_SIZE) => {
   if (!providers.length) {
     state.error = 'No image provider is configured.';
@@ -248,6 +259,7 @@ export const createImageSelection = async ({ plan, config }) => {
 
       await fetchPoolForSlot(state, providers, config, REVIEW_POOL_SIZE);
       selectBestAvailable(state);
+      logSelectionResult(state);
       slots[key] = state;
     }
   }

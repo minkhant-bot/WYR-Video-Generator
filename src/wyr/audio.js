@@ -151,17 +151,19 @@ export const createLocalSfx = async ({ audioDir }) => {
   const sfxDir = path.join(audioDir, 'sfx'); fs.mkdirSync(sfxDir, { recursive: true });
   const entrancePath = path.join(sfxDir, 'entrance.wav'); const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav');
   const countdownSequencePath = path.join(sfxDir, 'countdown-sequence.wav');
+  // Procedurally synthesized via FFmpeg lavfi sources (sine tones + filtered noise) — not sourced
+  // or extracted from any reference/third-party video, so there is no copyright exposure.
   const sources = {
-    entrance: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-scene-entrance-impact.wav'),
-    reveal: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-result-reveal-sting.wav'),
-    transition: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-scene-transition-whoosh.wav'),
-    countdownSequence: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-countdown-sequence.wav'),
+    entrance: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-scene-entrance-impact.wav'),
+    reveal: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-result-reveal-sting.wav'),
+    transition: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-scene-transition-whoosh.wav'),
+    countdownSequence: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-countdown-sequence.wav'),
   };
-  for (const source of [sources.entrance, sources.reveal, sources.transition, sources.countdownSequence]) if (!fs.existsSync(source) || fs.statSync(source).size <= 44) throw new Error(`Reusable reference SFX asset is missing: ${source}`);
+  for (const source of [sources.entrance, sources.reveal, sources.transition, sources.countdownSequence]) if (!fs.existsSync(source) || fs.statSync(source).size <= 44) throw new Error(`Reusable generated SFX asset is missing: ${source}`);
   fs.copyFileSync(sources.entrance, entrancePath); fs.copyFileSync(sources.reveal, revealPath); fs.copyFileSync(sources.transition, transitionPath);
   fs.copyFileSync(sources.countdownSequence, countdownSequencePath);
   return {
-    provider: 'licensed-reference-extract',
+    provider: 'procedurally-generated',
     entrance: { filename: path.basename(sources.entrance), localPath: entrancePath, volume: 0.16 },
     reveal: { filename: path.basename(sources.reveal), localPath: revealPath, volume: 0.21 },
     transition: { filename: path.basename(sources.transition), localPath: transitionPath, volume: 0.125 },

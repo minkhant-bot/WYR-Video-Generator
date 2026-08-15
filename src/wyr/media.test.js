@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertLockedImageAssets, buildFramedImageChain, buildStillImageInputArgs, renderSceneSegments } from './media.js';
+import { assertLockedImageAssets, buildFramedImageChain, buildStillImageInputArgs, DurationVerificationError, renderSceneSegments, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
 import { resolveFfmpegPath } from './runtime.js';
 import { WYR_TEMPLATE } from './template.js';
 
@@ -116,4 +116,27 @@ test('rendering consumes locked local assets without image-provider calls', asyn
   let providerCalls = 0; const provider = { search: () => { providerCalls += 1; throw new Error('provider must not be called during rendering'); }, downloadAsset: () => { providerCalls += 1; throw new Error('provider must not be called during rendering'); } };
   const segments = await renderSceneSegments({ plan: { questions: [{ index: 0 }] }, assets: [], duration: 1, renderDir: '/tmp/wyr-no-provider-render', sceneConcurrency: 1, ffmpegThreads: 1, renderScene: async () => 'locked-local-segment.mp4' });
   assert.deepEqual(segments, ['locked-local-segment.mp4']); assert.equal(providerCalls, 0); assert.equal(typeof provider.search, 'function');
+});
+
+test('verification authoritatively rejects any output at or above the 60s Shorts limit, independent of the expected duration', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-duration-gate-')); const ffmpeg = resolveFfmpegPath();
+  try {
+    assert.equal(SHORTS_DURATION_LIMIT_SECONDS, 60);
+    const overLimit = path.join(root, 'over-limit.mp4');
+    const overLimitDuration = SHORTS_DURATION_LIMIT_SECONDS + 4.33;
+    const build = spawnSync(ffmpeg, [
+      '-y', '-f', 'lavfi', '-i', `color=c=black:s=1080x1920:r=30:d=${overLimitDuration}`,
+      '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${overLimitDuration}`,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', overLimit,
+    ], { encoding: 'utf8' });
+    assert.equal(build.status, 0, build.stderr);
+
+    await assert.rejects(
+      () => verifyVideo(overLimit, { expectedDuration: overLimitDuration }),
+      error => { assert.ok(error instanceof DurationVerificationError); assert.match(error.message, /60\.0s Shorts limit/); return true; },
+    );
+    // Even when the caller (wrongly) expects the over-limit duration, the hard ceiling still wins —
+    // production validators must remain authoritative over any prediction the timeline made.
+    await assert.rejects(() => verifyVideo(overLimit, {}), DurationVerificationError);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

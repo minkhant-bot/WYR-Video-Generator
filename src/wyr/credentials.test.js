@@ -97,7 +97,7 @@ test('Groq rate-limit recovery has bounded production defaults', () => {
   const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
     for (const name of names) delete process.env[name];
-    const config = getConfig(); assert.equal(config.groqRateLimitRetries, 4); assert.equal(config.groqRateLimitMaxWaitMs, 60_000);
+    const config = getConfig(); assert.equal(config.groqRateLimitRetries, 7); assert.equal(config.groqRateLimitMaxWaitMs, 150_000);
   } finally {
     for (const name of names) original[name] === undefined ? delete process.env[name] : process.env[name] = original[name];
   }

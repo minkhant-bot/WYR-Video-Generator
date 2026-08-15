@@ -50,17 +50,22 @@ export const buildImageQueries = option => {
   else if (has('travel') && has('time')) visualQueries = ['person entering time portal', 'time traveler cinematic portal', 'person walking through temporal vortex'];
   else if (has('dragon')) visualQueries = ['person petting friendly dragon fantasy', 'human befriending cinematic dragon', 'person interacting with gentle dragon'];
   else if (has('portal') && has('door')) visualQueries = ['doorway opening into another world', 'person beside magical portal door', 'fantasy door to another dimension'];
-  const intentPack = visualIntentGroups(option).length ? [
+  // These literal/cinematic framings apply to every concept, not just the ~15 hardcoded phrase
+  // groups above — most real options (e.g. "infinite passive income", "personal drone farm") never
+  // match a hardcoded group, and without this pack they only ever got the raw supplied/optionWords
+  // query, which is often too abstract for Pexels/Pixabay to return a literal, relevant photo for.
+  const literalPack = optionWords.length ? [
     `${optionWords.slice(0, 5).join(' ')} cinematic visual scene`,
     `${optionWords.slice(0, 5).join(' ')} literal scene photograph`,
     `person experiencing ${optionWords.slice(0, 5).join(' ')} cinematic`,
+    `${optionWords.slice(0, 4).join(' ')} real photo`,
   ] : [];
   return [...new Set([
     ...visualQueries,
     supplied.slice(0, 7).join(' '),
     optionWords.slice(0, 5).join(' '),
     expanded.slice(0, 7).join(' '),
-    ...intentPack,
+    ...literalPack,
   ].filter(query => query.length >= 3))];
 };
 

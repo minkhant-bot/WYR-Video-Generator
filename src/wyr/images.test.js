@@ -380,7 +380,7 @@ test('alternate exhaustion invokes Groq visual reformulation once and recovers w
   const webProvider = { name: 'DuckDuckGo Images', search: async query => { searchOrder.push(`DuckDuckGo Images:${query}`); return []; }, downloadAsset: async () => {} };
   const plan = { questions: [{ index: 0, optionA: { text: 'Control Gravity' }, optionB: { text: 'Control Lightning' } }] };
   try {
-    const assets = await findAndDownloadImages({ plan, provider, webProvider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 12, maxWallClockMs: 5000 } });
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, visualQueryProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 1, maxProviderRequests: 24, maxWallClockMs: 5000 } });
     assert.equal(groqCalls, 1); assert.equal(assets[0].text, 'Control Gravity'); assert.equal(assets[0].narration, undefined); assert.equal(assets[0].queryUsed, 'human controlling gravity objects levitating cinematic');
     assert.equal(buildNarration(plan.questions[0]), 'Control Gravity, or control Lightning?');
     const groqIndex = searchOrder.findIndex(entry => entry.endsWith('human controlling gravity objects levitating cinematic'));

@@ -167,11 +167,16 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   return output;
 };
 const rate = value => { const [numerator, denominator] = String(value || '').split('/').map(Number); return denominator ? numerator / denominator : Number(value); };
+// Authoritative, independent of expectedDuration matching: a >=60s output must never be reported as a
+// successful Shorts render, regardless of what the timeline predicted going in.
+export const SHORTS_DURATION_LIMIT_SECONDS = 60;
+export class DurationVerificationError extends Error {}
 export const verifyVideo = async (output, { expectedSceneCount, expectedDuration, renderDir, timeline, sfxSchedule, countdownSchedule } = {}) => {
   const stat = fs.statSync(output); if (!stat.isFile() || stat.size <= 0) throw new Error('Output is not a non-empty regular file.'); let stdout = '';
   await new Promise((resolve, reject) => { const child = spawn(ffprobePath, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', output], { stdio: ['ignore', 'pipe', 'pipe'] }); let stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(new Error(`FFprobe exited with code ${code}: ${stderr}`))); });
   const metadata = JSON.parse(stdout); const video = metadata.streams?.find(stream => stream.codec_type === 'video'); const audio = metadata.streams?.find(stream => stream.codec_type === 'audio'); const duration = Number(metadata.format?.duration);
   if (!video) throw new Error('Verification failed: video stream is missing.'); if (!audio) throw new Error('Verification failed: expected audio stream is missing.'); if (video.width !== 1080 || video.height !== 1920) throw new Error(`Verification failed: expected 1080x1920, received ${video.width}x${video.height}.`); if (Math.abs(rate(video.avg_frame_rate || video.r_frame_rate) - 30) > 0.01) throw new Error(`Verification failed: expected 30fps, received ${video.avg_frame_rate || video.r_frame_rate}.`); if (video.codec_name !== 'h264') throw new Error(`Verification failed: expected H.264, received ${video.codec_name}.`); if (audio.codec_name !== 'aac') throw new Error(`Verification failed: expected AAC, received ${audio.codec_name}.`); if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Verification failed: invalid duration ${metadata.format?.duration}.`);
+  if (duration >= SHORTS_DURATION_LIMIT_SECONDS) throw new DurationVerificationError(`Verification failed: final duration ${duration.toFixed(3)}s is at or above the ${SHORTS_DURATION_LIMIT_SECONDS.toFixed(1)}s Shorts limit and cannot be published as a successful short.`);
   if (Number.isFinite(expectedDuration) && Math.abs(duration - expectedDuration) > 0.15) throw new Error(`Verification failed: expected approximately ${expectedDuration.toFixed(3)}s, received ${duration.toFixed(3)}s.`);
   if (expectedSceneCount !== undefined) {
     if (!Number.isInteger(expectedSceneCount) || expectedSceneCount <= 0) throw new Error('Verification failed: expected scene count is invalid.');

@@ -46,3 +46,16 @@ test('Pexels fallback still works when no Pixabay key is configured', async () =
     assert.ok(selection.slots.Q1B.selectedId);
   } finally { global.fetch = originalFetch; }
 });
+
+test('auto-selection logs a diagnostic line per slot with query, provider, and scores', async () => {
+  const originalFetch = global.fetch; const originalInfo = console.info; let counter = 0; const logs = [];
+  try {
+    global.fetch = async () => { counter += 1; return { ok: true, async json() { return { photos: [{ id: counter, width: 1600, height: 900, alt: 'person dragon fantasy cinematic', url: `https://pexels.test/${counter}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${counter}-large.jpg`, original: `https://pexels.test/${counter}.jpg` } }] }; } }; };
+    console.info = message => logs.push(message);
+    const plan = { questions: [{ index: 0, optionA: { text: 'Befriend a Dragon', searchQuery: 'dragon fantasy' }, optionB: { text: 'Explore Mars', searchQuery: 'mars planet' } }] };
+    await createImageSelection({ plan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    const resultLines = logs.filter(line => String(line).startsWith('WYR_SELECTION_RESULT'));
+    assert.equal(resultLines.length, 2);
+    assert.match(resultLines[0], /WYR_SELECTION_RESULT \| Q1A \| provider=Pexels \| query="[^"]*" \| finalScore=\d/);
+  } finally { global.fetch = originalFetch; console.info = originalInfo; }
+});

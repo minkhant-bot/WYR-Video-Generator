@@ -91,6 +91,18 @@ test('Groq exposes HTTP 429 and Retry-After without internally burning structure
   assert.equal(requests.length, 1);
 }));
 
+test('Groq provider tracks total requests and 429 count for auditing', async () => withMockedFetch([rateLimitResponse('1'), rateLimitResponse('1'), successfulResponse()], async () => {
+  const client = provider();
+  assert.equal(client.requestCount, 0); assert.equal(client.rateLimitCount, 0);
+  await assert.rejects(() => client.generatePlan(8), { status: 429 });
+  assert.equal(client.requestCount, 1); assert.equal(client.rateLimitCount, 1);
+  await assert.rejects(() => client.generatePlan(8), { status: 429 });
+  assert.equal(client.requestCount, 2); assert.equal(client.rateLimitCount, 2);
+  const plan = await client.generatePlan(8);
+  assert.equal(plan.questions.length, 8);
+  assert.equal(client.requestCount, 3); assert.equal(client.rateLimitCount, 2);
+}));
+
 test('Groq falls back to JSON Object mode and validates a successful object', async () => withMockedFetch([
   failedGenerationResponse(), failedGenerationResponse(), failedGenerationResponse(), successfulResponse(),
 ], async requests => {
