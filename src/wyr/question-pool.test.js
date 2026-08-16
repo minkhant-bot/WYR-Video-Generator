@@ -74,7 +74,7 @@ test('a valid insert persists across a fresh countReady() call (persistence with
 
 test('selectAndReservePlan reserves exactly 8 questions and moves them out of the ready count', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
-  const reservation = await selectAndReservePlan({ jobId: 'job-1', count: 8 });
+  const reservation = await selectAndReservePlan({ jobId: 'job-1', count: 8, targetTotalSeconds: 999 });
   assert.ok(reservation);
   assert.equal(reservation.selected.length, 8);
   assert.equal(await countReady(), 0);
@@ -90,7 +90,7 @@ test('selectAndReservePlan returns null (not a throw) when the pool cannot fill 
 test('concurrent jobs never both reserve the same questions (sequential reservations do not overlap)', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
   await insertQuestions([question('survival-lite', 'Survive a desert island', 'Survive an arctic winter'), question('friendship/social', 'Throw a huge party', 'Host a small gathering')]);
-  const first = await selectAndReservePlan({ jobId: 'job-a', count: 8 });
+  const first = await selectAndReservePlan({ jobId: 'job-a', count: 8, targetTotalSeconds: 999 });
   assert.ok(first);
   const second = await selectAndReservePlan({ jobId: 'job-b', count: 2 });
   assert.ok(second);
@@ -101,7 +101,7 @@ test('concurrent jobs never both reserve the same questions (sequential reservat
 
 test('a failed job releases its reservation back to ready', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
-  await selectAndReservePlan({ jobId: 'job-1', count: 8 });
+  await selectAndReservePlan({ jobId: 'job-1', count: 8, targetTotalSeconds: 999 });
   assert.equal(await countReady(), 0);
   await releaseReservation('job-1');
   assert.equal(await countReady(), 8);
@@ -117,7 +117,7 @@ test('releaseReservation only releases rows reserved by the given job, not anoth
 
 test('a successful job commits usage: used_count increments and the question is retired to \'used\', never returning to ready', () => withFakeDb(async fake => {
   await insertQuestions(EIGHT_DIVERSE);
-  const plan = await selectPlanForJob({ jobId: 'job-1', count: 8 });
+  const plan = await selectPlanForJob({ jobId: 'job-1', count: 8, targetTotalSeconds: 999 });
   assert.ok(plan);
   await commitPlanUsage({ jobId: 'job-1', plan, duration: 57.2 });
   assert.equal(await countReady(), 0, 'a consumed question must never be selectable again -- it does not return to ready');
@@ -149,7 +149,7 @@ test('getPoolStats never throws or exposes secrets when the pool is empty', () =
 
 test('a DB-selected plan is shaped for the automatic image/TTS/render path with no manual review fields', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
-  const plan = await selectPlanForJob({ jobId: 'job-1', count: 8 });
+  const plan = await selectPlanForJob({ jobId: 'job-1', count: 8, targetTotalSeconds: 999 });
   assert.equal(plan.questions.length, 8);
   assert.equal(plan.source, 'database_pool');
   assert.equal('selection' in plan, false);

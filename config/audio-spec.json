@@ -1,0 +1,60 @@
+{
+  "source": {
+    "file": "reference/ref.mp4",
+    "note": "Measured once during Phase 1 to derive timing only. The file itself has been deleted from the repo (third-party TikTok content, visible creator watermark) and is not read by any production code. This spec file is the only thing the renderer consumes.",
+    "durationSecondsAtMeasurementTime": 65.833333
+  },
+  "countdown": {
+    "tickCount": 16,
+    "tickSpacingSeconds": 0.2,
+    "method": "audio piped s16le mono 24000Hz through highpass=5500,lowpass=11000; RMS in 5ms windows; peaks above 97th percentile RMS with 0.09s minimum separation; consecutive peaks grouped into runs where spacing is 0.08-0.45s",
+    "measuredGenuineRunCount": 7,
+    "measuredTicksPerGenuineRun": 16,
+    "measuredMedianIntraRunSpacingSeconds": 0.2,
+    "excludedAnomaly": "a 2-tick group at 35.850-35.965s (spacing 0.115s) did not fit the 16-tick pattern and was treated as noise, not a real countdown run -- excluded from the medians above"
+  },
+  "reveal": {
+    "gapAfterLastTickSeconds": 0.68,
+    "method": "audio piped s16le mono 24000Hz through highpass=2400,lowpass=2900; RMS in 5ms windows; peaks above 99.3rd percentile RMS with 1.0s minimum separation; gap measured from each countdown run's last tick to the next reveal peak after it",
+    "measuredPeakCount": 7,
+    "measuredGapRangeSeconds": [0.64, 0.735]
+  },
+  "transitions": {
+    "blankDurationSeconds": 0.45,
+    "sceneIntervalSeconds": 8.35,
+    "method": "video scaled to 48x86 grayscale at 20fps, raw dump; spatial variance computed per frame; frames with variance below 1.3x the 5th percentile flagged as blank; consecutive blank frames grouped into runs",
+    "canonicalReading": "topThirdOnly",
+    "measuredRunCount": 7,
+    "discardedReading": {
+      "name": "combinedTopAndBottomThirds",
+      "reason": "the bottom third never drops below the blank threshold on its own -- it permanently holds the source video's TikTok logo and creator-handle overlay, which is an artifact of ref.mp4 being a downloaded post, not a property of the design being measured. Averaging it into the combined metric masked the real periodic pattern, which is only visible in the top third. Do not re-derive the combined reading; use topThirdOnly."
+    },
+    "crossCheck": "median interval independently computed from countdown-run start times (not the blank-frame detector) was 8.3225s, corroborating the 8.35s topThirdOnly reading"
+  },
+  "volume": {
+    "method": "ffmpeg -af volumedetect over the full file",
+    "measuredMaxVolumeDb": -0.1,
+    "measuredMeanVolumeDb": -19.8
+  },
+  "sfx": {
+    "note": "Generic, hand-picked round values. Deliberately NOT derived from ref.mp4's measured spectral peaks (third-party watermarked content) -- only the timing above comes from measurement. All four are synthesized from ffmpeg lavfi sine/noise sources only, nothing sampled or extracted from any video.",
+    "tick": { "durationSeconds": 0.04, "description": "short bright click", "synthesis": "white noise, highpass 6000Hz, fast attack/decay envelope" },
+    "reveal": { "durationSeconds": 0.3, "description": "mid-range bell ding", "synthesis": "sine 2000Hz fundamental + sine 4000Hz octave partial, exponential decay envelope" },
+    "whoosh": { "durationSeconds": 0.35, "description": "broadband whoosh", "synthesis": "white noise, bandpass 800-4000Hz, rise-then-fall amplitude envelope" },
+    "slide": { "durationSeconds": 0.28, "description": "low-mid slide", "synthesis": "white noise, bandpass 300-2000Hz, smooth in/out envelope" }
+  },
+  "mix": {
+    "sfxPeakDbfs": -13,
+    "narrationPeakDbfs": -3
+  },
+  "encode": {
+    "profile": "high",
+    "level": "4.2",
+    "videoBitrate": "5M",
+    "maxrate": "6M",
+    "bufsize": "10M",
+    "audioCodec": "aac",
+    "audioBitrate": "192k",
+    "audioSampleRate": 48000
+  }
+}

@@ -5,6 +5,12 @@ import { EdgeTTS } from '@seepine/edge-tts';
 import { mapWithConcurrency, retry, log } from './utils.js';
 import { WYR_TEMPLATE } from './template.js';
 import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
+import { getAudioSpec, getCountdownSequenceDuration } from './audio-spec.js';
+import { ensureSfxAssets } from './sfx-synth.js';
+
+// Fixed product decision (not a measured reference value): on the final scene, skip the outgoing
+// whoosh/slide-out and simply hold the revealed percentages before the video ends.
+export const FINAL_SCENE_REVEAL_HOLD_SECONDS = 2;
 
 const ffmpegPath = resolveFfmpegPath();
 const ffprobePath = resolveFfprobePath();
@@ -29,7 +35,8 @@ export const measureAudioDuration = async audioPath => {
 
 // A scene's total duration is voiceStart + narration + a fixed pause/countdown/reveal/transition tail.
 // This constant mirrors that tail so voice generation can predict a scene's duration before buildSceneTimeline runs.
-const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + WYR_TEMPLATE.timing.countdownSequenceDuration + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+// Non-final-scene tail (the final scene's tail is shorter -- see FINAL_SCENE_REVEAL_HOLD_SECONDS and buildSceneTimeline).
+const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + getCountdownSequenceDuration() + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
 export const RATE_COMPRESSION_LADDER = Object.freeze(['-10%', '-5%', '+0%', '+8%', '+15%', '+22%']);
 const parseRatePercent = value => Number(String(value ?? '+0%').replace('%', '')) || 0;
 const fasterRateSteps = baseRate => {
@@ -98,106 +105,127 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
 };
 
 const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_TEMPLATE.canvas.fps;
-export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, maximumSceneDuration = 11 }) => {
+// tickCount/tickSpacingSeconds/revealGapAfterLastTickSeconds/finalSceneHoldSeconds all default from
+// config/audio-spec.json (via getAudioSpec()) rather than being hardcoded -- pass explicit values
+// only to override for a test or a one-off re-measurement.
+export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, maximumSceneDuration = 11, tickCount, tickSpacingSeconds, revealGapAfterLastTickSeconds, finalSceneHoldSeconds = FINAL_SCENE_REVEAL_HOLD_SECONDS } = {}) => {
   if (!Array.isArray(voiceovers) || voiceovers.length === 0) throw new Error('At least one measured narration is required to build the scene timeline.');
+  const spec = getAudioSpec();
+  const ticks = tickCount ?? spec.countdown.tickCount;
+  const tickSpacing = tickSpacingSeconds ?? spec.countdown.tickSpacingSeconds;
+  const revealGap = revealGapAfterLastTickSeconds ?? spec.reveal.gapAfterLastTickSeconds;
+  const countdownSequenceDuration = (ticks - 1) * tickSpacing + revealGap;
   let cursor = 0;
   const scenes = voiceovers.map((voiceover, index) => {
+    const isLastScene = index === voiceovers.length - 1;
     const voiceStart = 0.3;
     const narrationEnd = voiceStart + voiceover.duration;
     const countdownStart = narrationEnd + WYR_TEMPLATE.timing.countdownPauseAfterVoice;
     const countdownGap = countdownStart - narrationEnd;
     if (countdownGap < 0 || countdownGap > WYR_TEMPLATE.timing.maximumNarrationCountdownGap) throw new Error(`Scene ${index + 1} narration-to-countdown gap is ${countdownGap.toFixed(3)}s; expected no more than ${WYR_TEMPLATE.timing.maximumNarrationCountdownGap.toFixed(2)}s.`);
-    const revealTime = countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration;
-    const requiredDuration = revealTime + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+    const revealTime = countdownStart + countdownSequenceDuration;
+    // The final scene skips the outgoing whoosh/slide-out entirely: no transitionOutDuration tail,
+    // just a fixed hold on the reveal before the video ends (see FINAL_SCENE_REVEAL_HOLD_SECONDS).
+    const requiredDuration = isLastScene ? revealTime + finalSceneHoldSeconds : revealTime + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
     const duration = frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
     if (duration > maximumSceneDuration) throw new Error(`Scene ${index + 1} narration is ${voiceover.duration.toFixed(2)}s and would exceed the ${maximumSceneDuration}s scene limit. Regenerate shorter option text.`);
-    const contentEnd = duration - WYR_TEMPLATE.timing.transitionOutDuration;
-    const countdown = [3, 2, 1].map((number, countdownIndex) => ({ number, time: countdownStart + WYR_TEMPLATE.timing.countdownCueOffsets[countdownIndex] }));
-    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, transitionOutDuration: WYR_TEMPLATE.timing.transitionOutDuration };
+    // contentEnd === duration on the final scene (no transition-out tail to reserve), which also
+    // means the outgoing slide motion in media.js (driven off contentEnd) never actually triggers
+    // within the rendered frames, and the percentage overlay never fades out early.
+    const contentEnd = isLastScene ? duration : duration - WYR_TEMPLATE.timing.transitionOutDuration;
+    const countdown = Array.from({ length: ticks }, (_, tickIndex) => ({ tick: tickIndex + 1, time: countdownStart + tickIndex * tickSpacing }));
+    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, isLastScene, transitionOutDuration: isLastScene ? 0 : WYR_TEMPLATE.timing.transitionOutDuration };
     cursor += duration; return scene;
   });
-  return { version: 1, baseDuration, maximumSceneDuration, voicePaddingSeconds, totalDuration: cursor, scenes };
+  return { version: 1, baseDuration, maximumSceneDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, totalDuration: cursor, scenes };
 };
 
-export const SFX_EVENT_TYPES = Object.freeze(['entrance', 'reveal', 'transition']);
-export const COUNTDOWN_NUMBERS = Object.freeze([3, 2, 1]);
+// 'slide' fires at scene start (accompanies images sliding in), 'whoosh' fires at scene end
+// (accompanies the outgoing slide) -- 'whoosh' is omitted on the final scene (see buildSfxSchedule).
+export const SFX_EVENT_TYPES = Object.freeze(['slide', 'reveal', 'whoosh']);
 
 export const assertCompleteCountdownSchedule = ({ timeline, events }) => {
   if (!Array.isArray(timeline?.scenes) || !Array.isArray(events)) throw new Error('Timeline and countdown events are required.');
+  let expectedTotal = 0;
   for (let sceneIndex = 0; sceneIndex < timeline.scenes.length; sceneIndex += 1) {
     const scene = timeline.scenes[sceneIndex]; const sceneEvents = events.filter(event => event.sceneIndex === sceneIndex);
     const narrationEnd = scene.voiceStart + scene.voiceDuration;
     const countdownGap = scene.countdownStart - narrationEnd;
     if (!Number.isFinite(countdownGap) || countdownGap < 0 || countdownGap > WYR_TEMPLATE.timing.maximumNarrationCountdownGap) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} narration-to-countdown gap is ${Number.isFinite(countdownGap) ? `${countdownGap.toFixed(3)}s` : 'invalid'}; expected no more than ${WYR_TEMPLATE.timing.maximumNarrationCountdownGap.toFixed(2)}s.`);
-    if (sceneEvents.length !== COUNTDOWN_NUMBERS.length) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain 3, 2, and 1; found ${sceneEvents.length} event(s).`);
-    for (let countdownIndex = 0; countdownIndex < COUNTDOWN_NUMBERS.length; countdownIndex += 1) {
-      const number = COUNTDOWN_NUMBERS[countdownIndex]; const matching = sceneEvents.filter(event => event.number === number);
-      if (matching.length !== 1) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain exactly one ${number}.`);
-      const expected = scene.start + scene.countdownStart + WYR_TEMPLATE.timing.countdownCueOffsets[countdownIndex];
-      if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} number ${number} is mistimed.`);
+    const expectedTickCount = scene.countdown.length;
+    expectedTotal += expectedTickCount;
+    if (sceneEvents.length !== expectedTickCount) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain ${expectedTickCount} ticks; found ${sceneEvents.length} event(s).`);
+    for (let tickIndex = 0; tickIndex < expectedTickCount; tickIndex += 1) {
+      const tick = tickIndex + 1; const matching = sceneEvents.filter(event => event.tick === tick);
+      if (matching.length !== 1) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} must contain exactly one tick ${tick}.`);
+      const expected = scene.start + scene.countdown[tickIndex].time;
+      if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} tick ${tick} is mistimed.`);
     }
-    const one = sceneEvents.find(event => event.number === 1);
-    const expectedReveal = scene.start + scene.countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration;
-    if (Math.abs(scene.start + scene.revealTime - expectedReveal) > 0.000001 || scene.start + scene.revealTime <= one.timestamp) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} result does not reveal immediately after the countdown sequence.`);
+    const lastTick = sceneEvents.find(event => event.tick === expectedTickCount);
+    const expectedReveal = scene.start + scene.countdown[expectedTickCount - 1].time;
+    if (scene.start + scene.revealTime <= lastTick.timestamp) throw new Error(`Countdown validation failed: scene ${sceneIndex + 1} result does not reveal after the countdown ticks.`);
+    void expectedReveal; // last-tick timestamp itself, kept for readability of the check above
   }
-  if (events.length !== timeline.scenes.length * COUNTDOWN_NUMBERS.length) throw new Error('Countdown validation failed: the schedule contains unexpected extra events.');
+  if (events.length !== expectedTotal) throw new Error('Countdown validation failed: the schedule contains unexpected extra events.');
   return true;
 };
 
 export const buildCountdownSchedule = timeline => {
   if (!Array.isArray(timeline?.scenes) || timeline.scenes.length === 0) throw new Error('A scene timeline is required to schedule the countdown.');
-  const events = timeline.scenes.flatMap((scene, sceneIndex) => scene.countdown.map(({ number, time }) => ({ sceneIndex, number, sceneTime: Number(time.toFixed(6)), timestamp: Number((scene.start + time).toFixed(6)) })));
+  const events = timeline.scenes.flatMap((scene, sceneIndex) => scene.countdown.map(({ tick, time }) => ({ sceneIndex, tick, sceneTime: Number(time.toFixed(6)), timestamp: Number((scene.start + time).toFixed(6)) })));
   assertCompleteCountdownSchedule({ timeline, events });
-  return { version: 1, numbersPerScene: COUNTDOWN_NUMBERS.length, eventCount: events.length, events };
+  return { version: 1, ticksPerScene: timeline.tickCount ?? timeline.scenes[0]?.countdown.length, eventCount: events.length, events };
 };
 
+// Every scene gets 'slide' (entrance) and 'reveal'; only non-final scenes get 'whoosh' -- the final
+// scene skips its outgoing transition entirely (see buildSceneTimeline's isLastScene handling).
 export const buildSfxSchedule = timeline => {
   if (!Array.isArray(timeline?.scenes) || timeline.scenes.length === 0) throw new Error('A scene timeline is required to schedule SFX.');
-  const events = timeline.scenes.flatMap((scene, sceneIndex) => [
-    { sceneIndex, type: 'entrance', sceneTime: 0, timestamp: scene.start },
-    { sceneIndex, type: 'reveal', sceneTime: scene.revealTime, timestamp: scene.start + scene.revealTime },
-    { sceneIndex, type: 'transition', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead },
-  ]).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
+  const events = timeline.scenes.flatMap((scene, sceneIndex) => {
+    const sceneEvents = [
+      { sceneIndex, type: 'slide', sceneTime: 0, timestamp: scene.start },
+      { sceneIndex, type: 'reveal', sceneTime: scene.revealTime, timestamp: scene.start + scene.revealTime },
+    ];
+    if (!scene.isLastScene) sceneEvents.push({ sceneIndex, type: 'whoosh', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead });
+    return sceneEvents;
+  }).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
   assertCompleteSfxSchedule({ timeline, events });
-  return { version: 1, eventsPerScene: SFX_EVENT_TYPES.length, eventCount: events.length, events };
+  return { version: 1, eventCount: events.length, events };
 };
 
 export const assertCompleteSfxSchedule = ({ timeline, events }) => {
   if (!Array.isArray(timeline?.scenes) || !Array.isArray(events)) throw new Error('Timeline and SFX events are required.');
+  let expectedTotal = 0;
   for (let sceneIndex = 0; sceneIndex < timeline.scenes.length; sceneIndex += 1) {
     const scene = timeline.scenes[sceneIndex]; const sceneEvents = events.filter(event => event.sceneIndex === sceneIndex);
-    if (sceneEvents.length !== SFX_EVENT_TYPES.length) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain ${SFX_EVENT_TYPES.length} events; found ${sceneEvents.length}.`);
-    for (const type of SFX_EVENT_TYPES) {
+    const expectedTypes = scene.isLastScene ? SFX_EVENT_TYPES.filter(type => type !== 'whoosh') : SFX_EVENT_TYPES;
+    expectedTotal += expectedTypes.length;
+    if (sceneEvents.length !== expectedTypes.length) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain ${expectedTypes.length} events; found ${sceneEvents.length}.`);
+    for (const type of expectedTypes) {
       const matching = sceneEvents.filter(event => event.type === type);
       if (matching.length !== 1) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain exactly one ${type} event.`);
-      const expected = type === 'entrance' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
+      const expected = type === 'slide' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
       if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} ${type} event is not at its intended timestamp.`);
     }
+    if (scene.isLastScene && sceneEvents.some(event => event.type === 'whoosh')) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} is the final scene and must not schedule a whoosh.`);
   }
-  if (events.length !== timeline.scenes.length * SFX_EVENT_TYPES.length) throw new Error('SFX validation failed: the schedule contains unexpected extra events.');
+  if (events.length !== expectedTotal) throw new Error('SFX validation failed: the schedule contains unexpected extra events.');
   return true;
 };
 
-export const createLocalSfx = async ({ audioDir }) => {
+// Generic SFX synthesized purely from ffmpeg lavfi noise/sine sources (see sfx-synth.js) -- nothing
+// sampled or extracted from any reference/third-party video, so there is no copyright exposure.
+// Generated once and cached on disk (fingerprinted against config/audio-spec.json's sfx/mix
+// sections); every job just copies the cached files into its own workspace.
+export const createLocalSfx = async ({ audioDir, spec = getAudioSpec() }) => {
   const sfxDir = path.join(audioDir, 'sfx'); fs.mkdirSync(sfxDir, { recursive: true });
-  const entrancePath = path.join(sfxDir, 'entrance.wav'); const transitionPath = path.join(sfxDir, 'transition.wav'); const revealPath = path.join(sfxDir, 'reveal.wav');
-  const countdownSequencePath = path.join(sfxDir, 'countdown-sequence.wav');
-  // Procedurally synthesized via FFmpeg lavfi sources (sine tones + filtered noise) — not sourced
-  // or extracted from any reference/third-party video, so there is no copyright exposure.
-  const sources = {
-    entrance: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-scene-entrance-impact.wav'),
-    reveal: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-result-reveal-sting.wav'),
-    transition: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-scene-transition-whoosh.wav'),
-    countdownSequence: path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-countdown-sequence.wav'),
-  };
-  for (const source of [sources.entrance, sources.reveal, sources.transition, sources.countdownSequence]) if (!fs.existsSync(source) || fs.statSync(source).size <= 44) throw new Error(`Reusable generated SFX asset is missing: ${source}`);
-  fs.copyFileSync(sources.entrance, entrancePath); fs.copyFileSync(sources.reveal, revealPath); fs.copyFileSync(sources.transition, transitionPath);
-  fs.copyFileSync(sources.countdownSequence, countdownSequencePath);
-  return {
-    provider: 'procedurally-generated',
-    entrance: { filename: path.basename(sources.entrance), localPath: entrancePath, volume: 0.16 },
-    reveal: { filename: path.basename(sources.reveal), localPath: revealPath, volume: 0.21 },
-    transition: { filename: path.basename(sources.transition), localPath: transitionPath, volume: 0.125 },
-    countdownSequence: { filename: path.basename(sources.countdownSequence), localPath: countdownSequencePath, volume: 0.17, duration: WYR_TEMPLATE.timing.countdownSequenceDuration },
-  };
+  const cacheDir = path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-cache');
+  const { files, volumes } = ensureSfxAssets({ cacheDir, spec });
+  const result = { provider: 'procedurally-generated' };
+  for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
+    const destination = path.join(sfxDir, `${name}.wav`);
+    fs.copyFileSync(files[name], destination);
+    result[name] = { filename: `${name}.wav`, localPath: destination, volume: volumes[name] };
+  }
+  return result;
 };

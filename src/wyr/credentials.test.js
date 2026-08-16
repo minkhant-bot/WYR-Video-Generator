@@ -75,7 +75,7 @@ test('pipeline defaults to a slower natural Edge speaking rate', () => {
 
 test('pipeline caps scene growth tightly enough to keep the finished video under 60 seconds', () => {
   const original = process.env.WYR_MAX_SCENE_DURATION;
-  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 7.25); }
+  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 9.2); }
   finally { original === undefined ? delete process.env.WYR_MAX_SCENE_DURATION : process.env.WYR_MAX_SCENE_DURATION = original; }
 });
 

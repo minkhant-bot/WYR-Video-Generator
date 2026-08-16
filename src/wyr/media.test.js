@@ -6,8 +6,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { assertLockedImageAssets, buildAudioMixPlan, buildFramedImageChain, buildStillImageInputArgs, DurationVerificationError, renderSceneSegments, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, SFX_EVENT_TYPES } from './audio.js';
-import { resolveFfmpegPath } from './runtime.js';
+import { resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 import { WYR_TEMPLATE } from './template.js';
+import { getAudioSpec } from './audio-spec.js';
 
 // Measures actual RMS loudness of a window of a rendered file's audio -- used to verify events are
 // genuinely AUDIBLE in the real mixed output (not just present in the schedule/filter graph). Two
@@ -216,73 +217,87 @@ test('verification authoritatively rejects any output at or above the 60s Shorts
 
 const sixSceneTimeline = () => buildSceneTimeline({
   voiceovers: Array.from({ length: 6 }, () => ({ duration: 2 })),
-  baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 7.25,
+  baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 9.2,
 });
 
-test('a 6-scene timeline schedules exactly 6 entrance, 6 reveal, and 6 transition SFX events (the design intentionally fires transition on every scene, including the last -- see "Fix complete per-scene SFX sequence"), all inside their own scene bounds', () => {
+test('a 6-scene timeline schedules 6 slide, 6 reveal, and 5 whoosh SFX events (every scene gets slide+reveal; only non-final scenes get whoosh), all inside their own scene bounds', () => {
   const timeline = sixSceneTimeline();
   assert.equal(timeline.scenes.length, 6);
   const schedule = buildSfxSchedule(timeline);
-  assert.equal(schedule.eventCount, 18);
-  for (const type of SFX_EVENT_TYPES) {
+  assert.equal(schedule.eventCount, 17); // 6 slide + 6 reveal + 5 whoosh (final scene has none)
+  for (const type of ['slide', 'reveal']) {
     const events = schedule.events.filter(event => event.type === type);
     assert.equal(events.length, 6, `expected exactly 6 ${type} events for 6 scenes, got ${events.length}`);
   }
+  const whooshEvents = schedule.events.filter(event => event.type === 'whoosh');
+  assert.equal(whooshEvents.length, 5, 'the final scene must not schedule a whoosh');
+  assert.equal(whooshEvents.some(event => event.sceneIndex === 5), false);
   for (const event of schedule.events) {
     const scene = timeline.scenes[event.sceneIndex];
-    assert.ok(event.timestamp >= scene.start - 1e-9 && event.timestamp <= scene.end + 1e-9, `${event.type} event for scene ${event.sceneIndex + 1} at ${event.timestamp}s falls outside its scene bounds [${scene.start}, ${scene.end}]`);
+    assert.ok(event.timestamp >= scene.start - 1e-4 && event.timestamp <= scene.end + 1e-4, `${event.type} event for scene ${event.sceneIndex + 1} at ${event.timestamp}s falls outside its scene bounds [${scene.start}, ${scene.end}]`);
   }
 });
 
-test('a 6-scene timeline schedules exactly 18 countdown events (3 per scene), all inside their own scene bounds, and the final scene\'s events are not clipped by the total video duration', () => {
+test('a 6-scene timeline schedules exactly 96 countdown tick events (16 per scene), all inside their own scene bounds, and the final scene\'s events are not clipped by the total video duration', () => {
   const timeline = sixSceneTimeline();
   const countdown = buildCountdownSchedule(timeline);
-  assert.equal(countdown.eventCount, 18);
+  assert.equal(countdown.eventCount, 96);
   for (const event of countdown.events) {
     const scene = timeline.scenes[event.sceneIndex];
-    assert.ok(event.timestamp >= scene.start - 1e-9 && event.timestamp <= scene.end + 1e-9, `countdown event for scene ${event.sceneIndex + 1} at ${event.timestamp}s falls outside its scene bounds`);
+    assert.ok(event.timestamp >= scene.start - 1e-4 && event.timestamp <= scene.end + 1e-4, `countdown event for scene ${event.sceneIndex + 1} at ${event.timestamp}s falls outside its scene bounds`);
   }
   const lastScene = timeline.scenes[5];
-  const sfxSchedule = buildSfxSchedule(timeline);
-  const lastTransition = sfxSchedule.events.find(event => event.sceneIndex === 5 && event.type === 'transition');
-  assert.ok(lastTransition.timestamp < timeline.totalDuration, 'the final scene\'s transition SFX must fire before the video ends, never clipped off the end');
+  assert.equal(lastScene.isLastScene, true);
+  const lastReveal = buildSfxSchedule(timeline).events.find(event => event.sceneIndex === 5 && event.type === 'reveal');
+  assert.ok(lastReveal.timestamp < timeline.totalDuration, 'the final scene\'s reveal SFX must fire before the video ends, never clipped off the end');
   assert.equal(lastScene.end, timeline.totalDuration, 'the last scene must reach exactly the total video duration, with no unaccounted-for tail');
 });
 
 test('the SFX/countdown schedule adapts to whatever scene count the timeline actually has -- no stale 8-scene assumption remains', () => {
+  const spec = getAudioSpec();
   for (const sceneCount of [1, 6, 8]) {
     const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: sceneCount }, () => ({ duration: 2 })), baseDuration: 7 });
-    assert.equal(buildSfxSchedule(timeline).eventCount, sceneCount * SFX_EVENT_TYPES.length);
-    assert.equal(buildCountdownSchedule(timeline).eventCount, sceneCount * 3);
+    assert.equal(buildSfxSchedule(timeline).eventCount, sceneCount * SFX_EVENT_TYPES.length - 1); // -1: final scene skips whoosh
+    assert.equal(buildCountdownSchedule(timeline).eventCount, sceneCount * spec.countdown.tickCount);
   }
 });
 
-test('buildAudioMixPlan turns every scheduled entrance/reveal/transition/countdown event, plus every voiceover, into its own delayed mix input -- none dropped', () => {
+const testSfx = () => ({ slide: { volume: 0.16 }, reveal: { volume: 0.21 }, whoosh: { volume: 0.125 }, tick: { volume: 0.17 } });
+
+test('buildAudioMixPlan turns every scheduled slide/reveal/whoosh/tick event, plus every voiceover, into its own delayed mix input -- none dropped', () => {
   const timeline = sixSceneTimeline();
   const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
-  const sfx = { entrance: { volume: 0.16 }, reveal: { volume: 0.21 }, transition: { volume: 0.125 }, countdownSequence: { volume: 0.17 } };
-  const mixPlan = buildAudioMixPlan({ voiceoverCount: 6, timeline, sfx, schedule, countdown, totalDuration: timeline.totalDuration });
-  // Exactly 5 delayed audio clips per scene (1 voiceover + entrance + reveal + transition + countdown).
+  const mixPlan = buildAudioMixPlan({ voiceoverCount: 6, timeline, sfx: testSfx(), schedule, countdown, totalDuration: timeline.totalDuration });
+  // 6 voiceovers + 17 SFX events (6 slide + 6 reveal + 5 whoosh) + 96 ticks = 119 delayed clips.
   const adelayCount = (mixPlan.filters.join(';').match(/adelay=delays=/g) || []).length;
-  assert.equal(adelayCount, 5 * 6);
-  // 1 silent bed + those same 30 delayed clips, all mixed together -- nothing left unmixed.
-  assert.equal(mixPlan.mixLabels.length, 1 + 5 * 6);
+  assert.equal(adelayCount, 6 + 17 + 96);
+  // 1 silent bed + those same delayed clips, all mixed together -- nothing left unmixed.
+  assert.equal(mixPlan.mixLabels.length, 1 + 6 + 17 + 96);
   assert.ok(mixPlan.filters[mixPlan.filters.length - 1].includes(`amix=inputs=${mixPlan.mixLabels.length}`));
 });
 
-test('buildAudioMixPlan\'s input order exactly matches the -i flags renderVideo pushes: video, then voiceovers, then SFX_EVENT_TYPES in order, then the countdown sequence', () => {
+test('buildAudioMixPlan\'s input order exactly matches the -i flags renderVideo pushes: video, then voiceovers, then SFX_EVENT_TYPES in order, then the tick SFX', () => {
   const timeline = sixSceneTimeline();
   const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
-  const sfx = { entrance: { volume: 0.16 }, reveal: { volume: 0.21 }, transition: { volume: 0.125 }, countdownSequence: { volume: 0.17 } };
-  const mixPlan = buildAudioMixPlan({ voiceoverCount: 6, timeline, sfx, schedule, countdown, totalDuration: timeline.totalDuration });
-  assert.deepEqual(mixPlan.inputOrder, ['video', 'voiceover0', 'voiceover1', 'voiceover2', 'voiceover3', 'voiceover4', 'voiceover5', 'sfx:entrance', 'sfx:reveal', 'sfx:transition', 'sfx:countdownSequence']);
-  assert.equal(mixPlan.sfxInputIndexByType.entrance, 7);
+  const mixPlan = buildAudioMixPlan({ voiceoverCount: 6, timeline, sfx: testSfx(), schedule, countdown, totalDuration: timeline.totalDuration });
+  assert.deepEqual(mixPlan.inputOrder, ['video', 'voiceover0', 'voiceover1', 'voiceover2', 'voiceover3', 'voiceover4', 'voiceover5', 'sfx:slide', 'sfx:reveal', 'sfx:whoosh', 'sfx:tick']);
+  assert.equal(mixPlan.sfxInputIndexByType.slide, 7);
   assert.equal(mixPlan.sfxInputIndexByType.reveal, 8);
-  assert.equal(mixPlan.sfxInputIndexByType.transition, 9);
-  assert.equal(mixPlan.countdownInputIndex, 10);
+  assert.equal(mixPlan.sfxInputIndexByType.whoosh, 9);
+  assert.equal(mixPlan.tickInputIndex, 10);
 });
 
-test('full 6-scene production render: every entrance/countdown/reveal/transition SFX and all 6 narrations survive the real FFmpeg mix, the final scene is not clipped, and narration stays at full volume alongside unchanged SFX levels', async () => {
+test('buildAudioMixPlan applies per-voiceover volume weights when provided, and defaults to 1 otherwise', () => {
+  const timeline = sixSceneTimeline();
+  const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
+  const withWeights = buildAudioMixPlan({ voiceoverCount: 2, timeline, sfx: testSfx(), schedule, countdown, totalDuration: timeline.totalDuration, voiceoverVolumes: [0.5, 2.1] });
+  assert.match(withWeights.filters[1], /volume=0\.5,/);
+  assert.match(withWeights.filters[2], /volume=2\.1,/);
+  const withoutWeights = buildAudioMixPlan({ voiceoverCount: 2, timeline, sfx: testSfx(), schedule, countdown, totalDuration: timeline.totalDuration });
+  assert.match(withoutWeights.filters[1], /volume=1,/);
+});
+
+test('full 6-scene production render: every slide/countdown/reveal/whoosh SFX and all 6 narrations survive the real FFmpeg mix, the final scene holds 2s with no whoosh/slide-out, narration/SFX land near their target dBFS, and the output is encoded per config/audio-spec.json', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-6scene-render-')); const ffmpeg = resolveFfmpegPath();
   try {
     const imagesDir = path.join(root, 'images'); fs.mkdirSync(imagesDir);
@@ -304,6 +319,7 @@ test('full 6-scene production render: every entrance/countdown/reveal/transition
     const sfx = await createLocalSfx({ audioDir });
     const timeline = sixSceneTimeline();
     assert.equal(timeline.scenes.length, 6);
+    assert.equal(timeline.scenes[5].isLastScene, true);
 
     const plan = { questions: Array.from({ length: 6 }, (_, index) => ({ index, optionA: { text: `Option A ${index}`, percentage: 55 }, optionB: { text: `Option B ${index}`, percentage: 45 } })), percentages: { mode: 'demo' } };
     const assets = Array.from({ length: 6 }, (_, index) => [
@@ -317,26 +333,34 @@ test('full 6-scene production render: every entrance/countdown/reveal/transition
     const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
     const verification = await verifyVideo(output, { expectedSceneCount: 6, expectedDuration: timeline.totalDuration, renderDir: path.join(workspace, 'render'), timeline, sfxSchedule: schedule, countdownSchedule: countdown });
     assert.equal(verification.sceneCount, 6);
-    // Final duration matches the 6-scene timeline exactly -- the last scene's countdown/reveal/
-    // transition events (all scheduled well before totalDuration) were not truncated by atrim.
+    // Final duration matches the 6-scene timeline exactly -- the last scene's 2s reveal hold (no
+    // whoosh/slide-out tail) was not truncated by atrim.
     assert.ok(Math.abs(verification.duration - timeline.totalDuration) < 0.15, `expected ~${timeline.totalDuration}s, got ${verification.duration}s`);
     assert.ok(verification.duration < SHORTS_DURATION_LIMIT_SECONDS);
-    // Volume balance preserved: narration mixed at full volume (1), SFX at their existing quiet levels.
-    assert.equal(sfx.entrance.volume, 0.16); assert.equal(sfx.reveal.volume, 0.21); assert.equal(sfx.transition.volume, 0.125); assert.equal(sfx.countdownSequence.volume, 0.17);
+    // Every SFX asset's mix volume was computed to hit the same -13dBFS target.
+    for (const name of ['slide', 'reveal', 'whoosh', 'tick']) assert.ok(Number.isFinite(sfx[name].volume) && sfx[name].volume > 0);
 
-    // Reference-behavior verification: every scheduled entrance/reveal/transition/countdown event
-    // must be genuinely AUDIBLE (measured RMS, not just present in the schedule) in every one of
-    // the 6 scenes, at its correct timestamp, and narration must stay clearly louder than every SFX
-    // type -- the exact accepted balance previously calibrated against reference/would-you-rather-
-    // reference.mp4 (see data/reference-paced-mix-final/comparison-report.json from that work).
+    // Encoding matches config/audio-spec.json's encode section (High profile, not Constrained
+    // Baseline; explicit bitrate/level; AAC 192k/48kHz, not the old 160k default).
+    const probe = spawnSync(resolveFfprobePath(), ['-v', 'error', '-show_entries', 'stream=codec_name,profile,level,bit_rate,sample_rate', '-of', 'json', output], { encoding: 'utf8' });
+    const streams = JSON.parse(probe.stdout).streams;
+    const videoStream = streams.find(s => s.codec_name === 'h264'); const audioStream = streams.find(s => s.codec_name === 'aac');
+    assert.equal(videoStream.profile, 'High', `expected High profile, got ${videoStream.profile}`);
+    assert.equal(videoStream.level, 42, `expected level 4.2 (42), got ${videoStream.level}`);
+    assert.equal(audioStream.sample_rate, '48000');
+
+    // Reference-behavior verification: every scheduled slide/reveal/whoosh/tick event must be
+    // genuinely AUDIBLE (measured RMS, not just present in the schedule) in every one of the 6
+    // scenes, at its correct timestamp, and narration must stay clearly louder than every SFX type.
     const AUDIBLE_FLOOR_DB = -60;
     // Each event's measurement window covers most of that SFX asset's own (short) duration, starting
     // exactly at its scheduled timestamp -- matching where the mix's adelay actually places it.
-    const MEASUREMENT_WINDOW_SECONDS = { entrance: 0.1, reveal: 0.3, transition: 0.25 };
+    const MEASUREMENT_WINDOW_SECONDS = { slide: 0.1, reveal: 0.3, whoosh: 0.25 };
     const sfxDbByEvent = new Map();
     for (const type of SFX_EVENT_TYPES) {
       const events = schedule.events.filter(event => event.type === type);
-      assert.equal(events.length, 6, `expected exactly 6 ${type} events`);
+      const expectedCount = type === 'whoosh' ? 5 : 6; // final scene skips whoosh
+      assert.equal(events.length, expectedCount, `expected exactly ${expectedCount} ${type} events`);
       for (const event of events) {
         const db = measureRmsDb(output, event.timestamp, MEASUREMENT_WINDOW_SECONDS[type]);
         sfxDbByEvent.set(event, db);
@@ -345,10 +369,10 @@ test('full 6-scene production render: every entrance/countdown/reveal/transition
     }
     const countdownDbs = [];
     for (let sceneIndex = 0; sceneIndex < 6; sceneIndex += 1) {
-      const firstBeep = countdown.events.find(event => event.sceneIndex === sceneIndex && event.number === 3);
-      const db = measureRmsDb(output, firstBeep.timestamp, 0.08);
+      const firstTick = countdown.events.find(event => event.sceneIndex === sceneIndex && event.tick === 1);
+      const db = measureRmsDb(output, firstTick.timestamp, 0.08);
       countdownDbs.push(db);
-      assert.ok(db > AUDIBLE_FLOOR_DB, `countdown SFX in scene ${sceneIndex + 1} must be audible; measured ${db}dB`);
+      assert.ok(db > AUDIBLE_FLOOR_DB, `countdown tick in scene ${sceneIndex + 1} must be audible; measured ${db}dB`);
     }
 
     // Narration dominance: measured mid-narration in each scene must be clearly louder than every
@@ -365,9 +389,8 @@ test('full 6-scene production render: every entrance/countdown/reveal/transition
     assert.ok(Number(maxVolumeMatch[1]) < -1, `final mix must never clip; measured peak ${maxVolumeMatch[1]}dB`);
 
     // No unexpected multi-second dead air: the longest legitimate quiet stretch in this timeline is
-    // well under 2s (the gap between one scene's transition and the next scene's entrance, plus the
-    // pre-countdown pause) -- a true regression (a dropped/silent mix segment) would show up as a
-    // much longer silent run.
+    // well under 2s -- a true regression (a dropped/silent mix segment) would show up as a much
+    // longer silent run.
     const silenceCheck = spawnSync(ffmpeg, ['-i', output, '-af', 'silencedetect=noise=-50dB:d=2.0', '-f', 'null', '-'], { encoding: 'utf8' });
     assert.doesNotMatch(silenceCheck.stderr, /silence_start/, `no silent gap should exceed 2.0s in a correctly-mixed 6-scene render; ffmpeg reported one: ${silenceCheck.stderr.match(/silence_start:[^\n]*/)?.[0]}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

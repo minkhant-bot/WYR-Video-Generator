@@ -48,10 +48,13 @@ export const getConfig = () => {
     groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 30_000, 1_000, 60_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
-    // 6 scenes * 7.25s keeps the finished video at ~43.5s, comfortably under the 60s short-form
-    // limit. The upper bound (7.4) is deliberately tight: 6 * 7.4 = 44.4s, so no environment
-    // variable override can push a single misconfigured value anywhere near the 60s Shorts ceiling.
-    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 7.25, 6, 7.4),
+    // The per-scene tail (voice-start pause + countdown-pause + tick countdown + reveal hold +
+    // transition-out) is now ~6.02s on its own (see config/audio-spec.json's countdown/reveal
+    // timing), so the floor moved up from the old 3-2-1 countdown's ~4.17s tail. 6 scenes * 9.2s
+    // default keeps the finished video at ~55.2s; the upper bound (9.6) is deliberately tight:
+    // 6 * 9.6 = 57.6s, so no environment variable override can push a single misconfigured value
+    // anywhere near the 60s Shorts ceiling.
+    maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 9.2, 6.5, 9.6),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     imageRecoveryQueryRounds: integer('WYR_IMAGE_RECOVERY_QUERY_ROUNDS', 3, 0, 3),

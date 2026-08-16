@@ -1,11 +1,13 @@
 import { WYR_TEMPLATE } from './template.js';
+import { getCountdownSequenceDuration } from './audio-spec.js';
 
 // Mirrors audio.js's SCENE_TAIL_SECONDS exactly (voice start pause + narration-to-countdown gap +
-// countdown sequence + reveal hold + transition out) -- everything a scene costs beyond the spoken
+// countdown ticks + reveal hold + transition out) -- everything a scene costs beyond the spoken
 // narration itself. Recomputed here (not imported from audio.js) so this module stays free of the
 // EdgeTTS/ffmpeg runtime dependencies audio.js pulls in -- this runs during question SELECTION,
 // before any TTS call, and must be safe to import from pure, DB-free selection code.
-const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + WYR_TEMPLATE.timing.countdownSequenceDuration + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+// (audio-spec.js is a plain fs/JSON reader, no ffmpeg/EdgeTTS dependency, so it's safe to import here.)
+const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + getCountdownSequenceDuration() + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
 const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_TEMPLATE.canvas.fps;
 
 // Narration text exactly as audio.js's buildNarration constructs it ("Option A, or option b?"),

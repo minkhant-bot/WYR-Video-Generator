@@ -6,6 +6,7 @@ import path from 'node:path';
 import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, RATE_COMPRESSION_LADDER, TtsGenerationError } from './audio.js';
 import { WYR_TEMPLATE } from './template.js';
 import { assertProductionAudioInputs } from './media.js';
+import { getAudioSpec, getCountdownSequenceDuration } from './audio-spec.js';
 
 const plan = { questions: [{ optionA: { text: 'Own a mountain cabin' }, optionB: { text: 'Travel first class every month' } }] };
 test('narration reads only both choices, with no prompt prefix or percentages', () => {
@@ -28,7 +29,7 @@ test('voice generation enforces concurrency, uses independent clients, and prese
     assert.deepEqual(voiceovers.map(voiceover => voiceover.duration), [1, 2, 3, 4, 5, 6]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
-const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + WYR_TEMPLATE.timing.countdownSequenceDuration + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
+const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + getCountdownSequenceDuration() + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
 const rateCompressionHarness = durationsByRate => {
   const calls = [];
   return {
@@ -42,11 +43,11 @@ test('narration that would blow the scene duration budget is compressed with fas
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-compress-'));
   try {
     const harness = rateCompressionHarness({ '-10%': 5.5, '-5%': 5.0, '+0%': 4.4, '+8%': 3.6, '+15%': 3.0, '+22%': 2.4 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 7.25 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 9.3 });
     assert.deepEqual(harness.calls, ['-10%', '-5%', '+0%', '+8%', '+15%']);
     assert.equal(voiceovers[0].rate, '+15%');
     assert.equal(voiceovers[0].duration, 3.0);
-    assert.ok(SCENE_TAIL_SECONDS + voiceovers[0].duration <= 7.25);
+    assert.ok(SCENE_TAIL_SECONDS + voiceovers[0].duration <= 9.3);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -54,7 +55,7 @@ test('narration that already fits the scene duration budget is not regenerated o
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-no-compress-'));
   try {
     const harness = rateCompressionHarness({ '-10%': 2.0 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 7.25 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 9.3 });
     assert.deepEqual(harness.calls, ['-10%']);
     assert.equal(voiceovers[0].rate, '-10%');
     assert.equal(voiceovers[0].duration, 2.0);
@@ -143,27 +144,35 @@ test('RATE_COMPRESSION_LADDER only ever speeds narration up relative to the conf
   assert.deepEqual(sorted, [...sorted].sort((left, right) => left - right));
 });
 
-// Fixed production policy: every generated video uses exactly 6 questions/scenes.
+// Fixed production policy: every generated video uses exactly 6 questions/scenes. The per-scene
+// tail is now ~6.02s (16-tick countdown + reveal gap + reveal hold + transition-out), up from the
+// old 3-2-1 countdown's ~4.17s -- so the production default maximumSceneDuration moved to 9.2s
+// (see config.js) to keep comfortable headroom under the 60s ceiling.
 test('six scenes at the production duration budget keep the finished video comfortably under 60 seconds', () => {
-  const maximumSceneDuration = 7.25;
-  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.05;
+  const maximumSceneDuration = 9.2;
+  // The final scene's tail is slightly longer than SCENE_TAIL_SECONDS (2s reveal hold instead of
+  // revealHoldDuration + transitionOutDuration), so leave extra margin, not just 0.05s.
+  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.2;
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
   assert.equal(timeline.scenes.length, 6);
   assert.ok(timeline.totalDuration < 60, `expected < 60s, got ${timeline.totalDuration}`);
-  assert.ok(timeline.totalDuration <= 44, `expected comfortable headroom (<=44s) with only 6 scenes, got ${timeline.totalDuration}`);
-  assert.ok(timeline.totalDuration >= 40);
+  assert.ok(timeline.totalDuration <= 56, `expected comfortable headroom (<=56s) with only 6 scenes, got ${timeline.totalDuration}`);
+  assert.ok(timeline.totalDuration >= 50);
 });
 
-test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
-test('timeline rejects narration that would create an excessive scene', () => { assert.throws(() => buildSceneTimeline({ voiceovers: [{ duration: 12 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }), /exceed/); });
-test('SFX schedule contains entrance, reveal, and transition at the visual timestamps in every scene', () => {
+test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 14 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 12.2); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
+test('timeline rejects narration that would create an excessive scene', () => { assert.throws(() => buildSceneTimeline({ voiceovers: [{ duration: 20 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 14 }), /exceed/); });
+test('SFX schedule contains slide, reveal, and whoosh at the visual timestamps in every scene except the last (which skips whoosh)', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
   const schedule = buildSfxSchedule(timeline);
-  assert.equal(schedule.eventCount, 24); assert.equal(schedule.eventsPerScene, 3);
+  assert.equal(schedule.eventCount, 8 * 3 - 1); // every scene gets slide+reveal+whoosh, except the last (no whoosh)
   for (const scene of timeline.scenes) {
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
-    assert.deepEqual(events.map(event => event.type), ['entrance', 'reveal', 'transition']);
-    assert.deepEqual(events.map(event => event.timestamp), [scene.start, scene.start + scene.revealTime, scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead].map(value => Number(value.toFixed(6))));
+    const expectedTypes = scene.isLastScene ? ['slide', 'reveal'] : ['slide', 'reveal', 'whoosh'];
+    assert.deepEqual(events.map(event => event.type), expectedTypes);
+    const expectedTimestamps = [scene.start, scene.start + scene.revealTime];
+    if (!scene.isLastScene) expectedTimestamps.push(scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
+    assert.deepEqual(events.map(event => event.timestamp), expectedTimestamps.map(value => Number(value.toFixed(6))));
   }
 });
 test('SFX validation fails if any scene silently loses an expected event', () => {
@@ -172,28 +181,34 @@ test('SFX validation fails if any scene silently loses an expected event', () =>
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events }), /scene 7 must contain 3 events; found 2/);
 });
 test('SFX validation rejects duplicate and mistimed events', () => {
-  const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }], baseDuration: 7 }); const schedule = buildSfxSchedule(timeline);
+  const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }, { duration: 4 }], baseDuration: 7 }); const schedule = buildSfxSchedule(timeline);
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events: [...schedule.events, schedule.events[0]] }), /scene 1 must contain 3 events; found 4/);
   const mistimed = schedule.events.map(event => event.type === 'reveal' ? { ...event, timestamp: event.timestamp + 0.1 } : event);
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events: mistimed }), /reveal event is not at its intended timestamp/);
 });
-test('countdown schedules the three source cue onsets and reveals when the sequence ends in all eight scenes', () => {
-  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7, maximumSceneDuration: 11 });
-  const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 24);
+test('the final scene never schedules a whoosh', () => {
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 3 }, () => ({ duration: 4 })), baseDuration: 7 });
+  const schedule = buildSfxSchedule(timeline);
+  assert.equal(schedule.events.filter(event => event.sceneIndex === 2 && event.type === 'whoosh').length, 0);
+  assert.equal(schedule.events.filter(event => event.sceneIndex === 0 && event.type === 'whoosh').length, 1);
+});
+test('countdown schedules a 16-tick train per scene, spaced per config/audio-spec.json, and reveals after the last tick', () => {
+  const spec = getAudioSpec();
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7, maximumSceneDuration: 14 });
+  const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 8 * spec.countdown.tickCount);
+  assert.equal(schedule.ticksPerScene, spec.countdown.tickCount);
   for (const scene of timeline.scenes) {
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
-    assert.deepEqual(events.map(event => event.number), [3, 2, 1]);
+    assert.deepEqual(events.map(event => event.tick), Array.from({ length: spec.countdown.tickCount }, (_, index) => index + 1));
     assert.ok(events[0].sceneTime > scene.voiceStart + scene.voiceDuration);
-    events.forEach((event, index) => assert.ok(Math.abs((event.sceneTime - scene.countdownStart) - WYR_TEMPLATE.timing.countdownCueOffsets[index]) < 0.000001));
-    assert.equal(Number((scene.countdownStart + WYR_TEMPLATE.timing.countdownSequenceDuration).toFixed(6)), Number(scene.revealTime.toFixed(6)));
+    events.forEach((event, index) => assert.ok(Math.abs((event.sceneTime - scene.countdownStart) - index * spec.countdown.tickSpacingSeconds) < 0.000001));
+    assert.equal(Number((scene.countdownStart + getCountdownSequenceDuration()).toFixed(6)), Number(scene.revealTime.toFixed(6)));
   }
 });
-test('countdown validation fails when any scene is missing 3, 2, or 1', () => {
+test('countdown validation fails when any scene is missing a tick', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
-  for (const number of [3, 2, 1]) {
-    const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.number === number));
-    assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 3, 2, and 1/);
-  }
+  const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.tick === 1));
+  assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 16 ticks/);
 });
 test('countdown validation rejects a narration-to-countdown gap over 0.20s', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }], baseDuration: 7 });
@@ -201,51 +216,49 @@ test('countdown validation rejects a narration-to-countdown gap over 0.20s', () 
   const invalidTimeline = { ...timeline, scenes: timeline.scenes.map(scene => ({ ...scene, countdownStart: scene.countdownStart + 0.11 })) };
   assert.throws(() => assertCompleteCountdownSchedule({ timeline: invalidTimeline, events: schedule.events }), /narration-to-countdown gap is 0\.210s/);
 });
-test('local SFX always installs the production countdown sequence', async () => {
+test('local SFX installs the generic, cache-backed tick/reveal/whoosh/slide assets', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-'));
   try {
     const sfx = await createLocalSfx({ audioDir: dir });
     assert.equal(sfx.provider, 'procedurally-generated');
-    assert.equal(sfx.countdownSequence.filename, 'generated-countdown-sequence.wav');
-    assert.equal(sfx.countdownSequence.duration, WYR_TEMPLATE.timing.countdownSequenceDuration);
-    assert.deepEqual(fs.readFileSync(sfx.countdownSequence.localPath), fs.readFileSync(path.resolve('assets/sfx/generated-countdown-sequence.wav')));
+    for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
+      assert.equal(sfx[name].filename, `${name}.wav`);
+      assert.ok(fs.statSync(sfx[name].localPath).size > 44, `${name} SFX must be a real, non-empty wav`);
+      assert.ok(Number.isFinite(sfx[name].volume) && sfx[name].volume > 0, `${name} SFX must carry a computed positive volume multiplier`);
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
-test('bundled SFX assets carry no reference-video/third-party provenance and no copyrighted background music is used', () => {
-  const sfxDir = path.resolve('assets/sfx');
-  const files = fs.readdirSync(sfxDir).filter(name => name.endsWith('.wav'));
-  assert.ok(files.length > 0);
-  for (const name of files) {
-    assert.doesNotMatch(name, /^reference-/, `${name} is named like an asset extracted from a reference video`);
-    const bytes = fs.readFileSync(path.join(sfxDir, name));
-    // A prior asset set embedded a short-form-video platform ID in its WAV metadata comment,
-    // proving it was extracted from someone else's video rather than generated in-house — the
-    // root cause of a real copyright takedown. Guard against that ever happening again.
-    assert.doesNotMatch(bytes.toString('latin1'), /\bvid:[a-z0-9]{10,}/i, `${name} contains a suspicious embedded video-ID tag`);
-  }
+test('cached SFX assets carry no reference-video/third-party provenance and no copyrighted background music is used', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-provenance-'));
+  try {
+    const sfx = await createLocalSfx({ audioDir: dir });
+    for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
+      const bytes = fs.readFileSync(sfx[name].localPath);
+      // A prior asset set embedded a short-form-video platform ID in its WAV metadata comment,
+      // proving it was extracted from someone else's video rather than generated in-house — the
+      // root cause of a real copyright takedown. Guard against that ever happening again. These
+      // assets are synthesized from ffmpeg lavfi noise/sine sources only (see sfx-synth.js), so
+      // this should always pass trivially -- it exists to catch a future regression, not this one.
+      assert.doesNotMatch(bytes.toString('latin1'), /\bvid:[a-z0-9]{10,}/i, `${name} SFX contains a suspicious embedded video-ID tag`);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
-test('production and fixture audio validation cannot silently omit the countdown sequence', () => {
+test('production and fixture audio validation cannot silently omit any of the four SFX assets', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });
-  const base = { entrance: { localPath: 'entrance.wav' }, reveal: { localPath: 'reveal.wav' }, transition: { localPath: 'transition.wav' } };
+  const base = { slide: { localPath: 'slide.wav' }, reveal: { localPath: 'reveal.wav' }, whoosh: { localPath: 'whoosh.wav' } }; // missing 'tick'
   assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: base }), /all local SFX files/);
 });
 
-test('assertProductionAudioInputs verifies every SFX/voiceover file actually exists and is non-empty before render starts', () => {
+test('assertProductionAudioInputs verifies every SFX/voiceover file actually exists and is non-empty before render starts', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-audio-input-check-'));
   try {
     const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });
-    const realSfxPath = name => path.resolve('assets/sfx', name);
-    const validSfx = {
-      entrance: { localPath: realSfxPath('generated-scene-entrance-impact.wav') },
-      reveal: { localPath: realSfxPath('generated-result-reveal-sting.wav') },
-      transition: { localPath: realSfxPath('generated-scene-transition-whoosh.wav') },
-      countdownSequence: { localPath: realSfxPath('generated-countdown-sequence.wav') },
-    };
+    const validSfx = await createLocalSfx({ audioDir: dir });
     // All real, non-empty, on-disk files: passes.
     assert.equal(assertProductionAudioInputs({ plan, timeline, sfx: validSfx }), true);
 
     // A missing file (deleted/never-written) is caught with a clear message.
-    const missing = { ...validSfx, transition: { localPath: path.join(dir, 'does-not-exist.wav') } };
+    const missing = { ...validSfx, whoosh: { localPath: path.join(dir, 'does-not-exist.wav') } };
     assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: missing }), /Required render input is missing/);
 
     // A zero-byte file (write interrupted/corrupt) is also caught, not just a missing one.
