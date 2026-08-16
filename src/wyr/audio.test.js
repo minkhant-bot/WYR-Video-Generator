@@ -43,11 +43,11 @@ test('narration that would blow the scene duration budget is compressed with fas
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-compress-'));
   try {
     const harness = rateCompressionHarness({ '-10%': 5.5, '-5%': 5.0, '+0%': 4.4, '+8%': 3.6, '+15%': 3.0, '+22%': 2.4 });
-    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 9.3 });
+    const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000, ttsFactory: harness.ttsFactory, measureDuration: harness.measureDuration, sceneDurationBudget: 7.25 });
     assert.deepEqual(harness.calls, ['-10%', '-5%', '+0%', '+8%', '+15%']);
     assert.equal(voiceovers[0].rate, '+15%');
     assert.equal(voiceovers[0].duration, 3.0);
-    assert.ok(SCENE_TAIL_SECONDS + voiceovers[0].duration <= 9.3);
+    assert.ok(SCENE_TAIL_SECONDS + voiceovers[0].duration <= 7.25);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -146,7 +146,9 @@ test('RATE_COMPRESSION_LADDER only ever speeds narration up relative to the conf
 
 test('eight scenes at the production duration budget keep the finished video safely under 60 seconds', () => {
   const maximumSceneDuration = 7.25;
-  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.05;
+  // The final scene's tail is slightly longer than SCENE_TAIL_SECONDS (2s reveal hold instead of
+  // revealHoldDuration + transitionOutDuration), so leave extra margin, not just 0.05s.
+  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.2;
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
   assert.equal(timeline.scenes.length, 8);
   assert.ok(timeline.totalDuration < 60, `expected < 60s, got ${timeline.totalDuration}`);
@@ -154,7 +156,7 @@ test('eight scenes at the production duration budget keep the finished video saf
   assert.ok(timeline.totalDuration >= 55);
 });
 
-test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 14 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 12.2); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
+test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
 test('timeline rejects narration that would create an excessive scene', () => { assert.throws(() => buildSceneTimeline({ voiceovers: [{ duration: 20 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 14 }), /exceed/); });
 test('SFX schedule contains slide, reveal, and whoosh at the visual timestamps in every scene except the last (which skips whoosh)', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
@@ -186,7 +188,7 @@ test('the final scene never schedules a whoosh', () => {
   assert.equal(schedule.events.filter(event => event.sceneIndex === 2 && event.type === 'whoosh').length, 0);
   assert.equal(schedule.events.filter(event => event.sceneIndex === 0 && event.type === 'whoosh').length, 1);
 });
-test('countdown schedules a 16-tick train per scene, spaced per config/audio-spec.json, and reveals after the last tick', () => {
+test('countdown schedules a tick train per scene, spaced per config/audio-spec.json, and reveals after the last tick', () => {
   const spec = getAudioSpec();
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7, maximumSceneDuration: 14 });
   const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 8 * spec.countdown.tickCount);
@@ -202,7 +204,7 @@ test('countdown schedules a 16-tick train per scene, spaced per config/audio-spe
 test('countdown validation fails when any scene is missing a tick', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
   const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.tick === 1));
-  assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 16 ticks/);
+  assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain \d+ ticks/);
 });
 test('countdown validation rejects a narration-to-countdown gap over 0.20s', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }], baseDuration: 7 });

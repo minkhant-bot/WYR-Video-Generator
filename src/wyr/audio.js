@@ -127,7 +127,12 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
     // The final scene skips the outgoing whoosh/slide-out entirely: no transitionOutDuration tail,
     // just a fixed hold on the reveal before the video ends (see FINAL_SCENE_REVEAL_HOLD_SECONDS).
     const requiredDuration = isLastScene ? revealTime + finalSceneHoldSeconds : revealTime + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
-    const duration = frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
+    // The final scene is never padded out to baseDuration: every other scene's padding is masked
+    // by its outgoing whoosh (anchored to contentEnd, so it just floats later), but the final scene
+    // has no outgoing cue at all -- padding it would only add unmasked dead air after the hold.
+    const duration = isLastScene
+      ? frameCeil(Math.max(voiceover.duration + voicePaddingSeconds, requiredDuration))
+      : frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
     if (duration > maximumSceneDuration) throw new Error(`Scene ${index + 1} narration is ${voiceover.duration.toFixed(2)}s and would exceed the ${maximumSceneDuration}s scene limit. Regenerate shorter option text.`);
     // contentEnd === duration on the final scene (no transition-out tail to reserve), which also
     // means the outgoing slide motion in media.js (driven off contentEnd) never actually triggers

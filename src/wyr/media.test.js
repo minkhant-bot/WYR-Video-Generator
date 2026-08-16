@@ -212,10 +212,10 @@ test('a 6-scene timeline schedules 6 slide, 6 reveal, and 5 whoosh SFX events (e
   }
 });
 
-test('a 6-scene timeline schedules exactly 96 countdown tick events (16 per scene), all inside their own scene bounds, and the final scene\'s events are not clipped by the total video duration', () => {
+test('a 6-scene timeline schedules exactly 36 countdown tick events (6 per scene), all inside their own scene bounds, and the final scene\'s events are not clipped by the total video duration', () => {
   const timeline = sixSceneTimeline();
   const countdown = buildCountdownSchedule(timeline);
-  assert.equal(countdown.eventCount, 96);
+  assert.equal(countdown.eventCount, 36);
   for (const event of countdown.events) {
     const scene = timeline.scenes[event.sceneIndex];
     assert.ok(event.timestamp >= scene.start - 1e-4 && event.timestamp <= scene.end + 1e-4, `countdown event for scene ${event.sceneIndex + 1} at ${event.timestamp}s falls outside its scene bounds`);
@@ -242,11 +242,11 @@ test('buildAudioMixPlan turns every scheduled slide/reveal/whoosh/tick event, pl
   const timeline = sixSceneTimeline();
   const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
   const mixPlan = buildAudioMixPlan({ voiceoverCount: 6, timeline, sfx: testSfx(), schedule, countdown, totalDuration: timeline.totalDuration });
-  // 6 voiceovers + 17 SFX events (6 slide + 6 reveal + 5 whoosh) + 96 ticks = 119 delayed clips.
+  // 6 voiceovers + 17 SFX events (6 slide + 6 reveal + 5 whoosh) + 36 ticks = 59 delayed clips.
   const adelayCount = (mixPlan.filters.join(';').match(/adelay=delays=/g) || []).length;
-  assert.equal(adelayCount, 6 + 17 + 96);
+  assert.equal(adelayCount, 6 + 17 + 36);
   // 1 silent bed + those same delayed clips, all mixed together -- nothing left unmixed.
-  assert.equal(mixPlan.mixLabels.length, 1 + 6 + 17 + 96);
+  assert.equal(mixPlan.mixLabels.length, 1 + 6 + 17 + 36);
   assert.ok(mixPlan.filters[mixPlan.filters.length - 1].includes(`amix=inputs=${mixPlan.mixLabels.length}`));
 });
 

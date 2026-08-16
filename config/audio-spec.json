@@ -5,7 +5,8 @@
     "durationSecondsAtMeasurementTime": 65.833333
   },
   "countdown": {
-    "tickCount": 16,
+    "tickCount": 6,
+    "tickCountNote": "Not the raw reference measurement below (measuredTicksPerGenuineRun=16) -- that count matched the reference video's own scene/duration structure, which this project does not use (production is fixed at 8 scenes / 7.25s max per scene, see config.js). tickCount here is instead FIT to the production scene structure's own countdown window: the pre-tick-train design's countdownStart-to-reveal span was 1.8112916666666667s, and at tickSpacingSeconds=0.2 plus the kept reveal.gapAfterLastTickSeconds=0.68, 6 ticks span 1.68s (the largest tick count that still fits inside that window -- 7 ticks would span 1.88s and overflow it). If the production scene structure changes, recompute this by hand; do not restore 16 without re-deriving it against whatever window is current at that time.",
     "tickSpacingSeconds": 0.2,
     "method": "audio piped s16le mono 24000Hz through highpass=5500,lowpass=11000; RMS in 5ms windows; peaks above 97th percentile RMS with 0.09s minimum separation; consecutive peaks grouped into runs where spacing is 0.08-0.45s",
     "measuredGenuineRunCount": 7,

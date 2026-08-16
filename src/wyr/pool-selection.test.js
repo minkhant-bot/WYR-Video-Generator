@@ -192,12 +192,12 @@ test('a weak hook is never selected over a stronger hook for scene 1', () => {
 // an in-repo stand-in for a real production near-budget failure, but built from estimated (not
 // TTS-measured) duration so it's deterministic and DB-free.
 const LONG_SELECTED = [
-  row({ category: 'superpowers', a: 'Read the minds of every single stranger nearby', b: 'Turn completely invisible near every other person', isFantasy: false, motifA: 'mind-reading-long', motifB: 'invisibility-long' }),
-  row({ category: 'time', a: 'Travel back to relive your entire early childhood', b: 'Travel forward to witness the distant unknown future', motifA: 'time-travel-past-long', motifB: 'time-travel-future-long' }),
-  row({ category: 'dream lifestyle', a: 'Wake up early and productive every single morning', b: 'Sleep in late and relaxed every single day', motifA: 'morning-routine-long', motifB: 'sleep-routine-long' }),
-  row({ category: 'food', a: 'Eat extremely spicy food at every single meal', b: 'Eat extremely sweet food at every single meal', motifA: 'spicy-food-long', motifB: 'sweet-food-long' }),
-  row({ category: 'travel', a: 'Visit five different countries across all of Europe', b: 'Visit five different countries across all of Asia', motifA: 'europe-trip-long', motifB: 'asia-trip-long' }),
-  row({ category: 'space', a: 'Float weightlessly inside a real orbiting spacecraft', b: 'Walk slowly across the surface of the moon', motifA: 'zero-gravity-long', motifB: 'moonwalk-long' }),
+  row({ category: 'superpowers', a: 'Read the minds of every single stranger you meet nearby', b: 'Turn completely invisible near every other person around you', isFantasy: false, motifA: 'mind-reading-long', motifB: 'invisibility-long' }),
+  row({ category: 'time', a: 'Travel back to relive your entire early happy childhood', b: 'Travel forward to witness the distant unknown future today', motifA: 'time-travel-past-long', motifB: 'time-travel-future-long' }),
+  row({ category: 'dream lifestyle', a: 'Wake up early and stay productive every single busy morning', b: 'Sleep in late and stay relaxed every single lazy day', motifA: 'morning-routine-long', motifB: 'sleep-routine-long' }),
+  row({ category: 'food', a: 'Eat extremely spicy food at every single family meal', b: 'Eat extremely sweet food at every single family meal', motifA: 'spicy-food-long', motifB: 'sweet-food-long' }),
+  row({ category: 'travel', a: 'Visit five different countries across all of western Europe', b: 'Visit five different countries across all of eastern Asia', motifA: 'europe-trip-long', motifB: 'asia-trip-long' }),
+  row({ category: 'space', a: 'Float weightlessly inside a real orbiting space station soon', b: 'Walk slowly across the dusty surface of the moon', motifA: 'zero-gravity-long', motifB: 'moonwalk-long' }),
 ];
 
 // Short, valid substitutes: one per family represented above, so a straightforward swap never
