@@ -402,8 +402,8 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config 
   }
 
   const chosen = selectedCandidates(selection);
-  if (chosen.length !== selection.total) {
-    throw new Error(`All ${selection.total} images must be ready before generation; ready ${chosen.length}/${selection.total}.`);
+  if (chosen.length !== 16) {
+    throw new Error(`All 16 images must be ready before generation; ready ${chosen.length}/16.`);
   }
 
   const usedCandidateKeys = new Set();

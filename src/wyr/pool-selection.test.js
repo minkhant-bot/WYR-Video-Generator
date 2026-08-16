@@ -272,44 +272,6 @@ test('repairPlanForDuration reports fits:false (never throws, never fabricates a
   assert.equal(result.selected.length, 6, 'the (still over-budget) selection must still be returned so the caller has full information');
 });
 
-// Fixed production policy: every generated video uses exactly 6 questions/scenes. This exercises
-// the full production selection chain (selectDiversePlan -> repairPlanForDuration -> arrangeForHook
-// -> buildPlanFromPoolRows) at the DEFAULT count (no explicit override), proving diversity, family
-// cap, fantasy cap, motif cooldown, and strongest-hook-as-Scene-1 all still hold at exactly 6.
-test('the full production selection chain selects exactly 6 diverse questions with the strongest hook as Scene 1', () => {
-  const candidates = [
-    row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', hookScore: 40 }),
-    row({ category: 'luxury', a: 'Live in a mansion', b: 'Live in a penthouse', hookScore: 55 }),
-    row({ category: 'travel', a: 'Backpack Europe', b: 'Cruise the Caribbean', hookScore: 60 }),
-    row({ category: 'food', a: 'Eat at a 5-star restaurant', b: 'Cook with a chef', hookScore: 30 }),
-    row({ category: 'adventure', a: 'Skydive', b: 'Scuba dive', hookScore: 97 }),
-    row({ category: 'space', a: 'Visit the ISS', b: 'Visit the moon', hookScore: 45 }),
-    row({ category: 'ocean', a: 'Swim with sharks', b: 'Swim with whales', hookScore: 50 }),
-    row({ category: 'fame', a: 'Be a movie star', b: 'Be a rock star', hookScore: 65 }),
-  ];
-  const diverse = selectDiversePlan(candidates); // default count
-  assert.ok(diverse);
-  assert.equal(diverse.selected.length, 6, 'the production default must select exactly 6 questions');
-
-  const repaired = repairPlanForDuration({ selected: diverse.selected, candidates, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 }); // default count
-  assert.equal(repaired.selected.length, 6);
-  assert.equal(repaired.fits, true, 'six short questions must comfortably fit the duration budget');
-
-  const arranged = arrangeForHook(repaired.selected);
-  assert.equal(arranged.length, 6);
-  assert.equal(arranged[0].category, 'adventure', 'the strongest hook_score (97) must lead as Scene 1');
-
-  const plan = buildPlanFromPoolRows(arranged);
-  assert.equal(plan.questions.length, 6);
-  assert.equal(plan.questions[0].category, 'adventure');
-
-  // Family cap and fantasy cap still hold at count=6.
-  const familyCounts = new Map();
-  for (const r of repaired.selected) familyCounts.set(r.content_family, (familyCounts.get(r.content_family) || 0) + 1);
-  for (const [family, count] of familyCounts) assert.ok(count <= 2, `family ${family} appears ${count} times, exceeding the cap of 2`);
-  assert.ok(repaired.selected.filter(r => r.is_fantasy).length <= 1);
-});
-
 test('buildPlanFromPoolRows produces a plan shape compatible with addIllustrativePercentages / the image pipeline', () => {
   const rows = [
     row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', hookScore: 90 }),

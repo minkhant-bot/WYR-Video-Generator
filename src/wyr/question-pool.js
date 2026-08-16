@@ -7,7 +7,7 @@ export class ContentPoolExhaustedError extends Error {
   constructor(message, details = {}) { super(message); this.code = 'CONTENT_POOL_EMPTY'; Object.assign(this, details); }
 }
 
-// Thrown when a diverse 6-question set WAS found, but even after locally swapping the
+// Thrown when a diverse 8-question set WAS found, but even after locally swapping the
 // longest-projected questions for shorter ready ones (see repairPlanForDuration), the estimated
 // total still can't fit under budget. Deliberately distinct from ContentPoolExhaustedError: the
 // caller (content-source.js) must never respond to this by calling Groq -- see requirement to keep
@@ -91,7 +91,7 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
 // emergency refill" or "fail with CONTENT_POOL_EMPTY". Throws DurationBudgetExceededError (never
 // returns null for this case) when a diverse set WAS found but couldn't be brought under the
 // duration budget using only this candidate window -- that failure must never trigger a Groq call.
-export const selectAndReservePlan = async ({ jobId, count = 6, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
+export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
   const { rows: candidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready'
      ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
@@ -120,7 +120,7 @@ export const selectAndReservePlan = async ({ jobId, count = 6, candidateWindowSi
   return { selected, distinctFamilies, fantasyCount };
 });
 
-export const selectPlanForJob = async ({ jobId, count = 6, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
+export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
   const reservation = await selectAndReservePlan({ jobId, count, candidateWindowSize, baseDuration, targetTotalSeconds });
   if (!reservation) return null;
   return buildPlanFromPoolRows(reservation.selected);

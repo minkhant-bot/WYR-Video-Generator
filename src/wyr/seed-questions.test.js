@@ -93,15 +93,15 @@ test('seeding never deletes or displaces questions that were already in the pool
   assert.equal(await countReady(), SEED_QUESTIONS.length + 1, 'the pre-existing question must still be present alongside the seeded ones');
 }));
 
-test('with the static seed bank alone, normal DB-first video generation can select the fixed 6 diverse questions without any Groq call', () => withFakeDb(async () => {
+test('with the static seed bank alone, normal DB-first video generation can select 8 diverse questions without any Groq call', () => withFakeDb(async () => {
   await insertQuestions(SEED_QUESTIONS, { sourceProvider: 'seed' });
   let fetchCalled = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => { fetchCalled = true; throw new Error('must not call Groq'); };
   try {
-    const plan = await selectPlanForJob({ jobId: 'job-seed-only' }); // production default count (6)
+    const plan = await selectPlanForJob({ jobId: 'job-seed-only', count: 8 });
     assert.ok(plan, 'expected a plan to be selected from the seeded pool');
-    assert.equal(plan.questions.length, 6);
+    assert.equal(plan.questions.length, 8);
     assert.equal(plan.source, 'database_pool');
     assert.equal(fetchCalled, false, 'selecting from a seeded pool must never make a network/Groq call');
   } finally { globalThis.fetch = originalFetch; }

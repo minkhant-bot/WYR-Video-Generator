@@ -8,8 +8,8 @@ import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
 
 // The 20 Groq-facing categories bucketed into broader "content families" purely locally -- Groq
-// never supplies or needs to know about this grouping. Chosen so a normal 6-question selection can
-// realistically reach a healthy spread of distinct families while still enforcing a 2-per-family cap.
+// never supplies or needs to know about this grouping. Chosen so a normal 8-question selection can
+// realistically reach the >=6-distinct-families target while still enforcing a 2-per-family cap.
 export const CONTENT_FAMILY_BY_CATEGORY = Object.freeze({
   superpowers: 'powers_and_impossible', fantasy: 'powers_and_impossible', 'impossible choices': 'powers_and_impossible',
   time: 'time_and_technology', 'future technology': 'time_and_technology',
@@ -47,7 +47,7 @@ export const computeInsertionFields = question => {
 // first by the caller's SQL. Hard rules (fantasy cap, motif cooldown/duplication) are never
 // relaxed; the content-family cap is relaxed only if the window can't otherwise fill `count`, so a
 // thin pool degrades gracefully instead of blocking a job the inventory could still service.
-export const selectDiversePlan = (candidates, { count = 6, blockedMotifs = new Set() } = {}) => {
+export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new Set() } = {}) => {
   const attempt = relaxFamilyCap => {
     const familyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const selected = [];
     for (const row of candidates) {
@@ -81,13 +81,13 @@ export const selectDiversePlan = (candidates, { count = 6, blockedMotifs = new S
 // like-for-like swap): without this, a substitute is only checked against the aggregate family cap,
 // which lets it fill a DIFFERENT family's freed-up capacity than the one it displaced, silently
 // dropping one family from the plan while a different family ends up represented twice (e.g. two
-// 'space' rows and zero 'time' rows) -- same-family-count-preserved, still 6 questions, still under
+// 'space' rows and zero 'time' rows) -- same-family-count-preserved, still 8 questions, still under
 // the cap, yet a real diversity regression the cap alone doesn't catch. Every hard diversity rule
 // (motif blocklist + within-plan motif cooldown, fantasy cap) is also re-checked for the substitute,
 // so a duration repair can never quietly undo the diversity guarantees selectDiversePlan already
 // enforced. Runs before arrangeForHook, so Scene 1 selection (strongest hook score) still operates
 // on the final, duration-repaired set -- that logic itself is untouched.
-export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = new Set(), count = 6, targetTotalSeconds, baseDuration } = {}) => {
+export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = new Set(), count = 8, targetTotalSeconds, baseDuration } = {}) => {
   const durationOf = row => estimateSceneDurationFromText(row.option_a_text, row.option_b_text, { baseDuration });
   let working = [...selected];
   let swapped = false;

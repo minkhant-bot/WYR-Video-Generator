@@ -70,7 +70,7 @@ const buildSelection = (focusSlots, fetchHandlers) => {
     slots[key] = { ...emptyPoolState(), key, questionIndex: 100 + fillerIndex, slot: 'A', optionText: 'filler', candidates: [candidate], selectedId: candidate.candidateKey };
     fillerIndex += 1;
   }
-  return { slots, total: Object.keys(slots).length };
+  return { slots };
 };
 
 const withMockedFetch = async (fetchHandlers, operation) => {

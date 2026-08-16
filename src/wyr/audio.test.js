@@ -144,20 +144,14 @@ test('RATE_COMPRESSION_LADDER only ever speeds narration up relative to the conf
   assert.deepEqual(sorted, [...sorted].sort((left, right) => left - right));
 });
 
-// Fixed production policy: every generated video uses exactly 6 questions/scenes. The per-scene
-// tail is now ~6.02s (16-tick countdown + reveal gap + reveal hold + transition-out), up from the
-// old 3-2-1 countdown's ~4.17s -- so the production default maximumSceneDuration moved to 9.2s
-// (see config.js) to keep comfortable headroom under the 60s ceiling.
-test('six scenes at the production duration budget keep the finished video comfortably under 60 seconds', () => {
-  const maximumSceneDuration = 9.2;
-  // The final scene's tail is slightly longer than SCENE_TAIL_SECONDS (2s reveal hold instead of
-  // revealHoldDuration + transitionOutDuration), so leave extra margin, not just 0.05s.
-  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.2;
-  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
-  assert.equal(timeline.scenes.length, 6);
+test('eight scenes at the production duration budget keep the finished video safely under 60 seconds', () => {
+  const maximumSceneDuration = 7.25;
+  const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.05;
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
+  assert.equal(timeline.scenes.length, 8);
   assert.ok(timeline.totalDuration < 60, `expected < 60s, got ${timeline.totalDuration}`);
-  assert.ok(timeline.totalDuration <= 56, `expected comfortable headroom (<=56s) with only 6 scenes, got ${timeline.totalDuration}`);
-  assert.ok(timeline.totalDuration >= 50);
+  assert.ok(timeline.totalDuration <= 59);
+  assert.ok(timeline.totalDuration >= 55);
 });
 
 test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 14 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 12.2); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
