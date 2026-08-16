@@ -3,7 +3,7 @@ import { ContentPoolExhaustedError, countReady, selectPlanForJob } from './quest
 import { maybeTriggerBackgroundRefill, refillPool } from './refill.js';
 import { log } from './utils.js';
 
-// Normal path: select+reserve 8 diverse questions straight from the database, zero Groq calls.
+// Normal path: select+reserve config.questionCount diverse questions straight from the database, zero Groq calls.
 // Only if the pool can't currently fill a video does this fall back to ONE bounded emergency
 // refill batch (never a live per-video generation call) and retry the selection once. If that
 // still isn't enough, it fails clearly with CONTENT_POOL_EMPTY instead of retrying Groq for
@@ -24,6 +24,6 @@ export const selectContentPlan = async ({ job, config }) => {
     const ready = await countReady();
     throw new ContentPoolExhaustedError(`CONTENT_POOL_EMPTY: only ${ready} of ${config.questionCount} required questions are available after a bounded emergency refill attempt.`, { ready, required: config.questionCount });
   }
-  maybeTriggerBackgroundRefill({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs, target: config.poolTarget, lowWaterMark: config.poolLowWaterMark });
+  maybeTriggerBackgroundRefill({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs, target: config.poolTarget, lowWaterMark: config.poolLowWaterMark, batchSize: config.questionCount });
   return addIllustrativePercentages(plan);
 };

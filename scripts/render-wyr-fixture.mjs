@@ -12,8 +12,8 @@ if (process.env.WYR_FIXTURE_MODE !== 'true' && !process.argv.includes('--fixture
 const config = getConfig();
 const workspace = process.env.WYR_FIXTURE_DIR ? resolveProjectPath(process.env.WYR_FIXTURE_DIR) : path.join(PROJECT_ROOT, 'data', 'wyr-fixture-job');
 for (const folder of ['', 'assets', 'audio', 'render', 'output']) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
-const plan = createFixturePlan(); const assets = await createFixtureAssets({ assetsDir: path.join(workspace, 'assets') });
-if (assets.length !== 16) throw new Error(`Fixture must contain 16 images; found ${assets.length}.`);
+const plan = createFixturePlan(config.questionCount); const assets = await createFixtureAssets({ assetsDir: path.join(workspace, 'assets'), count: config.questionCount });
+if (assets.length !== config.questionCount * 2) throw new Error(`Fixture must contain ${config.questionCount * 2} images; found ${assets.length}.`);
 writeJsonAtomic(path.join(workspace, 'plan.json'), plan); writeJsonAtomic(path.join(workspace, 'assets.json'), assets);
 const timeline = buildSceneTimeline({ voiceovers: plan.questions.map(() => ({ duration: 2.5 })), baseDuration: WYR_TEMPLATE.timing.defaultSceneDuration });
 const sfx = await createLocalSfx({ audioDir: path.join(workspace, 'audio') });

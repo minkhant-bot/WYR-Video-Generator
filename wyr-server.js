@@ -76,7 +76,7 @@ const server = http.createServer(async (req, res) => {
         try { body = await readJsonBody(req); } catch { body = {}; }
         const requestedTarget = Number(body?.target);
         const target = Number.isInteger(requestedTarget) && requestedTarget >= 8 && requestedTarget <= 5000 ? requestedTarget : adminConfig.poolTarget;
-        const outcome = triggerAdminRefill({ apiKey: adminConfig.groqApiKey, model: adminConfig.groqModel, timeoutMs: adminConfig.timeoutMs, target, maxBatches: adminConfig.poolRefillMaxBatchesPerRun });
+        const outcome = triggerAdminRefill({ apiKey: adminConfig.groqApiKey, model: adminConfig.groqModel, timeoutMs: adminConfig.timeoutMs, target, batchSize: adminConfig.questionCount, maxBatches: adminConfig.poolRefillMaxBatchesPerRun });
         const stats = await getPoolStats();
         return json(res, outcome.started ? 202 : 200, { started: outcome.started, ...stats, ...outcome.status });
       }
@@ -141,7 +141,7 @@ const server = http.createServer(async (req, res) => {
     const generateMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})\/generate$/i);
     if (req.method === 'POST' && generateMatch) {
       const job = store.get(generateMatch[1]); if (!job) return json(res, 404, { error: 'Job not found.' });
-      if (!['reviewing_images', 'selecting_images'].includes(job.status) || !job.selection || job.selection.selectedCount !== 16) return json(res, 409, { error: `All 16 images must be ready before generation; ready ${job.selection?.selectedCount || 0}/16.` });
+      if (!['reviewing_images', 'selecting_images'].includes(job.status) || !job.selection || job.selection.selectedCount !== job.selection.total) return json(res, 409, { error: `All ${job.selection?.total ?? 0} images must be ready before generation; ready ${job.selection?.selectedCount || 0}/${job.selection?.total ?? 0}.` });
       const plan = JSON.parse(fs.readFileSync(path.join(job.workspace, 'plan.json'), 'utf8')); const config = getConfig(); store.update(job.id, { status: 'generating', stage: 'generating', progress: 40 }); setImmediate(() => void runPipeline({ job, store, config, preparedPlan: plan, selectionState: job.selection })); return json(res, 202, publicJob(store.get(job.id)));
     }
     const match = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})(?:\/(video|download|credits))?$/i);

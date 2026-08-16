@@ -17,10 +17,11 @@ const validPlan = () => ({ questions: [
   { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },
 ] });
 
-// triggerAdminRefill (unlike refillPool directly) never forwards a custom batchSize -- it always
-// uses refillPool's default of 8, matching the fixed WYR_QUESTION_COUNT=8 the real admin route
-// also relies on -- so admin-refill tests need a fixture plan with 8 questions distinct enough to
-// clear GroqContentProvider's own near-duplicate-wording check (see content.js `similarity`).
+// These admin/background-refill tests don't pass a custom batchSize, so they exercise refillPool's
+// own fallback default of 8 (the real admin/background call sites always forward
+// config.questionCount explicitly -- see wyr-server.js and content-source.js) -- so admin-refill
+// tests need a fixture plan with 8 questions distinct enough to clear GroqContentProvider's own
+// near-duplicate-wording check (see content.js `similarity`).
 const eightQuestionPlan = () => ({ questions: [
   { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } },
   { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },

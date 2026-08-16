@@ -40,20 +40,20 @@ const run = (binary, args) => new Promise((resolve, reject) => {
   child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(new Error(`Fixture asset command failed: ${stderr.slice(-2000)}`)));
 });
 
-export const createFixturePlan = () => ({
+export const createFixturePlan = (count = questions.length) => ({
   version: 1,
   topic: 'Impossible Choices: Everyday Edition',
   percentages: { mode: 'demo', label: 'Entertainment demo percentages only' },
-  questions: questions.map(([a, b, aPercent, bPercent], index) => ({
+  questions: questions.slice(0, count).map(([a, b, aPercent, bPercent], index) => ({
     index,
     optionA: { text: a, searchQuery: `fixture option a ${index + 1}`, percentage: aPercent },
     optionB: { text: b, searchQuery: `fixture option b ${index + 1}`, percentage: bPercent },
   })),
 });
 
-export const createFixtureAssets = async ({ assetsDir, ffmpegPath = resolveFfmpegPath() }) => {
+export const createFixtureAssets = async ({ assetsDir, count = questions.length, ffmpegPath = resolveFfmpegPath() }) => {
   fs.mkdirSync(assetsDir, { recursive: true }); const assets = [];
-  for (let index = 0; index < 16; index += 1) {
+  for (let index = 0; index < count * 2; index += 1) {
     const [width, height] = dimensions[index]; const ppm = path.join(assetsDir, `fixture-${String(index + 1).padStart(2, '0')}.ppm`); const jpg = path.join(assetsDir, `fixture-${String(index + 1).padStart(2, '0')}.jpg`);
     if (!fs.existsSync(jpg)) { writePpm(ppm, width, height, colors[index]); await run(ffmpegPath, ['-y', '-i', ppm, '-q:v', '3', jpg]); fs.unlinkSync(ppm); }
     assets.push({ questionIndex: Math.floor(index / 2), slot: index % 2 === 0 ? 'A' : 'B', localPath: jpg, filename: path.basename(jpg), provider: 'fixture', id: `fixture-${index + 1}`, width, height, photographer: 'Local fixture', photographerUrl: null, photoUrl: null, queryUsed: 'fixture' });

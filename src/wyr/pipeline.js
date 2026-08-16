@@ -190,12 +190,13 @@ export const prepareImageSelection = async ({ job, store, config }) => {
   }
 };
 
-// Normal production entry point: selects 8 diverse, pre-validated questions straight from the
-// PostgreSQL pool (see content-source.js) -- no live Groq call in the common case -- automatically
-// searches/scores/selects all 16 images (same createImageSelection auto-selection used by the
-// debug path above — Pixabay primary, Pexels fallback, unchanged scoring), then immediately hands
-// off to the existing runPipeline to lock assets, generate voice, build the timeline, render, and
-// verify. No human approval step; never stops at reviewing_images.
+// Normal production entry point: selects config.questionCount diverse, pre-validated questions
+// straight from the PostgreSQL pool (see content-source.js) -- no live Groq call in the common
+// case -- automatically searches/scores/selects all of that plan's images, two per question (same
+// createImageSelection auto-selection used by the debug path above — Pixabay primary, Pexels
+// fallback, unchanged scoring), then immediately hands off to the existing runPipeline to lock
+// assets, generate voice, build the timeline, render, and verify. No human approval step; never
+// stops at reviewing_images.
 export const runAutomaticPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   let poolReserved = false;
@@ -207,7 +208,7 @@ export const runAutomaticPipeline = async ({ job, store, config }) => {
     writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
-    if (selection.selectedCount !== 16) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`, { selectedCount: selection.selectedCount });
+    if (selection.selectedCount !== selection.total) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${selection.total} image slots; selected ${selection.selectedCount}/${selection.total}.`, { selectedCount: selection.selectedCount });
     await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
   } catch (error) {
     await handleJobFailure({ job, store, error, poolReserved });
@@ -218,8 +219,8 @@ export const runFixturePipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   try {
     update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 10 });
-    const plan = createFixturePlan(); const assets = await createFixtureAssets({ assetsDir: path.join(job.workspace, 'assets') });
-    if (assets.length !== 16) throw new Error(`Fixture must contain 16 images; found ${assets.length}.`);
+    const plan = createFixturePlan(config.questionCount); const assets = await createFixtureAssets({ assetsDir: path.join(job.workspace, 'assets'), count: config.questionCount });
+    if (assets.length !== config.questionCount * 2) throw new Error(`Fixture must contain ${config.questionCount * 2} images; found ${assets.length}.`);
     writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); writeJsonAtomic(path.join(job.workspace, 'assets.json'), assets);
     update({ topic: plan.topic, progress: 40, status: 'building_timeline', stage: 'building_timeline' });
     buildComposition({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace });

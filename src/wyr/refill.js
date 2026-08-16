@@ -69,14 +69,14 @@ const finishRefill = lastResult => { refillState = { running: false, source: nul
 // Fire-and-forget: triggered when the ready pool drops below the low-water mark. Deliberately
 // bounded (small maxBatches) and guarded against overlap -- normal video generation must never
 // wait on this, and a slow/failing Groq must never cause more than one background refill at a time.
-export const maybeTriggerBackgroundRefill = ({ apiKey, model, timeoutMs, target, lowWaterMark, maxBatches = 2 }) => {
+export const maybeTriggerBackgroundRefill = ({ apiKey, model, timeoutMs, target, lowWaterMark, batchSize, maxBatches = 2 }) => {
   if (refillState.running || !apiKey) return;
   beginRefill('background', target);
   countReady()
     .then(ready => {
       if (ready >= lowWaterMark) { finishRefill(refillState.lastResult); return; }
       log('pool.background_refill_triggered', { ready, lowWaterMark, target });
-      return refillPool({ apiKey, model, timeoutMs, target, maxBatches })
+      return refillPool({ apiKey, model, timeoutMs, target, batchSize, maxBatches })
         .then(result => finishRefill({ ...result, source: 'background', finishedAt: new Date().toISOString() }));
     })
     .catch(error => { log('pool.background_refill_failed', { message: error.message }); finishRefill({ stoppedReason: 'error', message: error.message, source: 'background', finishedAt: new Date().toISOString() }); });
@@ -86,12 +86,12 @@ export const maybeTriggerBackgroundRefill = ({ apiKey, model, timeoutMs, target,
 // background trigger -- the HTTP request returns immediately with the current status rather than
 // blocking on the whole run -- but returns { started: false } instead of silently doing nothing
 // when a refill (of either kind) is already in flight, so the caller can surface that clearly.
-export const triggerAdminRefill = ({ apiKey, model, timeoutMs, target, maxBatches }) => {
+export const triggerAdminRefill = ({ apiKey, model, timeoutMs, target, batchSize, maxBatches }) => {
   if (refillState.running) return { started: false, status: getRefillStatus() };
   if (!apiKey) throw new Error('GROQ_API_KEY is required for a pool refill.');
   beginRefill('admin', target);
   log('pool.admin_refill_started', { target, maxBatches });
-  refillPool({ apiKey, model, timeoutMs, target, maxBatches })
+  refillPool({ apiKey, model, timeoutMs, target, batchSize, maxBatches })
     .then(result => finishRefill({ ...result, source: 'admin', finishedAt: new Date().toISOString() }))
     .catch(error => { log('pool.admin_refill_failed', { message: error.message }); finishRefill({ stoppedReason: 'error', message: error.message, source: 'admin', finishedAt: new Date().toISOString() }); });
   return { started: true, status: getRefillStatus() };
