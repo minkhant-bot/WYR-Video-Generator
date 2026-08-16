@@ -21,15 +21,15 @@ export const countReady = async () => {
   return rows[0].count;
 };
 
-// Admin/status-panel read model. "used" counts completed videos (each one consumes a full set of
-// pool questions) rather than summing used_count, since a question rotates back to 'ready' after
-// use and used_count alone wouldn't distinguish "healthy rotating pool" from "pool being drained".
+// Admin/status-panel read model, sourced entirely from wyr_questions.status. A question that has
+// been successfully used in a completed, verified video is retired to status='used' (see
+// commitPlanUsage below) and never rotates back to 'ready' -- so "used" here counts consumed
+// QUESTION ROWS, not completed videos, and directly reflects how much of the pool has been spent.
 export const getPoolStats = async () => withClient(async client => {
   const { rows: statusRows } = await client.query('SELECT status, count(*)::int AS count FROM wyr_questions GROUP BY status');
-  const { rows: videoRows } = await client.query('SELECT count(*)::int AS count FROM wyr_videos');
   const byStatus = Object.fromEntries(statusRows.map(row => [row.status, row.count]));
   const total = statusRows.reduce((sum, row) => sum + row.count, 0);
-  return { ready: byStatus.ready || 0, reserved: byStatus.reserved || 0, used: videoRows[0].count, total };
+  return { ready: byStatus.ready || 0, reserved: byStatus.reserved || 0, used: byStatus.used || 0, total };
 });
 
 // Validates and inserts a raw Groq (or fixture) batch. Rejections never throw -- a bad candidate
@@ -77,17 +77,20 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
   return motifs;
 };
 
-// Atomically reserves exactly `count` diverse, non-recently-used, duration-budgeted questions for
-// one job. FOR UPDATE SKIP LOCKED lets concurrent jobs each grab their own candidate window
-// without blocking on or double-selecting rows another in-flight job already has locked. The
-// candidate query is ordered LRU-first (rotation fairness) with hook_score as a tie-break --
-// hook_score already rewards concise option text (see scoring.js's concisionBonus), so on a fresh
-// or evenly-rotated pool this naturally favors shorter questions for normal generation, before
-// duration repair ever needs to run. Returns null (never throws) when the ready pool can't
-// currently fill a full video at all -- the caller decides whether that means "try an emergency
-// refill" or "fail with CONTENT_POOL_EMPTY". Throws DurationBudgetExceededError (never returns
-// null for this case) when a diverse set WAS found but couldn't be brought under the duration
-// budget using only this candidate window -- that failure must never trigger a Groq call.
+// Atomically reserves exactly `count` diverse, duration-budgeted questions for one job, drawn only
+// from status='ready' rows -- a question retired to status='used' by commitPlanUsage (see below)
+// can never appear in this candidate window again, so a consumed question is never reselected for
+// a future video, in any job, ever. FOR UPDATE SKIP LOCKED lets concurrent jobs each grab their own
+// candidate window without blocking on or double-selecting rows another in-flight job already has
+// locked. The candidate query orders by last_used_at/used_count (both always null/0 for 'ready'
+// rows in this consume-once model, since either one being set means the row already moved to
+// 'used') then hook_score as the effective tie-break -- hook_score already rewards concise option
+// text (see scoring.js's concisionBonus), so this naturally favors shorter questions for normal
+// generation, before duration repair ever needs to run. Returns null (never throws) when the ready
+// pool can't currently fill a full video at all -- the caller decides whether that means "try an
+// emergency refill" or "fail with CONTENT_POOL_EMPTY". Throws DurationBudgetExceededError (never
+// returns null for this case) when a diverse set WAS found but couldn't be brought under the
+// duration budget using only this candidate window -- that failure must never trigger a Groq call.
 export const selectAndReservePlan = async ({ jobId, count = 6, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
   const { rows: candidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready'
@@ -133,9 +136,18 @@ export const releaseReservation = async jobId => {
 };
 
 // Only called after a final MP4 has been verified successfully. Records the video/question
-// relationship (for future motif-cooldown and performance-data queries) and returns the reserved
-// questions to 'ready' with an updated used_count/last_used_at, so they naturally rotate to the
-// back of the least-recently-used queue instead of being permanently retired.
+// relationship (for future motif-cooldown and performance-data queries) and retires the reserved
+// questions to a terminal 'used' status with an updated used_count/last_used_at. Deliberately does
+// NOT return them to 'ready': a question successfully used in a completed video must never be
+// eligible for selection again (selectAndReservePlan's candidate query only ever reads
+// status='ready' rows) -- this is a one-way, consume-once pool, not a rotating one.
+//
+// Idempotent per jobId: the wyr_videos insert already dedupes via its job_id UNIQUE constraint
+// (ON CONFLICT DO UPDATE, never a second row), and the used_count UPDATE below is scoped to rows
+// still reserved by THIS job -- so if this is ever invoked twice for the same completed job (e.g.
+// a duplicated completion callback), the second call finds those rows already at status='used'
+// with reserved_by_job=NULL and updates zero rows, instead of double-incrementing used_count or
+// double-committing usage.
 export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransaction(async client => {
   const ids = plan.questions.map(question => question.poolId);
   const { rows: videoRows } = await client.query(
@@ -148,10 +160,10 @@ export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransact
   for (const question of plan.questions) {
     await client.query('INSERT INTO wyr_video_questions (video_id, question_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [videoId, question.poolId, question.index]);
   }
-  await client.query(
-    "UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, used_count = used_count + 1, last_used_at = now(), updated_at = now() WHERE id = ANY($1::bigint[])",
-    [ids],
+  const { rowCount: questionsUpdated } = await client.query(
+    "UPDATE wyr_questions SET status = 'used', reserved_by_job = NULL, reserved_at = NULL, used_count = used_count + 1, last_used_at = now(), updated_at = now() WHERE id = ANY($1::bigint[]) AND reserved_by_job = $2 AND status = 'reserved'",
+    [ids, jobId],
   );
-  log('pool.usage_committed', { jobId, videoId, count: ids.length });
+  log('pool.usage_committed', { jobId, videoId, count: ids.length, questionsUpdated });
   return videoId;
 });

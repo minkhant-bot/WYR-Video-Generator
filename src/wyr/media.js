@@ -136,6 +136,42 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
     completed += 1; onProgress?.(completed, plan.questions.length); return segment;
   });
 };
+// Pure (no ffmpeg spawn) construction of the narration+SFX mix filter graph -- deliberately
+// extracted from renderVideo so the input ordering, adelay timestamps, and amix label wiring can
+// be verified deterministically in tests against ANY scene count, without needing a real ffmpeg
+// render for every case. Input order (and therefore stream indices) is: [0]=video, then one input
+// per voiceover, then one input per SFX_EVENT_TYPES entry, then the countdown sequence -- renderVideo
+// pushes '-i' arguments in this exact same order, so inputOrder's indices are the real ffmpeg
+// stream indices used by the filters below.
+export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration }) => {
+  const inputOrder = ['video'];
+  const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`];
+  const mixLabels = ['[bed]'];
+  for (let index = 0; index < voiceoverCount; index += 1) {
+    inputOrder.push(`voiceover${index}`);
+    const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].voiceStart) * 1000);
+    filters.push(`[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,volume=1,adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
+  }
+  const sfxInputIndexByType = {};
+  for (const type of SFX_EVENT_TYPES) {
+    const inputIndex = inputOrder.length; sfxInputIndexByType[type] = inputIndex; inputOrder.push(`sfx:${type}`);
+    const typeEvents = schedule.events.filter(event => event.type === type);
+    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
+    for (let index = 0; index < typeEvents.length; index += 1) {
+      const label = `${type}${index}`; const delay = Math.round(typeEvents[index].timestamp * 1000);
+      filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
+    }
+  }
+  const countdownInputIndex = inputOrder.length; inputOrder.push('sfx:countdownSequence');
+  filters.push(`[${countdownInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.countdownSequence.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[countdownSequence${index}raw]`).join('')}`);
+  for (let index = 0; index < timeline.scenes.length; index += 1) {
+    const label = `countdownSequence${index}`; const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].countdownStart) * 1000);
+    filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
+  }
+  filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
+  return { inputOrder, filters, mixLabels, sfxInputIndexByType, countdownInputIndex };
+};
+
 export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress }) => {
   assertLockedImageAssets(assets);
   const renderDir = path.join(workspace, 'render');
@@ -147,28 +183,12 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
     assertProductionAudioInputs({ plan, voiceovers, timeline, sfx });
     const schedule = sfxSchedule || buildSfxSchedule(timeline); assertCompleteSfxSchedule({ timeline, events: schedule.events });
     const countdown = countdownSchedule || buildCountdownSchedule(timeline); assertCompleteCountdownSchedule({ timeline, events: countdown.events });
-    const inputs = ['-y', '-i', silentVideo]; for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
-    const sfxInputs = {}; for (const type of SFX_EVENT_TYPES) { sfxInputs[type] = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx[type].localPath); }
-    const countdownInput = inputs.filter(value => value === '-i').length; inputs.push('-i', sfx.countdownSequence.localPath);
-    const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`]; const mixLabels = ['[bed]'];
-    for (let index = 0; index < voiceovers.length; index += 1) {
-      const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].voiceStart) * 1000); filters.push(`[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,volume=1,adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
-    }
-    for (const type of SFX_EVENT_TYPES) {
-      const typeEvents = schedule.events.filter(event => event.type === type);
-      filters.push(`[${sfxInputs[type]}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
-      for (let index = 0; index < typeEvents.length; index += 1) {
-        const label = `${type}${index}`; const delay = Math.round(typeEvents[index].timestamp * 1000);
-        filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
-      }
-    }
-    filters.push(`[${countdownInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.countdownSequence.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[countdownSequence${index}raw]`).join('')}`);
-    for (let index = 0; index < timeline.scenes.length; index += 1) {
-      const label = `countdownSequence${index}`; const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].countdownStart) * 1000);
-      filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
-    }
-    filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
-    await run(ffmpegPath, [...inputs, '-filter_complex', filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', String(totalDuration), '-movflags', '+faststart', output], 'mix narration and SFX');
+    const mixPlan = buildAudioMixPlan({ voiceoverCount: voiceovers.length, timeline, sfx, schedule, countdown, totalDuration });
+    const inputs = ['-y', '-i', silentVideo];
+    for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
+    for (const type of SFX_EVENT_TYPES) inputs.push('-i', sfx[type].localPath);
+    inputs.push('-i', sfx.countdownSequence.localPath);
+    await run(ffmpegPath, [...inputs, '-filter_complex', mixPlan.filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', String(totalDuration), '-movflags', '+faststart', output], 'mix narration and SFX');
   } else {
     const music = `aevalsrc=0.020*sin(2*PI*174.61*t)+0.014*sin(2*PI*220*t)+0.010*sin(2*PI*261.63*t):s=48000:d=${totalDuration}`;
     await run(ffmpegPath, ['-y', '-i', silentVideo, '-f', 'lavfi', '-i', music, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-shortest', '-movflags', '+faststart', output], 'mux fixture video');

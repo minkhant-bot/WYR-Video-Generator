@@ -28,6 +28,28 @@ const EIGHT_DIVERSE = [
   question('fame', 'Be a movie star', 'Be a rock star'),
 ];
 
+// 16 distinct, non-fantasy questions across 8 distinct content families (2 categories each, at the
+// family cap), so two SEPARATE 6-question selections can each be drawn diversely from whatever is
+// still 'ready' after the other has consumed its 6 -- used only for the cross-job non-reuse test.
+const SIXTEEN_DIVERSE = [
+  question('money', 'Own a yacht', 'Own a jet'),
+  question('luxury', 'Live in a mansion', 'Live in a penthouse'),
+  question('travel', 'Backpack Europe', 'Cruise the Caribbean'),
+  question('adventure', 'Skydive', 'Scuba dive'),
+  question('food', 'Eat at a 5-star restaurant', 'Cook with a chef', 'fine dining restaurant', 'chef cooking kitchen'),
+  question('friendship/social', 'Throw a huge party', 'Host a small gathering'),
+  question('space', 'Visit the ISS', 'Visit the moon'),
+  question('ocean', 'Swim with sharks', 'Swim with whales'),
+  question('dream lifestyle', 'Wake up at sunrise daily', 'Sleep in until noon daily'),
+  question('fame', 'Be a movie star', 'Be a rock star'),
+  question('time', 'Freeze time for one day', 'Rewind time by one year'),
+  question('future technology', 'Own a flying car', 'Own a robot butler'),
+  question('survival-lite', 'Survive a desert island', 'Survive an arctic winter'),
+  question('survival-lite', 'Build a raft to escape', 'Build a shelter and wait'),
+  question('sports', 'Win an olympic gold medal', 'Win a world championship title'),
+  question('music', 'Headline a huge festival', 'Record a platinum album'),
+];
+
 test('insertQuestions persists a valid batch and rejects a duplicate insert of the same pair', () => withFakeDb(async () => {
   const first = await insertQuestions(EIGHT_DIVERSE.slice(0, 2));
   assert.equal(first.inserted.length, 2);
@@ -93,19 +115,20 @@ test('releaseReservation only releases rows reserved by the given job, not anoth
   assert.equal(await countReady(), 5, 'only job-a\'s 5 reservations should return to ready');
 }));
 
-test('a successful job commits usage: used_count increments and the question returns to ready', () => withFakeDb(async fake => {
+test('a successful job commits usage: used_count increments and the question is retired to \'used\', never returning to ready', () => withFakeDb(async fake => {
   await insertQuestions(EIGHT_DIVERSE);
   const plan = await selectPlanForJob({ jobId: 'job-1', count: 8 });
   assert.ok(plan);
   await commitPlanUsage({ jobId: 'job-1', plan, duration: 57.2 });
-  assert.equal(await countReady(), 8, 'committed questions return to ready for future reuse');
+  assert.equal(await countReady(), 0, 'a consumed question must never be selectable again -- it does not return to ready');
   const usedRow = [...fake.state.questions.values()][0];
+  assert.equal(usedRow.status, 'used');
   assert.equal(usedRow.used_count, 1);
   assert.ok(usedRow.last_used_at);
   assert.equal(fake.state.videoQuestions.length, 8);
 }));
 
-test('getPoolStats reports ready/reserved/used/total for the admin status endpoint', () => withFakeDb(async () => {
+test('getPoolStats reports ready/reserved/used/total for the admin status endpoint, where used counts consumed QUESTION ROWS not completed videos', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
   const reservation = await selectAndReservePlan({ jobId: 'job-1', count: 3 });
   assert.ok(reservation);
@@ -114,8 +137,8 @@ test('getPoolStats reports ready/reserved/used/total for the admin status endpoi
   await commitPlanUsage({ jobId: 'job-2', plan, duration: 57 });
   const stats = await getPoolStats();
   assert.equal(stats.reserved, 3, '3 questions remain reserved by job-1');
-  assert.equal(stats.ready, 5, '8 - 3 reserved = 5 ready (job-2\'s 2 returned to ready after commit)');
-  assert.equal(stats.used, 1, 'one video has been committed');
+  assert.equal(stats.used, 2, 'job-2\'s 2 questions are permanently consumed');
+  assert.equal(stats.ready, 3, '8 - 3 reserved - 2 used = 3 still ready');
   assert.equal(stats.total, 8);
 }));
 
@@ -145,13 +168,13 @@ test('the production default reservation count (no explicit count passed) is exa
   assert.equal(await countReady(), 2, '8 seeded - 6 reserved by default = 2 still ready');
 }));
 
-test('a successful job using the production default count commits usage for exactly 6 questions', () => withFakeDb(async fake => {
+test('a successful job using the production default count commits usage for exactly 6 questions, permanently removing them from ready', () => withFakeDb(async fake => {
   await insertQuestions(EIGHT_DIVERSE);
   const plan = await selectPlanForJob({ jobId: 'job-default-commit' });
   assert.ok(plan);
   assert.equal(plan.questions.length, 6);
   await commitPlanUsage({ jobId: 'job-default-commit', plan, duration: 44.1 });
-  assert.equal(await countReady(), 8, 'all 6 committed questions return to ready; the other 2 were never touched');
+  assert.equal(await countReady(), 2, 'the 6 committed questions are consumed for good; only the other 2 (never selected) remain ready');
   assert.equal(fake.state.videoQuestions.length, 6);
 }));
 
@@ -162,4 +185,112 @@ test('a failed job using the production default count releases exactly 6 reserva
   const released = await releaseReservation('job-default-release');
   assert.equal(released, 6);
   assert.equal(await countReady(), 8);
+}));
+
+// The pool is a ONE-WAY, consume-once pool: a question successfully used in a completed video is
+// retired to status='used' (see commitPlanUsage's own doc comment) and can never be selected again
+// -- it does NOT rotate back to 'ready'. So "ready" after a successful 6-question job stays 6 lower
+// than before the job ever started; only a FAILED job's reservation dip is transient. used_count is
+// still incremented for historical/debugging purposes, but functionally a used question is retired
+// the moment it's committed. Total (all rows, any status) never changes across the whole lifecycle.
+test('a successful 6-question job (8-row pool): Ready 8->2 (permanently), Reserved 0->6->0, Used 0->6, Total stays 8', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const before = await getPoolStats();
+  assert.equal(before.ready, 8); assert.equal(before.reserved, 0); assert.equal(before.used, 0); assert.equal(before.total, 8);
+
+  const plan = await selectPlanForJob({ jobId: 'job-lifecycle' }); // production default count (6)
+  assert.equal(plan.questions.length, 6);
+  const midFlight = await getPoolStats();
+  assert.equal(midFlight.ready, 2, 'ready dips by exactly 6 while the job holds its reservation');
+  assert.equal(midFlight.reserved, 6);
+  assert.equal(midFlight.total, 8, 'total never changes across the job lifecycle');
+
+  await commitPlanUsage({ jobId: 'job-lifecycle', plan, duration: 44.1 });
+  const after = await getPoolStats();
+  assert.equal(after.ready, 2, 'ready stays at 2 -- the 6 committed questions are consumed for good, not rotated back');
+  assert.equal(after.reserved, 0);
+  assert.equal(after.used, 6, 'used counts the 6 consumed QUESTION ROWS, not 1 completed video');
+  assert.equal(after.total, 8, 'total still unchanged after commit');
+
+  const committedIds = new Set(plan.questions.map(q => q.poolId));
+  for (const row of fake.state.questions.values()) {
+    if (committedIds.has(row.id)) { assert.equal(row.status, 'used'); assert.equal(row.used_count, 1, `question ${row.id} used_count must be exactly 1`); assert.ok(row.last_used_at); }
+    else { assert.equal(row.status, 'ready'); assert.equal(row.used_count, 0, `question ${row.id} was never selected and must be untouched`); }
+  }
+}));
+
+test('a failed 6-question job: reservation is released, Ready/Total are restored, Used remains 0 (failed-video questions were never actually consumed)', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  await selectAndReservePlan({ jobId: 'job-lifecycle-failed' }); // production default count (6)
+  const midFlight = await getPoolStats();
+  assert.equal(midFlight.ready, 2); assert.equal(midFlight.reserved, 6);
+
+  await releaseReservation('job-lifecycle-failed');
+  const after = await getPoolStats();
+  assert.equal(after.ready, 8, 'a failed job\'s reservation dip is only ever transient -- ready returns to its original value');
+  assert.equal(after.reserved, 0); assert.equal(after.total, 8); assert.equal(after.used, 0, 'a failed job must never consume/mark used any question');
+  for (const row of fake.state.questions.values()) { assert.equal(row.status, 'ready'); assert.equal(row.used_count, 0, 'a failed job must never increment used_count'); }
+}));
+
+test('a consumed (used) question can never be selected again, even when it would otherwise be the ideal candidate', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const firstPlan = await selectPlanForJob({ jobId: 'job-consume-first' }); // production default count (6)
+  await commitPlanUsage({ jobId: 'job-consume-first', plan: firstPlan, duration: 44.1 });
+  const consumedIds = new Set(firstPlan.questions.map(q => q.poolId));
+  assert.equal(consumedIds.size, 6);
+
+  // Only 2 ready rows remain -- asking for 6 more must fail to fill the plan (never silently
+  // reach back into the 6 already-used rows to make up the count).
+  const insufficientReservation = await selectAndReservePlan({ jobId: 'job-consume-second', count: 6 });
+  assert.equal(insufficientReservation, null, 'must not be able to fill 6 when only 2 truly-ready questions remain');
+  assert.equal(await countReady(), 2, 'the failed reservation attempt must not disturb the 2 remaining ready questions');
+
+  // A request sized to what's actually left succeeds, and none of its rows were ever in the
+  // first job's consumed set.
+  const secondReservation = await selectAndReservePlan({ jobId: 'job-consume-second', count: 2 });
+  assert.ok(secondReservation);
+  for (const row of secondReservation.selected) assert.equal(consumedIds.has(row.id), false, `consumed question ${row.id} must never be reselected`);
+}));
+
+test('two successful 6-question jobs from the same pool never reuse each other\'s consumed questions', () => withFakeDb(async fake => {
+  await insertQuestions(SIXTEEN_DIVERSE);
+  assert.equal(await countReady(), 16);
+
+  const planA = await selectPlanForJob({ jobId: 'job-a' }); // production default count (6)
+  await commitPlanUsage({ jobId: 'job-a', plan: planA, duration: 44.1 });
+  const idsA = new Set(planA.questions.map(q => q.poolId));
+  assert.equal(idsA.size, 6);
+  assert.equal(await countReady(), 10);
+
+  const planB = await selectPlanForJob({ jobId: 'job-b' }); // production default count (6)
+  await commitPlanUsage({ jobId: 'job-b', plan: planB, duration: 44.1 });
+  const idsB = new Set(planB.questions.map(q => q.poolId));
+  assert.equal(idsB.size, 6);
+
+  const overlap = [...idsA].filter(id => idsB.has(id));
+  assert.equal(overlap.length, 0, 'job-b must never receive any question job-a already consumed');
+
+  const stats = await getPoolStats();
+  assert.equal(stats.used, 12, 'both jobs\' questions are consumed');
+  assert.equal(stats.ready, 4, '16 - 12 consumed = 4 still ready');
+  assert.equal(stats.total, 16);
+}));
+
+test('commitPlanUsage is idempotent: calling it twice for the same completed job never double-commits (used_count/ready count unaffected by the repeat)', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const plan = await selectPlanForJob({ jobId: 'job-double-commit' }); // production default count (6)
+
+  await commitPlanUsage({ jobId: 'job-double-commit', plan, duration: 44.1 });
+  const afterFirst = await getPoolStats();
+  assert.equal(afterFirst.used, 6); assert.equal(afterFirst.ready, 2);
+  const usedCountsAfterFirst = new Map([...fake.state.questions.values()].map(row => [row.id, row.used_count]));
+
+  // Simulates a duplicated completion callback for the SAME job -- must be a safe no-op, not a
+  // second commit.
+  await commitPlanUsage({ jobId: 'job-double-commit', plan, duration: 44.1 });
+  const afterSecond = await getPoolStats();
+  assert.equal(afterSecond.used, 6, 'the repeat must not consume anything further');
+  assert.equal(afterSecond.ready, 2); assert.equal(afterSecond.total, 8);
+  assert.equal(fake.state.videoQuestions.length, 6, 'no duplicate video/question links should be created');
+  for (const [id, count] of usedCountsAfterFirst) assert.equal(fake.state.questions.get(id).used_count, count, `question ${id} used_count must not double-increment on a repeated commit`);
 }));

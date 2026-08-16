@@ -44,6 +44,10 @@ const poll = async () => {
     document.querySelector('#video').src = job.outputUrl;
     document.querySelector('#download').href = job.downloadUrl;
     document.querySelector('#result').hidden = false;
+    // The Content Pool panel's ready/used counts change server-side the moment this job commits
+    // its questions -- without this, the panel keeps showing whatever it last fetched (e.g. at
+    // page load), silently stale until the user happens to hit "Refresh" themselves.
+    if (poolTokenInput.value) void refreshPoolStatus();
     return;
   }
 

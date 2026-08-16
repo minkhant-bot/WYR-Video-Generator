@@ -80,10 +80,14 @@ export const createFakeDb = () => {
       if (!state.videoQuestions.some(vq => vq.video_id === videoId && vq.question_id === questionId)) state.videoQuestions.push({ video_id: videoId, question_id: questionId, position });
       return { rows: [] };
     }
-    if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, used_count")) {
-      const [ids] = params;
-      for (const id of ids) { const row = state.questions.get(id); if (row) { row.status = 'ready'; row.reserved_by_job = null; row.reserved_at = null; row.used_count += 1; row.last_used_at = new Date(); } }
-      return { rows: [] };
+    if (text.startsWith("UPDATE wyr_questions SET status = 'used', reserved_by_job = NULL, reserved_at = NULL, used_count")) {
+      const [ids, jobId] = params;
+      let rowCount = 0;
+      for (const id of ids) {
+        const row = state.questions.get(id);
+        if (row && row.reserved_by_job === jobId && row.status === 'reserved') { row.status = 'used'; row.reserved_by_job = null; row.reserved_at = null; row.used_count += 1; row.last_used_at = new Date(); rowCount += 1; }
+      }
+      return { rows: [], rowCount };
     }
     // Migration bodies are opaque to this fake -- it only needs to prove BEGIN/apply/COMMIT/record
     // wiring works, not execute arbitrary DDL. Treat any other statement as a harmless no-op.
