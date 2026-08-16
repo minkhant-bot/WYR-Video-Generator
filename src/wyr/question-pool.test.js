@@ -13,6 +13,10 @@ const withFakeDb = async operation => {
 
 const question = (category, a, b, aq, bq) => ({ category, optionA: { text: a, searchQuery: aq || `${a} scene` }, optionB: { text: b, searchQuery: bq || `${b} scene` } });
 
+// A bulk pool fixture of 8 rows, used only to exercise selectAndReservePlan/selectPlanForJob's
+// generic `count` parameter across a variety of sub-counts (3, 2, 5, ...) -- NOT a claim that
+// production selects 8 questions. Production's fixed count (exactly 6, via config.questionCount)
+// is covered separately below using these same functions' default `count`.
 const EIGHT_DIVERSE = [
   question('money', 'Own a yacht', 'Own a jet'),
   question('luxury', 'Live in a mansion', 'Live in a penthouse'),
@@ -127,4 +131,35 @@ test('a DB-selected plan is shaped for the automatic image/TTS/render path with 
   assert.equal(plan.source, 'database_pool');
   assert.equal('selection' in plan, false);
   for (const q of plan.questions) { assert.equal(typeof q.optionA.text, 'string'); assert.equal(typeof q.optionA.searchQuery, 'string'); }
+}));
+
+// Fixed production policy: every generated video uses exactly 6 questions/scenes. These exercise
+// selectAndReservePlan/selectPlanForJob/commitPlanUsage/releaseReservation via their DEFAULT count
+// (no explicit override), proving the production default itself -- not just that the functions can
+// be parametrized to 6 -- is exactly 6.
+test('the production default reservation count (no explicit count passed) is exactly 6', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const reservation = await selectAndReservePlan({ jobId: 'job-default-count' });
+  assert.ok(reservation);
+  assert.equal(reservation.selected.length, 6);
+  assert.equal(await countReady(), 2, '8 seeded - 6 reserved by default = 2 still ready');
+}));
+
+test('a successful job using the production default count commits usage for exactly 6 questions', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const plan = await selectPlanForJob({ jobId: 'job-default-commit' });
+  assert.ok(plan);
+  assert.equal(plan.questions.length, 6);
+  await commitPlanUsage({ jobId: 'job-default-commit', plan, duration: 44.1 });
+  assert.equal(await countReady(), 8, 'all 6 committed questions return to ready; the other 2 were never touched');
+  assert.equal(fake.state.videoQuestions.length, 6);
+}));
+
+test('a failed job using the production default count releases exactly 6 reservations', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  await selectAndReservePlan({ jobId: 'job-default-release' });
+  assert.equal(await countReady(), 2);
+  const released = await releaseReservation('job-default-release');
+  assert.equal(released, 6);
+  assert.equal(await countReady(), 8);
 }));

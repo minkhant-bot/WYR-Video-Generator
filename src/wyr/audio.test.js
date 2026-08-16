@@ -143,14 +143,15 @@ test('RATE_COMPRESSION_LADDER only ever speeds narration up relative to the conf
   assert.deepEqual(sorted, [...sorted].sort((left, right) => left - right));
 });
 
-test('eight scenes at the production duration budget keep the finished video safely under 60 seconds', () => {
+// Fixed production policy: every generated video uses exactly 6 questions/scenes.
+test('six scenes at the production duration budget keep the finished video comfortably under 60 seconds', () => {
   const maximumSceneDuration = 7.25;
   const voiceDuration = maximumSceneDuration - SCENE_TAIL_SECONDS - 0.05;
-  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
-  assert.equal(timeline.scenes.length, 8);
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, () => ({ duration: voiceDuration })), baseDuration: 7, maximumSceneDuration });
+  assert.equal(timeline.scenes.length, 6);
   assert.ok(timeline.totalDuration < 60, `expected < 60s, got ${timeline.totalDuration}`);
-  assert.ok(timeline.totalDuration <= 59);
-  assert.ok(timeline.totalDuration >= 55);
+  assert.ok(timeline.totalDuration <= 44, `expected comfortable headroom (<=44s) with only 6 scenes, got ${timeline.totalDuration}`);
+  assert.ok(timeline.totalDuration >= 40);
 });
 
 test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 11 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });

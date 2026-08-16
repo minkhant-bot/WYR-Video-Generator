@@ -16,19 +16,18 @@ const withFakeDb = async operation => {
   finally { __resetPoolForTests(); }
 };
 
-const EIGHT_DIVERSE = [
+// Fixed production policy: every generated video uses exactly 6 questions/scenes.
+const SIX_DIVERSE = [
   { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } },
   { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },
   { category: 'travel', optionA: { text: 'Backpack Europe', searchQuery: 'backpacker europe street' }, optionB: { text: 'Cruise the Caribbean', searchQuery: 'cruise ship caribbean' } },
   { category: 'food', optionA: { text: 'Eat at a fine restaurant', searchQuery: 'fine dining restaurant' }, optionB: { text: 'Cook with a chef', searchQuery: 'chef cooking kitchen' } },
   { category: 'adventure', optionA: { text: 'Skydive', searchQuery: 'skydiving parachute sky' }, optionB: { text: 'Scuba dive', searchQuery: 'scuba diving reef' } },
   { category: 'space', optionA: { text: 'Visit the ISS', searchQuery: 'international space station' }, optionB: { text: 'Visit the moon', searchQuery: 'moon surface astronaut' } },
-  { category: 'ocean', optionA: { text: 'Swim with sharks', searchQuery: 'swimming with sharks' }, optionB: { text: 'Swim with whales', searchQuery: 'swimming with whales' } },
-  { category: 'fame', optionA: { text: 'Be a movie star', searchQuery: 'movie star red carpet' }, optionB: { text: 'Be a rock star', searchQuery: 'rock star concert stage' } },
 ];
 
 const baseConfig = overrides => ({
-  questionCount: 8, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
+  questionCount: 6, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
   poolTarget: 10, poolLowWaterMark: 100, poolEmergencyRefillMaxBatches: 1,
   secondsPerQuestion: 7, maximumSceneDuration: 7.25,
   pixabayApiKey: 'test-pixabay-key', pexelsApiKey: 'test-pexels-key', pexelsConcurrency: 4,
@@ -44,8 +43,8 @@ const baseConfig = overrides => ({
 // exercises the actual production runAutomaticPipeline code path fully offline (no live Groq, no
 // live image provider, no live TTS -- the failure occurs before TTS would ever run).
 test('offline E2E: DB-first selection succeeds, image selection is exhausted, job fails cleanly with reservation released and temp artifacts cleaned up', () => withFakeDb(async () => {
-  await insertQuestions(EIGHT_DIVERSE);
-  assert.equal(await countReady(), 8);
+  await insertQuestions(SIX_DIVERSE);
+  assert.equal(await countReady(), 6);
 
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-pipeline-e2e-'));
   const store = createJobStore(rootDir);
@@ -73,8 +72,8 @@ test('offline E2E: DB-first selection succeeds, image selection is exhausted, jo
   assert.ok(finalJob.error.length <= 260, 'the client-facing error message must be bounded, not a raw dump');
   assert.equal(groqCalled, false, 'DB-first generation must never call Groq, even on a downstream failure');
 
-  // Reservation released: all 8 questions are ready again, none left stuck as 'reserved'.
-  assert.equal(await countReady(), 8);
+  // Reservation released: all 6 questions are ready again, none left stuck as 'reserved'.
+  assert.equal(await countReady(), 6);
 
   // Disposable temp artifacts cleaned up; job.json (diagnostics) and plan.json are preserved.
   assert.equal(fs.existsSync(path.join(job.workspace, 'assets')), false);

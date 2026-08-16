@@ -191,10 +191,10 @@ const rateLimitFailure = ({ accepted, questionCount, retries, waitedMs, maxRetri
   { acceptedCount: accepted.length, requiredCount: questionCount, retries, waitedMs },
 );
 
-// Lightweight flow: one request for all 8, local validation, and — if some are rejected — exactly
+// Lightweight flow: one request for all 6, local validation, and — if some are rejected — exactly
 // one repair request for only the still-missing count (maxAttempts defaults to 2: initial +
 // one repair round). Never regenerates the whole batch just because part of it was rejected.
-export const generateProductionPlan = async ({ provider, historyStore, questionCount = 8, maxAttempts = 2, rateLimitPolicy = {}, sleep = wait, random = Math.random }) => {
+export const generateProductionPlan = async ({ provider, historyStore, questionCount = 6, maxAttempts = 2, rateLimitPolicy = {}, sleep = wait, random = Math.random }) => {
   if (!provider || typeof provider.generatePlan !== 'function') throw new TypeError('A content provider is required.');
   if (!historyStore || typeof historyStore.load !== 'function' || typeof historyStore.appendPlan !== 'function') throw new TypeError('A persistent content history store is required.');
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new TypeError('maxAttempts must be a positive integer.');

@@ -35,7 +35,9 @@ export const getConfig = () => {
   return {
     port: integer('WYR_PORT', 3100, 1, 65535),
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
-    questionCount: integer('WYR_QUESTION_COUNT', 8, 8, 8),
+    // Fixed production policy: every generated video uses exactly 6 questions/scenes. Not
+    // configurable per-job -- min/max/fallback are all 6 so no environment override can change it.
+    questionCount: integer('WYR_QUESTION_COUNT', 6, 6, 6),
     // Lightweight flow: 1 initial batched request + at most 1 repair request for whatever's still
     // missing. Do not raise this back toward an unbounded retry-everything loop.
     contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 2, 1, 4),
@@ -46,9 +48,9 @@ export const getConfig = () => {
     groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 30_000, 1_000, 60_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
-    // 8 scenes * 7.25s keeps the finished video at ~56-58s, safely under the 60s short-form limit.
-    // The upper bound (7.4) is deliberately tight: 8 * 7.4 = 59.2s, so no environment-variable
-    // override can push a single misconfigured value past the hard 60s Shorts ceiling.
+    // 6 scenes * 7.25s keeps the finished video at ~43.5s, comfortably under the 60s short-form
+    // limit. The upper bound (7.4) is deliberately tight: 6 * 7.4 = 44.4s, so no environment
+    // variable override can push a single misconfigured value anywhere near the 60s Shorts ceiling.
     maximumSceneDuration: number('WYR_MAX_SCENE_DURATION', 7.25, 6, 7.4),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),

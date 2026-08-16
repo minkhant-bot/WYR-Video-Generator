@@ -69,7 +69,7 @@ const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, loc
 const DURATION_SAFETY_MARGIN_SECONDS = 0.5;
 // One bounded, deliberately small relaxation step for the corrective retry: since most scenes
 // land well under their budget (short narration hits the 7s floor), a single scene needing a
-// little more room rarely pushes the 8-scene total anywhere near the 60s limit.
+// little more room rarely pushes the fixed 6-scene total anywhere near the 60s limit.
 const DURATION_RETRY_RELAXATION_SECONDS = 0.75;
 // Builds voice + timeline together against a duration budget, and — if even bounded TTS-rate
 // compression can't fit a scene inside the primary per-scene budget — makes exactly one bounded
@@ -190,12 +190,12 @@ export const prepareImageSelection = async ({ job, store, config }) => {
   }
 };
 
-// Normal production entry point: selects 8 diverse, pre-validated questions straight from the
-// PostgreSQL pool (see content-source.js) -- no live Groq call in the common case -- automatically
-// searches/scores/selects all 16 images (same createImageSelection auto-selection used by the
-// debug path above — Pixabay primary, Pexels fallback, unchanged scoring), then immediately hands
-// off to the existing runPipeline to lock assets, generate voice, build the timeline, render, and
-// verify. No human approval step; never stops at reviewing_images.
+// Normal production entry point: selects exactly 6 diverse, pre-validated questions straight from
+// the PostgreSQL pool (see content-source.js) -- no live Groq call in the common case --
+// automatically searches/scores/selects all 12 images (2 per question; same createImageSelection
+// auto-selection used by the debug path above — Pixabay primary, Pexels fallback, unchanged
+// scoring), then immediately hands off to the existing runPipeline to lock assets, generate voice,
+// build the timeline, render, and verify. No human approval step; never stops at reviewing_images.
 export const runAutomaticPipeline = async ({ job, store, config }) => {
   const update = changes => store.update(job.id, changes);
   let poolReserved = false;
@@ -207,7 +207,8 @@ export const runAutomaticPipeline = async ({ job, store, config }) => {
     writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
-    if (selection.selectedCount !== 16) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all 16 image slots; selected ${selection.selectedCount}/16.`, { selectedCount: selection.selectedCount });
+    const expectedImageCount = plan.questions.length * 2;
+    if (selection.selectedCount !== expectedImageCount) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${expectedImageCount} image slots; selected ${selection.selectedCount}/${expectedImageCount}.`, { selectedCount: selection.selectedCount });
     await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
   } catch (error) {
     await handleJobFailure({ job, store, error, poolReserved });

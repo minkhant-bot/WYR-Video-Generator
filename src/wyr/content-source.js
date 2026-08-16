@@ -3,7 +3,7 @@ import { ContentPoolExhaustedError, countReady, selectPlanForJob } from './quest
 import { maybeTriggerBackgroundRefill, refillPool } from './refill.js';
 import { log } from './utils.js';
 
-// Normal path: select+reserve 8 diverse questions straight from the database, zero Groq calls.
+// Normal path: select+reserve 6 diverse questions straight from the database, zero Groq calls.
 // Only if the pool can't currently fill a video does this fall back to ONE bounded emergency
 // refill batch (never a live per-video generation call) and retry the selection once. If that
 // still isn't enough, it fails clearly with CONTENT_POOL_EMPTY instead of retrying Groq for

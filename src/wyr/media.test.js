@@ -135,6 +135,32 @@ test('a genuine FFmpeg failure (undecodable input) rejects the render and is nev
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+// Fixed production policy: every generated video uses exactly 6 questions/scenes, so render
+// verification must require exactly 6 rendered segment files -- not more, not fewer.
+test('render verification requires exactly 6 rendered scene segments to be present', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-scene-count-')); const ffmpeg = resolveFfmpegPath();
+  try {
+    const output = path.join(root, 'output.mp4');
+    const duration = 5;
+    const build = spawnSync(ffmpeg, [
+      '-y', '-f', 'lavfi', '-i', `color=c=black:s=1080x1920:r=30:d=${duration}`,
+      '-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${duration}`,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', output,
+    ], { encoding: 'utf8' });
+    assert.equal(build.status, 0, build.stderr);
+
+    for (let index = 0; index < 5; index += 1) fs.writeFileSync(path.join(root, `segment-${String(index).padStart(2, '0')}.mp4`), Buffer.from('x'));
+    await assert.rejects(
+      () => verifyVideo(output, { expectedSceneCount: 6, renderDir: root }),
+      /rendered scene 6 is missing/,
+    );
+
+    fs.writeFileSync(path.join(root, 'segment-05.mp4'), Buffer.from('x'));
+    const verification = await verifyVideo(output, { expectedSceneCount: 6, renderDir: root });
+    assert.equal(verification.sceneCount, 6);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('verifyVideo rejects a zero-byte or missing output file before ever probing it, instead of reporting it completed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-empty-output-'));
   try {
