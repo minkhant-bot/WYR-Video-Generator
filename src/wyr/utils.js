@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const log = (event, details = {}) => console.info(JSON.stringify({ time: new Date().toISOString(), component: 'wyr-generator', event, ...details }));
+const CONNECTION_STRING_PATTERN = /(postgres(?:ql)?:\/\/)\S+/gi;
+// Postgres client/driver errors occasionally interpolate the connection string itself (e.g. DNS or
+// auth failures), embedded password and all -- strip it before the message ever reaches a log line,
+// a thrown error, or (via pipeline.js's job-failure handling) an unauthenticated client response.
+export const redactConnectionSecrets = message => (typeof message === 'string' ? message.replace(CONNECTION_STRING_PATTERN, '$1[redacted]') : message);
 export const writeJsonAtomic = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;

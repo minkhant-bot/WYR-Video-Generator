@@ -205,6 +205,43 @@ test('every candidate exhausted (including a widened search) fails that slot cle
   });
 });
 
+// This is the REAL production download path (runAutomaticPipeline always supplies a selectionState,
+// so pipeline.js's runPipeline always calls downloadSelectedCandidates, never images.js's
+// findAndDownloadImages) -- so the framing safety gate has to be wired in HERE, not just in
+// images.js, or production images never get subject-aware framing at all.
+test('a candidate whose crop cannot be made safely is rejected for framing reasons and download falls back to the next candidate', () => {
+  const handlers = new Map();
+  const unsafe = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));
+  const safe = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));
+  const testSlot = { key: 'QT0', questionIndex: 0, slot: 'A', optionText: 'test', candidates: [unsafe, safe], selectedId: unsafe.candidateKey };
+  const selection = buildSelection([testSlot], handlers);
+  const rejectedIds = [];
+  const computeCrop = async ({ localPath }) => {
+    if (localPath.includes(`-pixabay-${unsafe.id}`)) { rejectedIds.push(unsafe.id); return { safe: false, reason: 'framing rejected: synthetic test rejection' }; }
+    return { safe: true, x: 1, y: 2, coverWidth: 900, coverHeight: 450 };
+  };
+  return withMockedFetch(handlers, async () => {
+    const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-dl-')), config, computeCrop });
+    const result = assets.find(asset => asset.questionIndex === 0);
+    assert.equal(result.id, safe.id, 'the framing-unsafe candidate must be skipped in favor of the safe one');
+    assert.deepEqual(result.framing, { x: 1, y: 2, coverWidth: 900, coverHeight: 450 });
+    assert.equal(rejectedIds.length, 1, 'the framing check must have run against the rejected candidate before falling back');
+  });
+});
+
+test('a framing-safe candidate carries its computed crop offset onto the final asset', () => {
+  const handlers = new Map();
+  const candidate = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));
+  const testSlot = { key: 'QT0', questionIndex: 0, slot: 'A', optionText: 'test', candidates: [candidate], selectedId: candidate.candidateKey };
+  const selection = buildSelection([testSlot], handlers);
+  const computeCrop = async () => ({ safe: true, x: 12, y: 34, coverWidth: 800, coverHeight: 480 });
+  return withMockedFetch(handlers, async () => {
+    const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-dl-')), config, computeCrop });
+    const result = assets.find(asset => asset.questionIndex === 0);
+    assert.deepEqual(result.framing, { x: 12, y: 34, coverWidth: 800, coverHeight: 480 });
+  });
+});
+
 test('selectedCandidates only returns slots that actually have a selection', () => {
   const handlers = new Map();
   const candidate = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
-import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
+import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, releaseStaleReservations, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -109,6 +109,38 @@ test('releaseReservation only releases rows reserved by the given job, not anoth
   await selectAndReservePlan({ jobId: 'job-b', count: 3 });
   await releaseReservation('job-a');
   assert.equal(await countReady(), 5, 'only job-a\'s 5 reservations should return to ready');
+}));
+
+// The job store is in-memory only and never reloaded on restart (see jobs.js), so a process
+// restart mid-job orphans its reservation forever unless something eventually reclaims it. This is
+// that reclaim path, run once at server boot (see wyr-server.js).
+test('releaseStaleReservations reclaims a reservation older than the threshold, but leaves a fresh one (and other jobs\' rows) alone', () => withFakeDb(async fake => {
+  await insertQuestions(EIGHT_DIVERSE);
+  await selectAndReservePlan({ jobId: 'orphaned-job', count: 3 });
+  await selectAndReservePlan({ jobId: 'fresh-job', count: 2 });
+  assert.equal(await countReady(), 3);
+
+  // Simulate the orphaned job's reservation having been made 30 minutes ago (e.g. the process
+  // restarted before it could ever finish/release), while the fresh one was just made.
+  for (const row of fake.state.questions.values()) {
+    if (row.reserved_by_job === 'orphaned-job') row.reserved_at = new Date(Date.now() - 30 * 60 * 1000);
+  }
+
+  const released = await releaseStaleReservations(20 * 60 * 1000);
+  assert.equal(released, 3, 'only the 3 stale rows should be released');
+  assert.equal(await countReady(), 6, '3 originally-ready + 3 reclaimed from the orphaned job');
+
+  const stillReserved = [...fake.state.questions.values()].filter(row => row.status === 'reserved');
+  assert.equal(stillReserved.length, 2);
+  assert.ok(stillReserved.every(row => row.reserved_by_job === 'fresh-job'), 'the fresh (non-stale) reservation must be untouched');
+}));
+
+test('releaseStaleReservations is a no-op when nothing is stale', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  await selectAndReservePlan({ jobId: 'active-job', count: 4 });
+  const released = await releaseStaleReservations(20 * 60 * 1000);
+  assert.equal(released, 0);
+  assert.equal(await countReady(), 4);
 }));
 
 test('a successful job commits usage: used_count increments and the question is retired to \'used\', never returning to ready', () => withFakeDb(async fake => {

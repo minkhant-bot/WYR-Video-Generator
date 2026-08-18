@@ -10,14 +10,18 @@ import { PUBLIC_DIR } from './src/wyr/runtime.js';
 import { CredentialInputError, getCredentialStatus, saveLocalCredentials } from './src/wyr/credentials.js';
 import { runStartupMigrations } from './src/wyr/startup.js';
 import { isAdminRequestAuthorized } from './src/wyr/admin-auth.js';
-import { getPoolStats } from './src/wyr/question-pool.js';
+import { getPoolStats, releaseStaleReservations } from './src/wyr/question-pool.js';
 import { getRefillStatus, triggerAdminRefill } from './src/wyr/refill.js';
 import { seedStaticPool } from './src/wyr/seed.js';
 import { importQuestionPack, PackFormatError } from './src/wyr/pack-import.js';
 
 const startupConfig = getConfig(); const store = createJobStore(startupConfig.rootDir); const publicDir = PUBLIC_DIR;
 const json = (res, status, body) => { const payload = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'cache-control': 'no-store' }); res.end(payload); };
-const sendFile = (res, file, type, downloadName) => { if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return json(res, 404, { error: 'File not found.' }); const headers = { 'content-type': type, 'content-length': fs.statSync(file).size }; if (downloadName) headers['content-disposition'] = `attachment; filename="${downloadName}"`; res.writeHead(200, headers); fs.createReadStream(file).pipe(res); };
+// A read stream with no 'error' listener throws an UNCAUGHT exception on any read failure (a
+// transient disk I/O error, the file vanishing between the existsSync check and the actual read,
+// etc.) -- Node's default handling for that is to crash the whole process, taking down every other
+// in-flight request, not just this one. The listener below turns that into a single failed request.
+const sendFile = (res, file, type, downloadName) => { if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return json(res, 404, { error: 'File not found.' }); const headers = { 'content-type': type, 'content-length': fs.statSync(file).size }; if (downloadName) headers['content-disposition'] = `attachment; filename="${downloadName}"`; res.writeHead(200, headers); const stream = fs.createReadStream(file); stream.on('error', error => { log('http.file_stream_failed', { file, message: error.message }); res.destroy(error); }); stream.pipe(res); };
 const readJsonBody = req => new Promise((resolve, reject) => {
   const chunks = []; let size = 0; let tooLarge = false;
   req.on('data', chunk => {
@@ -169,6 +173,16 @@ try {
 } catch (error) {
   console.error(error.message);
   process.exit(1);
+}
+// The job store is in-memory only (see jobs.js) and never reloaded from disk, so a process restart
+// (Railway redeploy, crash, OOM) mid-job orphans its DB reservation forever -- nothing else ever
+// revisits a 'reserved' row. Best-effort and non-fatal: the pool having a few stale reservations
+// briefly is far less bad than refusing to start the server over it.
+try {
+  const released = await releaseStaleReservations();
+  if (released) log('startup.stale_reservations_released', { count: released });
+} catch (error) {
+  log('startup.stale_reservation_release_failed', { message: error.message });
 }
 
 server.listen(startupConfig.port, '0.0.0.0', () => log('server.started', { port: startupConfig.port, rootDir: startupConfig.rootDir, pexelsConcurrency: startupConfig.pexelsConcurrency, ttsConcurrency: startupConfig.ttsConcurrency, sceneRenderConcurrency: startupConfig.sceneRenderConcurrency, ffmpegThreads: startupConfig.ffmpegThreads }));

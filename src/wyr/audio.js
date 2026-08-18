@@ -2,10 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EdgeTTS } from '@seepine/edge-tts';
-import { mapWithConcurrency, retry, log } from './utils.js';
+import { mapWithConcurrency, retry } from './utils.js';
 import { WYR_TEMPLATE } from './template.js';
 import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
-import { getAudioSpec, getCountdownSequenceDuration } from './audio-spec.js';
+import { getAudioSpec } from './audio-spec.js';
 import { ensureSfxAssets } from './sfx-synth.js';
 
 // Fixed product decision (not a measured reference value): on the final scene, skip the outgoing
@@ -33,18 +33,6 @@ export const measureAudioDuration = async audioPath => {
   return duration;
 };
 
-// A scene's total duration is voiceStart + narration + a fixed pause/countdown/reveal/transition tail.
-// This constant mirrors that tail so voice generation can predict a scene's duration before buildSceneTimeline runs.
-// Non-final-scene tail (the final scene's tail is shorter -- see FINAL_SCENE_REVEAL_HOLD_SECONDS and buildSceneTimeline).
-const SCENE_TAIL_SECONDS = 0.3 + WYR_TEMPLATE.timing.countdownPauseAfterVoice + getCountdownSequenceDuration() + WYR_TEMPLATE.timing.revealHoldDuration + WYR_TEMPLATE.timing.transitionOutDuration;
-export const RATE_COMPRESSION_LADDER = Object.freeze(['-10%', '-5%', '+0%', '+8%', '+15%', '+22%']);
-const parseRatePercent = value => Number(String(value ?? '+0%').replace('%', '')) || 0;
-const fasterRateSteps = baseRate => {
-  const basePercent = parseRatePercent(baseRate);
-  const steps = RATE_COMPRESSION_LADDER.filter(step => parseRatePercent(step) > basePercent);
-  return steps.length ? steps : [baseRate];
-};
-
 // Thrown once a scene's narration cannot be produced (as valid, ffprobe-measurable audio) after
 // its own bounded retries -- distinct from a duration-budget failure so the pipeline/UI can tell
 // "TTS itself is broken" apart from "narration is simply too long to fit" (see pipeline.js).
@@ -52,7 +40,10 @@ export class TtsGenerationError extends Error {
   constructor(message, details = {}) { super(message); this.code = 'TTS_FAILED'; Object.assign(this, details); }
 }
 
-export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration, sceneDurationBudget = Infinity, maxCompressionAttempts = 5 }) => {
+// Narration is always synthesized at the configured rate and never sped up or truncated to fit a
+// box -- each scene's real measured duration is authoritative, and buildSceneTimeline lets the
+// scene grow to fit it. (See pipeline.js for the global, whole-video ceiling this feeds into.)
+export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration }) => {
   fs.mkdirSync(audioDir, { recursive: true }); let completed = 0;
   return mapWithConcurrency(plan.questions, concurrency, async (question, index) => {
     const narration = buildNarration(question); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
@@ -60,8 +51,7 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
     // first: a file that fails ffprobe measurement (truncated/corrupt audio that still passed the
     // byte-size check) is exactly as much a TTS failure as an empty response and must be retried
     // the same way -- and `localPath` (the file the rest of the pipeline reads) is only ever
-    // replaced once a candidate is FULLY verified, so a later failed attempt (e.g. during optional
-    // rate compression) can never leave `localPath` holding not-yet-verified/corrupt bytes.
+    // replaced once a candidate is FULLY verified.
     const synthesizeAndMeasure = rateValue => retry(async attempt => {
       const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
       let result;
@@ -77,30 +67,15 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
       return measured;
     }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
 
-    let usedRate = rate; let duration;
+    let duration;
     try {
       duration = await synthesizeAndMeasure(rate);
     } catch (error) {
       fs.rmSync(localPath, { force: true });
       throw new TtsGenerationError(`Narration for scene ${index + 1} could not be generated after bounded retries: ${error.message}`, { sceneIndex: index, cause: error });
     }
-    // Narration this long would push the scene past its duration budget; speed up speech (never
-    // truncate audio) until it fits. A compression attempt failing (e.g. a transient hiccup on an
-    // OPTIONAL speed-up call) never aborts the scene -- the already-valid `duration`/`localPath`
-    // from the successful synthesis above remain a safe fallback.
-    if (Number.isFinite(sceneDurationBudget) && SCENE_TAIL_SECONDS + duration > sceneDurationBudget) {
-      for (const candidateRate of fasterRateSteps(rate).slice(0, maxCompressionAttempts)) {
-        try {
-          const candidateDuration = await synthesizeAndMeasure(candidateRate);
-          if (candidateDuration < duration) { duration = candidateDuration; usedRate = candidateRate; }
-          if (SCENE_TAIL_SECONDS + candidateDuration <= sceneDurationBudget) break;
-        } catch (error) {
-          log('tts.compression_attempt_failed', { sceneIndex: index, rate: candidateRate, message: error.message });
-        }
-      }
-    }
     completed += 1; onProgress?.(completed, plan.questions.length);
-    return { questionIndex: index, narration, filename, localPath, duration, voice, rate: usedRate };
+    return { questionIndex: index, narration, filename, localPath, duration, voice, rate };
   });
 };
 
@@ -108,7 +83,7 @@ const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_
 // tickCount/tickSpacingSeconds/revealGapAfterLastTickSeconds/finalSceneHoldSeconds all default from
 // config/audio-spec.json (via getAudioSpec()) rather than being hardcoded -- pass explicit values
 // only to override for a test or a one-off re-measurement.
-export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, maximumSceneDuration = 11, tickCount, tickSpacingSeconds, revealGapAfterLastTickSeconds, finalSceneHoldSeconds = FINAL_SCENE_REVEAL_HOLD_SECONDS } = {}) => {
+export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, tickCount, tickSpacingSeconds, revealGapAfterLastTickSeconds, finalSceneHoldSeconds = FINAL_SCENE_REVEAL_HOLD_SECONDS } = {}) => {
   if (!Array.isArray(voiceovers) || voiceovers.length === 0) throw new Error('At least one measured narration is required to build the scene timeline.');
   const spec = getAudioSpec();
   const ticks = tickCount ?? spec.countdown.tickCount;
@@ -133,7 +108,11 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
     const duration = isLastScene
       ? frameCeil(Math.max(voiceover.duration + voicePaddingSeconds, requiredDuration))
       : frameCeil(Math.max(baseDuration, voiceover.duration + voicePaddingSeconds, requiredDuration));
-    if (duration > maximumSceneDuration) throw new Error(`Scene ${index + 1} narration is ${voiceover.duration.toFixed(2)}s and would exceed the ${maximumSceneDuration}s scene limit. Regenerate shorter option text.`);
+    // No per-scene cap here: a scene's duration is derived purely from its own real narration +
+    // fixed tail. Whether the resulting WHOLE-VIDEO total is safe to render is a separate, global
+    // check made by the caller after all scenes are built (see pipeline.js's
+    // assertWithinProductionDurationCeiling) -- one long scene must never fail in isolation when
+    // shorter scenes elsewhere leave plenty of room in the total budget.
     // contentEnd === duration on the final scene (no transition-out tail to reserve), which also
     // means the outgoing slide motion in media.js (driven off contentEnd) never actually triggers
     // within the rendered frames, and the percentage overlay never fades out early.
@@ -142,7 +121,7 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
     const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, isLastScene, transitionOutDuration: isLastScene ? 0 : WYR_TEMPLATE.timing.transitionOutDuration };
     cursor += duration; return scene;
   });
-  return { version: 1, baseDuration, maximumSceneDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, totalDuration: cursor, scenes };
+  return { version: 1, baseDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, totalDuration: cursor, scenes };
 };
 
 // 'slide' fires at scene start (accompanies images sliding in), 'whoosh' fires at scene end

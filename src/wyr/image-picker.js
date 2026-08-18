@@ -5,6 +5,8 @@ import { PexelsImageProvider, assessImageCandidate, buildImageQueries, inspectDo
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
+import { computeSubjectAwareCrop } from './framing.js';
+import { WYR_TEMPLATE } from './template.js';
 
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
@@ -364,7 +366,12 @@ export class ImageSelectionExhaustedError extends Error {
   constructor(message, details = {}) { super(message); this.code = 'IMAGE_SELECTION_EXHAUSTED'; Object.assign(this, details); }
 }
 
-const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsDir }) => {
+// Framing safety gate (see framing.js): computed from the REAL decoded dimensions (inspection.width/
+// height), never the provider's declared width/height, which can be stale or simply wrong. An
+// unsafe crop is treated exactly like a failed download/validation -- it throws here, so the
+// existing candidate-by-candidate fallback in tryCandidate below moves on to the next ranked
+// candidate instead of ever locking in a bad crop.
+const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsDir, computeCrop = computeSubjectAwareCrop }) => {
   const safeId = String(candidate.id).replace(/[^a-z0-9_-]/gi, '_');
   const filename = `${item.key.toLowerCase()}-${candidate.provider.toLowerCase()}-${safeId}.jpg`;
   const localPath = path.join(assetsDir, filename);
@@ -372,7 +379,9 @@ const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsD
     await provider.downloadAsset(candidate, localPath);
     const inspection = await inspectDownloadedImage(localPath);
     if (!inspection.valid) throw new Error(`failed validation: ${inspection.reasons.join('; ')}`);
-    return { localPath, filename };
+    const framing = await computeCrop({ localPath, sourceWidth: inspection.width, sourceHeight: inspection.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
+    if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
+    return { localPath, filename, framing: { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight } };
   } catch (error) {
     fs.rmSync(localPath, { force: true });
     throw error;
@@ -386,7 +395,7 @@ const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsD
 // trying alternate/broader queries and the other provider) before finally failing that slot
 // clearly. A candidate that fails is never retried (tracked in `failedKeys`), and a candidate
 // whose bytes duplicate one already used for another slot is skipped, never both kept.
-export const downloadSelectedCandidates = async ({ selection, assetsDir, config }) => {
+export const downloadSelectedCandidates = async ({ selection, assetsDir, config, computeCrop = computeSubjectAwareCrop }) => {
   const providers = new Map();
   if (config.pixabayApiKey) {
     providers.set('Pixabay', new PixabayImageProvider({
@@ -420,14 +429,14 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config 
       if (!provider) { failedKeys.add(candidate.candidateKey); return null; }
       rank += 1;
       try {
-        const { localPath, filename } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir });
+        const { localPath, filename, framing } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir, computeCrop });
         const sha256 = createHash('sha256').update(fs.readFileSync(localPath)).digest('hex');
         if (usedContentHashes.has(sha256)) { fs.rmSync(localPath, { force: true }); throw new Error('duplicate image bytes already used for another slot'); }
         usedContentHashes.add(sha256); usedCandidateKeys.add(candidate.candidateKey);
         log('image.candidate_accepted', { slot: item.key, provider: candidate.provider, query: candidate.queryUsed, candidateRank: rank });
         return {
           ...candidate, questionIndex: item.questionIndex, slot: item.slot, text: item.optionText,
-          queryUsed: candidate.queryUsed, localPath, filename, sha256,
+          queryUsed: candidate.queryUsed, localPath, filename, sha256, framing,
           selectedProvider: candidate.provider, selectedQuery: candidate.queryUsed,
           providerAttemptOrder: [...IMAGE_PROVIDER_ORDER], locked: false,
         };

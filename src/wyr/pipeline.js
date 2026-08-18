@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { writeJsonAtomic, log } from './utils.js';
+import { writeJsonAtomic, log, redactConnectionSecrets } from './utils.js';
 import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
 import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
-import { buildComposition, DurationVerificationError, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
-import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, TtsGenerationError } from './audio.js';
+import { buildComposition, DurationVerificationError, renderVideo, verifyVideo } from './media.js';
+import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 import { createImageSelection, downloadSelectedCandidates, ImageSelectionExhaustedError } from './image-picker.js';
 import { selectContentPlan } from './content-source.js';
@@ -57,47 +57,46 @@ const sanitizeErrorForClient = message => {
 // diagnostics server-side, and records a bounded, secret-free error message on the job.
 const handleJobFailure = async ({ job, store, error, poolReserved = false }) => {
   const stage = store.get(job.id)?.stage;
-  if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: releaseError.message }));
+  if (poolReserved) await releaseReservation(job.id).catch(releaseError => log('pool.release_failed', { jobId: job.id, message: redactConnectionSecrets(releaseError.message) }));
   cleanupFailedJobArtifacts(job);
   const errorCode = classifyJobError(error, stage);
-  log('job.failed', { jobId: job.id, stage, errorCode, message: error.message, stack: error.stack });
-  store.update(job.id, { status: 'failed', stage: 'failed', error: sanitizeErrorForClient(error.message), errorCode });
+  // A DB error (e.g. selectContentPlan/commitPlanUsage/releaseReservation hitting a connection
+  // failure mid-job) can interpolate DATABASE_URL, password included, into error.message/.stack --
+  // the same class of leak startup.js already guards migration errors against. This is the general
+  // job-failure path, reached by EVERY job, and `error` is logged AND (via sanitizeErrorForClient
+  // below) sent verbatim to the unauthenticated GET /api/jobs/:id response, so it must be redacted
+  // here too, not just at startup.
+  const safeMessage = redactConnectionSecrets(error.message); const safeStack = redactConnectionSecrets(error.stack);
+  log('job.failed', { jobId: job.id, stage, errorCode, message: safeMessage, stack: safeStack });
+  store.update(job.id, { status: 'failed', stage: 'failed', error: sanitizeErrorForClient(safeMessage), errorCode });
 };
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
-// Stay clear of the hard 60s ffprobe ceiling when judging the *projected* (pre-render) timeline.
-const DURATION_SAFETY_MARGIN_SECONDS = 0.5;
-// One bounded, deliberately small relaxation step for the corrective retry: since most scenes
-// land well under their budget (short narration hits the 7s floor), a single scene needing a
-// little more room rarely pushes the 8-scene total anywhere near the 60s limit.
-const DURATION_RETRY_RELAXATION_SECONDS = 0.75;
-// Builds voice + timeline together against a duration budget, and — if even bounded TTS-rate
-// compression can't fit a scene inside the primary per-scene budget — makes exactly one bounded
-// corrective retry with a slightly relaxed budget before failing clearly. Never silently returns
-// a timeline projected to be at or near the 60s Shorts limit.
-const buildBudgetedVoiceTimeline = async ({ plan, config, workspace, onProgress }) => {
-  const attempts = [config.maximumSceneDuration, config.maximumSceneDuration + DURATION_RETRY_RELAXATION_SECONDS];
-  let lastError;
-  for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
-    const sceneDurationBudget = attempts[attemptIndex];
-    try {
-      const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, sceneDurationBudget, onProgress });
-      const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds, maximumSceneDuration: sceneDurationBudget });
-      if (timeline.totalDuration >= SHORTS_DURATION_LIMIT_SECONDS - DURATION_SAFETY_MARGIN_SECONDS) throw new DurationVerificationError(`Projected total duration ${timeline.totalDuration.toFixed(3)}s is too close to the ${SHORTS_DURATION_LIMIT_SECONDS}s Shorts limit.`);
-      if (attemptIndex > 0) log('duration.corrective_retry_succeeded', { attemptIndex, sceneDurationBudget, totalDuration: timeline.totalDuration });
-      return { voiceovers, timeline };
-    } catch (error) {
-      lastError = error;
-      log('duration.budget_attempt_failed', { attemptIndex, sceneDurationBudget, message: error.message });
-    }
+// The one authoritative, whole-video duration gate: 60s minus 1.5s headroom, matching the product
+// requirement that the finished video stay safely under the 60s Shorts limit. Per-scene duration is
+// no longer capped in isolation (see audio.js's buildSceneTimeline) -- a scene with unusually long
+// narration is fine as long as the OTHER scenes leave enough room in this shared total.
+export const PRODUCTION_DURATION_CEILING_SECONDS = 58.5;
+// Exported (and kept pure/synchronous) so it can be tested directly against a hand-built timeline,
+// without needing a real or stubbed TTS call: proves the global ceiling -- and only the global
+// ceiling -- can raise DURATION_BUDGET_EXCEEDED, regardless of how long any single scene is.
+export const assertWithinProductionDurationCeiling = timeline => {
+  if (timeline.totalDuration > PRODUCTION_DURATION_CEILING_SECONDS) {
+    throw new DurationVerificationError(`Projected total duration ${timeline.totalDuration.toFixed(3)}s across all ${timeline.scenes.length} scenes exceeds the ${PRODUCTION_DURATION_CEILING_SECONDS}s safe production ceiling.`, { totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length });
   }
-  // A pure TTS failure (audio couldn't be produced at all, even after its own bounded retries) is
-  // NOT a duration problem -- keep its TTS_FAILED classification instead of relabeling it as a
-  // duration-budget failure just because it happened inside this duration-budget retry loop.
-  if (lastError?.code === 'TTS_FAILED') {
-    throw new TtsGenerationError(`Narration generation failed after ${attempts.length} bounded attempt(s): ${lastError.message}`, { cause: lastError });
-  }
-  throw new DurationVerificationError(`Could not build a video projected under ${SHORTS_DURATION_LIMIT_SECONDS}s after ${attempts.length} bounded attempt(s). Last error: ${lastError?.message}`);
+  return true;
+};
+// Synthesizes real narration for every scene (no pre-TTS budget/compression -- that estimate, used
+// only to bias which already-ready questions get selected from the pool, is advisory; see
+// question-pool.js/duration-estimate.js), builds the timeline from those REAL measured durations,
+// and checks the result against the one authoritative whole-video ceiling above. A pure TTS failure
+// (audio couldn't be produced at all) keeps its own TTS_FAILED classification instead of being
+// relabeled as a duration problem.
+const buildProductionVoiceTimeline = async ({ plan, config, workspace, onProgress }) => {
+  const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, onProgress });
+  const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds });
+  assertWithinProductionDurationCeiling(timeline);
+  return { voiceovers, timeline };
 };
 const plainLogValue = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
 const logSelectedImageDiagnostics = (assets, jobId) => {
@@ -145,11 +144,11 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: providers.length === 1 ? providers[0] : 'Mixed', providers, photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, provider: asset.provider, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.sourcePageUrl || asset.photoUrl, sourcePageUrl: asset.sourcePageUrl, originalImageUrl: asset.originalImageUrl, sourceDomain: asset.sourceDomain, width: asset.width, height: asset.height, license: asset.license || 'unknown', licenseUrl: asset.licenseUrl || null, usageRights: asset.usageRights || 'unknown', sha256: asset.sha256, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
-    const { voiceovers, timeline } = await buildBudgetedVoiceTimeline({ plan, config, workspace: job.workspace, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
+    const { voiceovers, timeline } = await buildProductionVoiceTimeline({ plan, config, workspace: job.workspace, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
     writeJsonAtomic(path.join(job.workspace, 'voiceovers.json'), relativeMetadata(voiceovers, job.workspace));
 
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });
-    log('timeline.built', { jobId: job.id, totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length, maximumSceneDuration: config.maximumSceneDuration });
+    log('timeline.built', { jobId: job.id, totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length, productionDurationCeiling: PRODUCTION_DURATION_CEILING_SECONDS });
     const sfx = await createLocalSfx({ audioDir: path.join(job.workspace, 'audio') });
     const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
     writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, slide: { ...sfx.slide, localPath: path.relative(job.workspace, sfx.slide.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, whoosh: { ...sfx.whoosh, localPath: path.relative(job.workspace, sfx.whoosh.localPath) }, tick: { ...sfx.tick, localPath: path.relative(job.workspace, sfx.tick.localPath) }, schedule: sfxSchedule, countdownSchedule });
@@ -190,6 +189,11 @@ export const prepareImageSelection = async ({ job, store, config }) => {
   }
 };
 
+// Bounded: an initial attempt plus exactly one retry with a fresh already-ready question set. Only
+// reached if the COMPLETE scene timeline -- built from every scene's REAL measured narration --
+// still doesn't fit PRODUCTION_DURATION_CEILING_SECONDS; ordinary per-scene variance is absorbed by
+// buildSceneTimeline/assertWithinProductionDurationCeiling and never gets here at all.
+const MAX_DURATION_RETRY_ATTEMPTS = 2;
 // Normal production entry point: selects config.questionCount diverse, pre-validated questions
 // straight from the PostgreSQL pool (see content-source.js) -- no live Groq call in the common
 // case -- automatically searches/scores/selects all of that plan's images, two per question (same
@@ -197,19 +201,34 @@ export const prepareImageSelection = async ({ job, store, config }) => {
 // fallback, unchanged scoring), then immediately hands off to the existing runPipeline to lock
 // assets, generate voice, build the timeline, render, and verify. No human approval step; never
 // stops at reviewing_images.
-export const runAutomaticPipeline = async ({ job, store, config }) => {
+//
+// `runJobPipeline`/`selectPlan`/`selectImages` are injectable (default to the real implementations)
+// purely so the bounded duration-retry control flow below can be exercised in tests without a real
+// TTS/image-provider round trip.
+export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline = runPipeline, selectPlan = selectContentPlan, selectImages = createImageSelection }) => {
   const update = changes => store.update(job.id, changes);
   let poolReserved = false;
   try {
     assertProviderConfig(config);
-    update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
-    const plan = await selectContentPlan({ job, config });
-    poolReserved = true;
-    writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
-    update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
-    const selection = await createImageSelection({ plan, config });
-    if (selection.selectedCount !== selection.total) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${selection.total} image slots; selected ${selection.selectedCount}/${selection.total}.`, { selectedCount: selection.selectedCount });
-    await runPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
+    for (let attempt = 1; attempt <= MAX_DURATION_RETRY_ATTEMPTS; attempt += 1) {
+      update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
+      const plan = await selectPlan({ job, config });
+      poolReserved = true;
+      writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+      update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
+      const selection = await selectImages({ plan, config });
+      if (selection.selectedCount !== selection.total) throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${selection.total} image slots; selected ${selection.selectedCount}/${selection.total}.`, { selectedCount: selection.selectedCount });
+      await runJobPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
+      const result = store.get(job.id);
+      if (result?.status !== 'failed' || result?.errorCode !== 'DURATION_BUDGET_EXCEEDED' || attempt === MAX_DURATION_RETRY_ATTEMPTS) return;
+      // The complete scene timeline didn't fit the safe ceiling even with every scene at its real
+      // narration length. Retry once with a fresh already-ready question set from the pool --
+      // never a rewrite/regeneration of question text, never a Groq call. runJobPipeline's own
+      // failure handling already released this attempt's reservation and cleaned up its temp
+      // assets, so the next loop iteration starts from a clean slate.
+      poolReserved = false;
+      log('duration.global_budget_retry', { jobId: job.id, attempt, previousError: result.error });
+    }
   } catch (error) {
     await handleJobFailure({ job, store, error, poolReserved });
   }

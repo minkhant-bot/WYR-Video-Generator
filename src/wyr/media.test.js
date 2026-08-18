@@ -213,7 +213,7 @@ test('verification authoritatively rejects any output at or above the 60s Shorts
 
 const sixSceneTimeline = () => buildSceneTimeline({
   voiceovers: Array.from({ length: 6 }, () => ({ duration: 2 })),
-  baseDuration: 7, voicePaddingSeconds: 1.5, maximumSceneDuration: 9.2,
+  baseDuration: 7, voicePaddingSeconds: 1.5,
 });
 
 test('a 6-scene timeline schedules 6 slide, 6 reveal, and 5 whoosh SFX events (every scene gets slide+reveal; only non-final scenes get whoosh), all inside their own scene bounds', () => {

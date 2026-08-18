@@ -1,10 +1,9 @@
 import { runMigrations } from './migrate.js';
-import { log } from './utils.js';
+import { log, redactConnectionSecrets } from './utils.js';
 
-const CONNECTION_STRING_PATTERN = /(postgres(?:ql)?:\/\/)\S+/gi;
-// Postgres client/driver errors occasionally interpolate the connection string itself (e.g. DNS
-// or auth failures); strip it before the message ever reaches a log line or stdout.
-export const redactConnectionSecrets = message => (typeof message === 'string' ? message.replace(CONNECTION_STRING_PATTERN, '$1[redacted]') : message);
+// Re-exported for backward compatibility -- moved to utils.js so pipeline.js's job-failure
+// handling can reuse the same redaction without importing the startup/migration module.
+export { redactConnectionSecrets };
 
 // Runs the existing idempotent migration system once, and must resolve before the HTTP server
 // starts accepting requests -- a half-migrated schema must never be exposed to traffic. Failure

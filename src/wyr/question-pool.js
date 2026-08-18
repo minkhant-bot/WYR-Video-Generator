@@ -135,6 +135,26 @@ export const releaseReservation = async jobId => {
   return rowCount;
 };
 
+// The job store (jobs.js) is an in-memory Map with no reload-from-disk on startup, so a process
+// restart (Railway redeploy, crash, OOM) while a job is mid-flight orphans its reservation forever
+// -- releaseReservation above only ever runs from inside THIS process's own handleJobFailure/commit
+// path, which a dead process can never reach again. Nothing else in the codebase ever revisits a
+// 'reserved' row, so without this, every interrupted job permanently shrinks the ready pool. Called
+// once at server boot (see wyr-server.js), after migrations. Nothing legitimate should still be
+// 'reserved' from a FRESH process's own perspective -- its job Map starts empty -- so this only
+// needs to skip reservations young enough that they could belong to a still-finishing job from a
+// brief old/new instance overlap during a rolling deploy; 20 minutes is far beyond the longest
+// realistic single job (image search + TTS + render together normally complete in well under 5).
+export const STALE_RESERVATION_AGE_MS = 20 * 60 * 1000;
+export const releaseStaleReservations = async (olderThanMs = STALE_RESERVATION_AGE_MS) => {
+  const { rowCount } = await withClient(client => client.query(
+    "UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE status = 'reserved' AND reserved_at < now() - ($1 || ' milliseconds')::interval",
+    [olderThanMs],
+  ));
+  if (rowCount) log('pool.stale_reservations_released', { count: rowCount, olderThanMs });
+  return rowCount;
+};
+
 // Only called after a final MP4 has been verified successfully. Records the video/question
 // relationship (for future motif-cooldown and performance-data queries) and retires the reserved
 // questions to a terminal 'used' status with an updated used_count/last_used_at. Deliberately does

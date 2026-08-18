@@ -68,6 +68,13 @@ export const createFakeDb = () => {
       for (const row of state.questions.values()) if (row.reserved_by_job === jobId && row.status === 'reserved') { row.status = 'ready'; row.reserved_by_job = null; row.reserved_at = null; count += 1; }
       return { rows: [], rowCount: count };
     }
+    if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE status = 'reserved'")) {
+      const [olderThanMs] = params;
+      const cutoff = Date.now() - Number(olderThanMs);
+      let count = 0;
+      for (const row of state.questions.values()) if (row.status === 'reserved' && row.reserved_at && row.reserved_at.getTime() < cutoff) { row.status = 'ready'; row.reserved_by_job = null; row.reserved_at = null; count += 1; }
+      return { rows: [], rowCount: count };
+    }
     if (text.startsWith('INSERT INTO wyr_videos')) {
       const [jobId, duration, topic] = params;
       let video = [...state.videos.values()].find(v => v.job_id === jobId);

@@ -73,12 +73,6 @@ test('pipeline defaults to a slower natural Edge speaking rate', () => {
   finally { original === undefined ? delete process.env.WYR_EDGE_VOICE_RATE : process.env.WYR_EDGE_VOICE_RATE = original; }
 });
 
-test('pipeline caps scene growth tightly enough to keep the finished video under 60 seconds', () => {
-  const original = process.env.WYR_MAX_SCENE_DURATION;
-  try { delete process.env.WYR_MAX_SCENE_DURATION; assert.equal(getConfig().maximumSceneDuration, 7.25); }
-  finally { original === undefined ? delete process.env.WYR_MAX_SCENE_DURATION : process.env.WYR_MAX_SCENE_DURATION = original; }
-});
-
 test('content history and bounded retry configuration support a persistent volume path', () => {
   const names = ['WYR_CONTENT_HISTORY_DIR', 'WYR_CONTENT_GENERATION_RETRIES'];
   const original = Object.fromEntries(names.map(name => [name, process.env[name]]));

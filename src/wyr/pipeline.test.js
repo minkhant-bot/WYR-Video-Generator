@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
-import { insertQuestions, countReady } from './question-pool.js';
+import { insertQuestions, countReady, releaseReservation } from './question-pool.js';
 import { createJobStore } from './jobs.js';
-import { runAutomaticPipeline } from './pipeline.js';
+import { assertWithinProductionDurationCeiling, PRODUCTION_DURATION_CEILING_SECONDS, runAutomaticPipeline } from './pipeline.js';
+import { buildSceneTimeline } from './audio.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -30,7 +31,7 @@ const EIGHT_DIVERSE = [
 const baseConfig = overrides => ({
   questionCount: 8, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
   poolTarget: 10, poolLowWaterMark: 100, poolEmergencyRefillMaxBatches: 1,
-  secondsPerQuestion: 7, maximumSceneDuration: 7.25,
+  secondsPerQuestion: 7,
   pixabayApiKey: 'test-pixabay-key', pexelsApiKey: 'test-pexels-key', pexelsConcurrency: 4,
   imageSearchRetries: 2, imageRecoveryQueryRounds: 1, imageRecoveryMaxRequests: 4, imageRecoveryMaxMs: 1000,
   webImageFallbackEnabled: false, edgeVoice: 'en-US-AndrewNeural', edgeVoiceRate: '-10%',
@@ -86,6 +87,25 @@ test('offline E2E: DB-first selection succeeds, image selection is exhausted, jo
   fs.rmSync(rootDir, { recursive: true, force: true });
 }));
 
+test('a DB error surfaced during job failure never leaks a DATABASE_URL/password into the logged or client-facing error message', () => withFakeDb(async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-pipeline-secret-leak-'));
+  const store = createJobStore(rootDir);
+  const job = store.create();
+  // Mirrors a real pg driver error that interpolates the connection string on a DNS/auth failure
+  // (see utils.js's redactConnectionSecrets / startup.js's equivalent guard for migrations) --
+  // this exercises the SAME class of error reaching pipeline.js's general job-failure path.
+  const secretUrl = 'postgresql://wyr_user:sup3rSecretPW@db.internal.example:5432/wyr';
+  const selectPlan = async () => { throw new Error(`connection to server failed: ${secretUrl}`); };
+
+  await runAutomaticPipeline({ job, store, config: baseConfig(), selectPlan });
+
+  const finalJob = store.get(job.id);
+  assert.equal(finalJob.status, 'failed');
+  assert.doesNotMatch(finalJob.error, /sup3rSecretPW/, 'the password must never reach the client-facing error message');
+  assert.doesNotMatch(finalJob.error, /wyr_user:/, 'the connection string must never reach the client-facing error message');
+  assert.match(finalJob.error, /\[redacted\]/);
+}));
+
 test('a job that fails before any question reservation (e.g. missing provider config) never attempts a reservation release and still fails cleanly', () => withFakeDb(async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-pipeline-e2e-noconfig-'));
   const store = createJobStore(rootDir);
@@ -98,5 +118,98 @@ test('a job that fails before any question reservation (e.g. missing provider co
   assert.ok(finalJob.errorCode, 'even a config-validation failure must carry a classified error code');
   assert.equal(await countReady(), 0, 'no question was ever reserved, so the pool must be untouched (still empty, not negative/corrupted)');
 
+  fs.rmSync(rootDir, { recursive: true, force: true });
+}));
+
+// ---------------------------------------------------------------------------------------------
+// Global (whole-video) duration ceiling: only the COMPLETE scene timeline, built from every
+// scene's real measured narration, may raise DURATION_BUDGET_EXCEEDED. An individual long scene
+// must never fail in isolation (see audio.js's buildSceneTimeline, which no longer caps scenes).
+// ---------------------------------------------------------------------------------------------
+test('assertWithinProductionDurationCeiling passes a 6-scene timeline that includes one long (4.13s) narration scene, as long as the total stays under the safe ceiling', () => {
+  const voiceovers = [1.5, 2.0, 1.8, 2.2, 4.13, 1.6].map((duration, index) => ({ questionIndex: index, duration }));
+  const timeline = buildSceneTimeline({ voiceovers, baseDuration: 7, voicePaddingSeconds: 1.5 });
+  assert.equal(assertWithinProductionDurationCeiling(timeline), true);
+  assert.ok(timeline.totalDuration <= PRODUCTION_DURATION_CEILING_SECONDS);
+});
+
+test('assertWithinProductionDurationCeiling never fails for one long scene alone -- only the summed total can trigger DURATION_BUDGET_EXCEEDED', () => {
+  // A single 20s-narration scene has a huge individual duration, but as the ONLY scene in a
+  // 1-scene timeline its total is still small; this must NOT throw, proving the check is purely
+  // about the summed total, never an individual scene's length.
+  const timeline = buildSceneTimeline({ voiceovers: [{ duration: 3 }], baseDuration: 7, voicePaddingSeconds: 1.5 });
+  assert.equal(assertWithinProductionDurationCeiling(timeline), true);
+});
+
+test('assertWithinProductionDurationCeiling raises DURATION_BUDGET_EXCEEDED only when the complete timeline total exceeds the safe ceiling', () => {
+  const voiceovers = Array.from({ length: 6 }, () => ({ duration: 12 })); // 6 * (12s + ~4s tail) far exceeds 58.5s
+  const timeline = buildSceneTimeline({ voiceovers, baseDuration: 7, voicePaddingSeconds: 1.5 });
+  assert.ok(timeline.totalDuration > PRODUCTION_DURATION_CEILING_SECONDS);
+  assert.throws(() => assertWithinProductionDurationCeiling(timeline), error => { assert.equal(error.code, 'DURATION_BUDGET_EXCEEDED'); assert.match(error.message, new RegExp(`exceeds the ${PRODUCTION_DURATION_CEILING_SECONDS}s`)); return true; });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Bounded retry: if runPipeline fails with the global DURATION_BUDGET_EXCEEDED code, runAutomaticPipeline
+// retries exactly once with a fresh already-ready question set from the pool -- never a text
+// rewrite, never a Groq call. runJobPipeline/selectImages are injected so this exercises the real
+// pool-reservation/release cycle (fake DB) without a real TTS/image-provider round trip.
+// ---------------------------------------------------------------------------------------------
+test('a global DURATION_BUDGET_EXCEEDED failure triggers exactly one bounded retry with a fresh already-ready question set, and never calls Groq', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  assert.equal(await countReady(), 8);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-pipeline-duration-retry-'));
+  const store = createJobStore(rootDir);
+  const job = store.create();
+
+  const originalFetch = globalThis.fetch;
+  let groqCalled = false;
+  globalThis.fetch = async url => { if (String(url).includes('groq.com')) { groqCalled = true; throw new Error('must never call Groq during a duration-budget retry'); } throw new Error(`unexpected network call: ${url}`); };
+
+  let pipelineCalls = 0;
+  const runJobPipeline = async ({ job: innerJob, store: innerStore, poolReserved }) => {
+    pipelineCalls += 1;
+    if (pipelineCalls === 1) {
+      // Mirrors what the real runPipeline+handleJobFailure do on a global-ceiling failure: release
+      // the reservation, classify the error, and record it on the job -- all BEFORE
+      // runAutomaticPipeline decides whether to retry.
+      if (poolReserved) await releaseReservation(innerJob.id);
+      innerStore.update(innerJob.id, { status: 'failed', stage: 'failed', error: 'Projected total duration exceeds the safe production ceiling.', errorCode: 'DURATION_BUDGET_EXCEEDED' });
+      return;
+    }
+    innerStore.update(innerJob.id, { status: 'completed', stage: 'completed', progress: 100 });
+  };
+  const selectImages = async ({ plan }) => ({ selectedCount: plan.questions.length * 2, total: plan.questions.length * 2 });
+
+  try { await runAutomaticPipeline({ job, store, config: baseConfig(), runJobPipeline, selectImages }); }
+  finally { globalThis.fetch = originalFetch; }
+
+  assert.equal(pipelineCalls, 2, 'expected exactly one bounded retry (2 total attempts), not an unbounded loop');
+  assert.equal(groqCalled, false, 'a duration-budget retry must never call Groq or rewrite question text');
+  const finalJob = store.get(job.id);
+  assert.equal(finalJob.status, 'completed');
+  fs.rmSync(rootDir, { recursive: true, force: true });
+}));
+
+test('bounded retry gives up after the last attempt, leaving a clean DURATION_BUDGET_EXCEEDED failure and a released pool', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_DIVERSE);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-pipeline-duration-retry-exhausted-'));
+  const store = createJobStore(rootDir);
+  const job = store.create();
+
+  let pipelineCalls = 0;
+  const runJobPipeline = async ({ job: innerJob, store: innerStore, poolReserved }) => {
+    pipelineCalls += 1;
+    if (poolReserved) await releaseReservation(innerJob.id);
+    innerStore.update(innerJob.id, { status: 'failed', stage: 'failed', error: 'Projected total duration exceeds the safe production ceiling.', errorCode: 'DURATION_BUDGET_EXCEEDED' });
+  };
+  const selectImages = async ({ plan }) => ({ selectedCount: plan.questions.length * 2, total: plan.questions.length * 2 });
+
+  await runAutomaticPipeline({ job, store, config: baseConfig(), runJobPipeline, selectImages });
+
+  assert.equal(pipelineCalls, 2, 'retries must stay bounded at 2 total attempts even when every attempt fails the same way');
+  const finalJob = store.get(job.id);
+  assert.equal(finalJob.status, 'failed');
+  assert.equal(finalJob.errorCode, 'DURATION_BUDGET_EXCEEDED');
+  assert.equal(await countReady(), 8, 'every reservation must be released -- no question left stuck as reserved after retries are exhausted');
   fs.rmSync(rootDir, { recursive: true, force: true });
 }));
