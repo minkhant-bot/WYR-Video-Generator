@@ -38,9 +38,6 @@ export const WYR_TEMPLATE = Object.freeze({
     separatorY: 947,
     separatorHeight: 26,
     orSize: 168,
-    badgeSize: 110,
-    badgeX: 900,
-    badgeY: 60,
   }),
   typography: Object.freeze({
     preferredOptionSize: 60,

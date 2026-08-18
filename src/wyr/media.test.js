@@ -74,42 +74,53 @@ test('scene rendering verifies locked image hashes before using local assets', a
   finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('framed image chain scales the foreground with contain (decrease), never crop, and only crops the separate blurred background fill', () => {
+test('framed image chain is single-layer: no blur, no letterbox, no foreground/background split', () => {
   const chain = buildFramedImageChain({ input: '0:v', width: 750, height: 450, fps: 30, outLabel: 'aimg', chainId: 'a' });
+  assert.equal(chain.length, 1, 'expected exactly one filter stage -- no split into a blurred background plus a separately-scaled foreground');
   const joined = chain.join(';');
-  assert.match(joined, /\[asrc1\]scale=750:450:force_original_aspect_ratio=increase,crop=750:450:[^,]+,gblur=sigma=\d+[^[]*\[abg\]/);
-  assert.match(joined, /\[asrc2\]scale=750:450:force_original_aspect_ratio=decrease,setsar=1,format=rgba\[afg\]/);
-  assert.equal(/\[afg\]/.test(joined.split('[afg]')[1]?.split(';')[0] || ''), false);
-  const foregroundStage = joined.split('[asrc2]')[1].split(';')[0];
-  assert.equal(foregroundStage.includes('crop='), false);
-  assert.match(joined, /\[abg\]\[afg\]overlay=x=\(W-w\)\/2:y=\(H-h\)\/2:format=auto,format=rgba\[aimg\]/);
+  assert.equal(/gblur|split=2|overlay=/.test(joined), false, `expected no blur/duplicate-layer/overlay compositing in the framing chain; got: ${joined}`);
+  // No precomputed crop offset -> falls back to a plain, still single-layer, center crop.
+  assert.match(joined, /^\[0:v\]loop=loop=-1:size=1:start=0,setpts=N\/30\/TB,scale=750:450:force_original_aspect_ratio=increase,crop=750:450:\(iw-750\)\/2:\(ih-450\)\/2,setsar=1,format=rgba\[aimg\]$/);
 });
 
-test('non-destructive framing preserves the full subject of an extreme-aspect-ratio image instead of center-cropping it away', async () => {
+test('framed image chain applies a precomputed subject-aware crop offset instead of centering', () => {
+  const chain = buildFramedImageChain({ input: '0:v', width: 750, height: 450, fps: 30, outLabel: 'aimg', chainId: 'a', crop: { x: 40, y: 0, coverWidth: 900, coverHeight: 450 } });
+  const joined = chain.join(';');
+  assert.equal(chain.length, 1);
+  assert.equal(/gblur|split=2|overlay=/.test(joined), false);
+  assert.match(joined, /scale=900:450,crop=750:450:40:0,setsar=1,format=rgba\[aimg\]/);
+});
+
+test('subject-aware framing keeps a detected head/subject region inside the rendered crop instead of cutting through it', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-safe-framing-')); const ffmpeg = resolveFfmpegPath();
   try {
-    const width = 300; const height = 1500;
+    // A moderately tall portrait: a red "head" band at the very top, a gray "torso" filling the
+    // rest. Safe to crop into the 750x450 slot (excess is under framing.js's safety ceiling), but a
+    // naive center-crop would land entirely inside the gray torso and miss the head completely.
+    const width = 700; const height = 950;
     const header = Buffer.from(`P6\n${width} ${height}\n255\n`);
     const pixels = Buffer.alloc(width * height * 3);
     for (let y = 0; y < height; y += 1) {
-      const color = y < 500 ? [255, 0, 0] : y < 1000 ? [200, 200, 200] : [0, 255, 0];
+      const color = y < 140 ? [230, 30, 30] : [150, 150, 150];
       for (let x = 0; x < width; x += 1) { const i = (y * width + x) * 3; pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2]; }
     }
-    const ppm = path.join(root, 'tall.ppm'); const sourceJpg = path.join(root, 'tall.jpg');
+    const ppm = path.join(root, 'portrait.ppm'); const sourceJpg = path.join(root, 'portrait.jpg');
     fs.writeFileSync(ppm, Buffer.concat([header, pixels]));
     const convert = spawnSync(ffmpeg, ['-y', '-i', ppm, '-q:v', '2', sourceJpg], { encoding: 'utf8' }); assert.equal(convert.status, 0, convert.stderr);
 
+    const { computeSubjectAwareCrop } = await import('./framing.js');
+    const { layout } = WYR_TEMPLATE;
+    const framing = await computeSubjectAwareCrop({ localPath: sourceJpg, sourceWidth: width, sourceHeight: height, targetWidth: layout.imageWidth, targetHeight: layout.imageHeight });
+    assert.equal(framing.safe, true, 'a moderately tall portrait must be accepted, not rejected, by the safety gate');
+    assert.equal(framing.y, 0, 'the head band sits at the very top of the source, so the safe crop window should start at y=0 to keep it in frame');
+
     const renderDir = path.join(root, 'render'); fs.mkdirSync(renderDir);
-    const assets = [
-      { questionIndex: 0, slot: 'A', localPath: sourceJpg },
-      { questionIndex: 0, slot: 'B', localPath: sourceJpg },
-    ];
+    const asset = { questionIndex: 0, slot: 'A', localPath: sourceJpg, framing: { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight } };
     const [segment] = await renderSceneSegments({
       plan: { questions: [{ index: 0, optionA: { text: 'Top Choice', percentage: 50 }, optionB: { text: 'Bottom Choice', percentage: 50 } }] },
-      assets, duration: 2, renderDir, sceneConcurrency: 1, ffmpegThreads: 1,
+      assets: [asset, { ...asset, slot: 'B' }], duration: 2, renderDir, sceneConcurrency: 1, ffmpegThreads: 1,
     });
 
-    const { layout } = WYR_TEMPLATE;
     const slotX = (WYR_TEMPLATE.canvas.width - layout.imageWidth) / 2;
     const samplePatch = y => {
       const result = spawnSync(ffmpeg, ['-ss', '1', '-i', segment, '-vframes', '1', '-vf', `crop=12:8:${Math.round(slotX + layout.imageWidth / 2 - 6)}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { maxBuffer: 1024 * 1024 });
@@ -118,11 +129,22 @@ test('non-destructive framing preserves the full subject of an extreme-aspect-ra
       for (let i = 0; i < buffer.length; i += 3) { r += buffer[i]; g += buffer[i + 1]; b += buffer[i + 2]; }
       return { r: r / pixelCount, g: g / pixelCount, b: b / pixelCount };
     };
+    const topPatch = samplePatch(layout.topImageY + 5);
+    assert.ok(topPatch.r > 180 && topPatch.g < 100, `expected the preserved red head band near the slot's top edge (subject-aware crop); sampled ${JSON.stringify(topPatch)}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
-    const topPatch = samplePatch(layout.topImageY + 10);
-    const bottomPatch = samplePatch(layout.topImageY + layout.imageHeight - 10);
-    assert.ok(topPatch.r > 180 && topPatch.g < 80, `expected the preserved top of the source image (red) near the slot's top edge; sampled ${JSON.stringify(topPatch)}`);
-    assert.ok(bottomPatch.g > 180 && bottomPatch.r < 80, `expected the preserved bottom of the source image (green) near the slot's bottom edge; sampled ${JSON.stringify(bottomPatch)}`);
+test('an extreme-aspect-ratio source is rejected by the crop safety gate instead of being force-cropped', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-unsafe-framing-')); const ffmpeg = resolveFfmpegPath();
+  try {
+    const width = 300; const height = 1500;
+    const result = spawnSync(ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=red:s=${width}x${height}`, '-frames:v', '1', path.join(root, 'tall.jpg')], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const { computeSubjectAwareCrop } = await import('./framing.js');
+    const { layout } = WYR_TEMPLATE;
+    const framing = await computeSubjectAwareCrop({ localPath: path.join(root, 'tall.jpg'), sourceWidth: width, sourceHeight: height, targetWidth: layout.imageWidth, targetHeight: layout.imageHeight });
+    assert.equal(framing.safe, false, 'a 1:5 source squeezed into the 5:3 slot must be rejected rather than force-cropped');
+    assert.match(framing.reason, /framing rejected/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

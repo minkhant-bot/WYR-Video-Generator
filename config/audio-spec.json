@@ -1,7 +1,7 @@
 {
   "source": {
     "file": "reference/ref.mp4",
-    "note": "Measured once during Phase 1 to derive timing only. The file itself has been deleted from the repo (third-party TikTok content, visible creator watermark) and is not read by any production code. This spec file is the only thing the renderer consumes.",
+    "note": "Measured once during Phase 1 to derive timing only (countdown/reveal/transition/volume sections below). The file itself is not read by any production code and is not the source of the sfx assets -- those are restored from the project's earlier known-good implementation (commit 6e99c92), see the `sfx` section.",
     "durationSecondsAtMeasurementTime": 65.833333
   },
   "countdown": {
@@ -38,11 +38,11 @@
     "measuredMeanVolumeDb": -19.8
   },
   "sfx": {
-    "note": "Generic, hand-picked round values. Deliberately NOT derived from ref.mp4's measured spectral peaks (third-party watermarked content) -- only the timing above comes from measurement. All four are synthesized from ffmpeg lavfi sine/noise sources only, nothing sampled or extracted from any video.",
-    "tick": { "durationSeconds": 0.04, "description": "short bright click", "synthesis": "white noise, highpass 6000Hz, fast attack/decay envelope" },
-    "reveal": { "durationSeconds": 0.3, "description": "mid-range bell ding", "synthesis": "sine 2000Hz fundamental + sine 4000Hz octave partial, exponential decay envelope" },
-    "whoosh": { "durationSeconds": 0.35, "description": "broadband whoosh", "synthesis": "white noise, bandpass 800-4000Hz, rise-then-fall amplitude envelope" },
-    "slide": { "durationSeconds": 0.28, "description": "low-mid slide", "synthesis": "white noise, bandpass 300-2000Hz, smooth in/out envelope" }
+    "note": "Restored from the project's earlier known-good SFX implementation (commit 6e99c92, 'Finalize WYR media pipeline and content engine'), not synthesized and not extracted from reference/ref.mp4. Each asset's audio samples are bit-identical to that commit's original WAV; only the shipped container's own metadata (an embedded third-party platform video-ID tag -- see audio.test.js's leak-guard test) was stripped before installing, since it served no functional purpose and should never have been in shipped output. That embedded tag is evidence the original clip was extracted from a video the project owner posted; per the project owner it is unrelated to a separate, prior YouTube copyright block, which was caused by background music, not these SFX.",
+    "tick": { "sourceFile": "assets/sfx/reference-countdown.wav", "restoredFrom": "assets/sfx/reference-countdown-click.wav @ 6e99c92", "durationSeconds": 0.085, "description": "single countdown tick, played once per tick event" },
+    "reveal": { "sourceFile": "assets/sfx/reference-reveal.wav", "restoredFrom": "assets/sfx/reference-result-reveal-sting.wav @ 6e99c92", "durationSeconds": 0.88, "description": "result-reveal bell/chime sting with its full harmonic decay tail" },
+    "whoosh": { "sourceFile": "assets/sfx/reference-transition.wav", "restoredFrom": "assets/sfx/reference-scene-transition-whoosh.wav @ 6e99c92", "durationSeconds": 0.335, "description": "scene-transition whoosh, played on the outgoing edge of every non-final scene" },
+    "slide": { "sourceFile": "assets/sfx/reference-entrance.wav", "restoredFrom": "assets/sfx/reference-scene-entrance-impact.wav @ 6e99c92", "durationSeconds": 0.125, "description": "scene-entrance impact, played at the start of every scene" }
   },
   "mix": {
     "sfxPeakDbfs": -13,

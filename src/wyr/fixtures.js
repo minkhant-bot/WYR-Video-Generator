@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveFfmpegPath } from './runtime.js';
+import { computeSubjectAwareCrop } from './framing.js';
+import { WYR_TEMPLATE } from './template.js';
 
 const questions = [
   ['Explore a mountain cabin', 'Relax at a tropical beach villa', 58, 42],
@@ -14,31 +16,63 @@ const questions = [
   ['Take a year-long sabbatical', 'Retire ten years early', 44, 56],
 ];
 
-const dimensions = [
-  [1400, 900], [700, 1200], [1000, 1000], [2200, 700],
-  [1200, 800], [800, 1400], [1100, 1100], [2400, 900],
-  [1500, 850], [850, 1350], [1000, 1000], [2100, 800],
-  [1300, 900], [720, 1280], [1000, 1000], [2300, 750],
+// Eight canonical subject shapes covering the source shapes the framing system has to handle:
+// portrait/landscape/square/very-wide/very-tall aspect ratios, close-up faces, full-body people, and
+// a non-person subject (a vehicle). Cycled by index so fixture renders exercise every shape and, via
+// computeSubjectAwareCrop below, so the review MP4 demonstrates genuine subject-aware framing (the
+// crop offset is discovered by the same edge-energy analysis production images go through -- the
+// head/body positions below are never read directly by the cropper).
+// Aspect ratios are chosen deliberately: all but 'very-tall' need real-but-safe cropping (under the
+// MAX_EXCESS_FRACTION floor in framing.js), so the review shows genuine subject-aware positioning.
+// 'very-tall' (0.318 aspect) is deliberately too extreme to fit the 5:3 slot safely -- it exists to
+// demonstrate the safe-crop rejection/fallback path (see scripts/render-framing-review.mjs).
+export const SUBJECT_PRESETS = [
+  { kind: 'portrait-person', width: 700, height: 950 },
+  { kind: 'landscape-person', width: 1400, height: 900 },
+  { kind: 'close-up-face', width: 1000, height: 1000 },
+  { kind: 'full-body-person', width: 850, height: 1150 },
+  { kind: 'vehicle', width: 1600, height: 700 },
+  { kind: 'square-subject', width: 1000, height: 1000 },
+  { kind: 'very-wide', width: 2400, height: 700 },
+  { kind: 'very-tall', width: 700, height: 2200 },
 ];
 
 const colors = ['#28547a', '#bd6c42', '#3e806e', '#704b8e', '#9b793c', '#426e98', '#a34e64', '#477c75', '#805e42', '#3c6090', '#8b527c', '#4d8052', '#a7653e', '#4c6591', '#6f598b', '#3f7d78'];
+const hexToRgb = hex => hex.match(/[a-f\d]{2}/gi).map(value => Number.parseInt(value, 16));
+const SKIN = [232, 196, 165]; const DARK = [35, 32, 30]; const WHEEL = [25, 25, 25];
 
-const writePpm = (file, width, height, color) => {
-  const [r, g, b] = color.match(/[a-f\d]{2}/gi).map(value => Number.parseInt(value, 16));
-  const header = Buffer.from(`P6\n${width} ${height}\n255\n`);
-  const pixels = Buffer.alloc(width * height * 3);
-  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
-    const i = (y * width + x) * 3; const shade = Math.round((x / width) * 24 + (y / height) * 18);
-    pixels[i] = Math.min(255, r + shade); pixels[i + 1] = Math.min(255, g + shade); pixels[i + 2] = Math.min(255, b + shade);
+// Builds the head/body (or car) shapes for one preset, as fractions of the frame -- resolved to
+// absolute pixel circles/rectangles once width/height are known.
+const shapesForKind = (kind, width, height, accent) => {
+  const m = Math.min(width, height); const f = (fx, fy) => [fx * width, fy * height];
+  const circle = (cxF, cyF, rF, color) => { const [cx, cy] = f(cxF, cyF); return { type: 'circle', cx, cy, r: rF * m, color }; };
+  const rect = (x0F, y0F, x1F, y1F, color) => { const [x0, y0] = f(x0F, y0F); const [x1, y1] = f(x1F, y1F); return { type: 'rect', x0, y0, x1, y1, color }; };
+  switch (kind) {
+    case 'portrait-person': return [circle(0.5, 0.18, 0.11, SKIN), rect(0.28, 0.30, 0.72, 0.95, accent)];
+    case 'landscape-person': case 'square-subject': return [circle(0.5, 0.22, 0.14, SKIN), rect(0.35, 0.36, 0.65, 0.9, accent)];
+    case 'close-up-face': return [circle(0.5, 0.48, 0.40, SKIN), circle(0.36, 0.40, 0.045, DARK), circle(0.64, 0.40, 0.045, DARK), rect(0.42, 0.62, 0.58, 0.66, DARK)];
+    case 'full-body-person': return [circle(0.5, 0.12, 0.09, SKIN), rect(0.32, 0.22, 0.68, 0.62, accent), rect(0.35, 0.62, 0.47, 0.97, accent), rect(0.53, 0.62, 0.65, 0.97, accent)];
+    case 'vehicle': return [rect(0.12, 0.35, 0.88, 0.68, accent), rect(0.32, 0.18, 0.68, 0.35, accent), circle(0.25, 0.72, 0.12, WHEEL), circle(0.75, 0.72, 0.12, WHEEL)];
+    case 'very-wide': return [circle(0.22, 0.35, 0.09, SKIN), rect(0.17, 0.42, 0.27, 0.85, accent)];
+    case 'very-tall': return [circle(0.5, 0.08, 0.09, SKIN), rect(0.30, 0.16, 0.70, 0.9, accent)];
+    default: return [circle(0.5, 0.3, 0.12, SKIN), rect(0.35, 0.42, 0.65, 0.9, accent)];
   }
-  fs.writeFileSync(file, Buffer.concat([header, pixels]));
 };
+const shapeCondition = shape => shape.type === 'circle'
+  ? `lte((X-${shape.cx.toFixed(1)})*(X-${shape.cx.toFixed(1)})+(Y-${shape.cy.toFixed(1)})*(Y-${shape.cy.toFixed(1)}),${(shape.r * shape.r).toFixed(1)})`
+  : `between(X,${shape.x0.toFixed(1)},${shape.x1.toFixed(1)})*between(Y,${shape.y0.toFixed(1)},${shape.y1.toFixed(1)})`;
+const buildChannelExpr = (shapes, bg, channel) => shapes.reduceRight((acc, shape) => `if(${shapeCondition(shape)},${shape.color[channel]},${acc})`, String(bg[channel]));
 
 const run = (binary, args) => new Promise((resolve, reject) => {
   const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] }); let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
   child.once('error', reject); child.once('close', code => code === 0 ? resolve() : reject(new Error(`Fixture asset command failed: ${stderr.slice(-2000)}`)));
 });
+export const renderSyntheticSubject = async ({ ffmpegPath, kind, width, height, bg, accent, destination }) => {
+  const shapes = shapesForKind(kind, width, height, accent);
+  const [r, g, b] = [0, 1, 2].map(channel => buildChannelExpr(shapes, bg, channel));
+  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=1`, '-vf', `geq=r='${r}':g='${g}':b='${b}'`, '-frames:v', '1', '-q:v', '3', destination]);
+};
 
 export const createFixturePlan = (count = questions.length) => ({
   version: 1,
@@ -51,12 +85,18 @@ export const createFixturePlan = (count = questions.length) => ({
   })),
 });
 
-export const createFixtureAssets = async ({ assetsDir, count = questions.length, ffmpegPath = resolveFfmpegPath() }) => {
+export const createFixtureAssets = async ({ assetsDir, count = questions.length, ffmpegPath = resolveFfmpegPath(), computeCrop = computeSubjectAwareCrop }) => {
   fs.mkdirSync(assetsDir, { recursive: true }); const assets = [];
   for (let index = 0; index < count * 2; index += 1) {
-    const [width, height] = dimensions[index]; const ppm = path.join(assetsDir, `fixture-${String(index + 1).padStart(2, '0')}.ppm`); const jpg = path.join(assetsDir, `fixture-${String(index + 1).padStart(2, '0')}.jpg`);
-    if (!fs.existsSync(jpg)) { writePpm(ppm, width, height, colors[index]); await run(ffmpegPath, ['-y', '-i', ppm, '-q:v', '3', jpg]); fs.unlinkSync(ppm); }
-    assets.push({ questionIndex: Math.floor(index / 2), slot: index % 2 === 0 ? 'A' : 'B', localPath: jpg, filename: path.basename(jpg), provider: 'fixture', id: `fixture-${index + 1}`, width, height, photographer: 'Local fixture', photographerUrl: null, photoUrl: null, queryUsed: 'fixture' });
+    const preset = SUBJECT_PRESETS[index % SUBJECT_PRESETS.length]; const { kind, width, height } = preset;
+    const jpg = path.join(assetsDir, `fixture-${String(index + 1).padStart(2, '0')}-${kind}.jpg`);
+    const bg = hexToRgb(colors[index % colors.length]); const accent = hexToRgb(colors[(index + 5) % colors.length]);
+    if (!fs.existsSync(jpg)) await renderSyntheticSubject({ ffmpegPath, kind, width, height, bg, accent, destination: jpg });
+    // Runs every fixture image through the same subject-aware crop analysis production images get,
+    // so the local 6-scene fixture render exercises the real framing logic end-to-end instead of
+    // always taking buildFramedImageChain's plain-center fallback.
+    const framing = await computeCrop({ localPath: jpg, sourceWidth: width, sourceHeight: height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight, ffmpegPath });
+    assets.push({ questionIndex: Math.floor(index / 2), slot: index % 2 === 0 ? 'A' : 'B', localPath: jpg, filename: path.basename(jpg), provider: 'fixture', id: `fixture-${index + 1}`, width, height, photographer: 'Local fixture', photographerUrl: null, photoUrl: null, queryUsed: 'fixture', subjectKind: kind, framing: framing.safe ? { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight } : undefined });
   }
   return assets;
 };

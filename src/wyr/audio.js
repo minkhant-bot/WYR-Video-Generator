@@ -218,15 +218,17 @@ export const assertCompleteSfxSchedule = ({ timeline, events }) => {
   return true;
 };
 
-// Generic SFX synthesized purely from ffmpeg lavfi noise/sine sources (see sfx-synth.js) -- nothing
-// sampled or extracted from any reference/third-party video, so there is no copyright exposure.
-// Generated once and cached on disk (fingerprinted against config/audio-spec.json's sfx/mix
-// sections); every job just copies the cached files into its own workspace.
+// Restored reference SFX, byte-identical (audio samples) to the project's earlier known-good
+// implementation at commit 6e99c92 (see sfx-synth.js and assets/sfx/reference-*.wav; see
+// config/audio-spec.json's sfx section for provenance) -- not synthesized, not extracted from
+// reference/ref.mp4. Installed once and cached on disk (fingerprinted against the reference asset
+// bytes and config/audio-spec.json's mix section); every job just copies the cached files into its
+// own workspace.
 export const createLocalSfx = async ({ audioDir, spec = getAudioSpec() }) => {
   const sfxDir = path.join(audioDir, 'sfx'); fs.mkdirSync(sfxDir, { recursive: true });
   const cacheDir = path.join(PROJECT_ROOT, 'assets', 'sfx', 'generated-cache');
   const { files, volumes } = ensureSfxAssets({ cacheDir, spec });
-  const result = { provider: 'procedurally-generated' };
+  const result = { provider: 'licensed-reference-extract' };
   for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
     const destination = path.join(sfxDir, `${name}.wav`);
     fs.copyFileSync(files[name], destination);

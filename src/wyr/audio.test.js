@@ -212,11 +212,11 @@ test('countdown validation rejects a narration-to-countdown gap over 0.20s', () 
   const invalidTimeline = { ...timeline, scenes: timeline.scenes.map(scene => ({ ...scene, countdownStart: scene.countdownStart + 0.11 })) };
   assert.throws(() => assertCompleteCountdownSchedule({ timeline: invalidTimeline, events: schedule.events }), /narration-to-countdown gap is 0\.210s/);
 });
-test('local SFX installs the generic, cache-backed tick/reveal/whoosh/slide assets', async () => {
+test('local SFX installs the exact, cache-backed reference tick/reveal/whoosh/slide assets', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-'));
   try {
     const sfx = await createLocalSfx({ audioDir: dir });
-    assert.equal(sfx.provider, 'procedurally-generated');
+    assert.equal(sfx.provider, 'licensed-reference-extract');
     for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
       assert.equal(sfx[name].filename, `${name}.wav`);
       assert.ok(fs.statSync(sfx[name].localPath).size > 44, `${name} SFX must be a real, non-empty wav`);
@@ -224,17 +224,22 @@ test('local SFX installs the generic, cache-backed tick/reveal/whoosh/slide asse
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
-test('cached SFX assets carry no reference-video/third-party provenance and no copyrighted background music is used', async () => {
+test('reference SFX assets never leak embedded platform/video-ID metadata into shipped WAV files', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-provenance-'));
   try {
     const sfx = await createLocalSfx({ audioDir: dir });
     for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
       const bytes = fs.readFileSync(sfx[name].localPath);
       // A prior asset set embedded a short-form-video platform ID in its WAV metadata comment,
-      // proving it was extracted from someone else's video rather than generated in-house — the
-      // root cause of a real copyright takedown. Guard against that ever happening again. These
-      // assets are synthesized from ffmpeg lavfi noise/sine sources only (see sfx-synth.js), so
-      // this should always pass trivially -- it exists to catch a future regression, not this one.
+      // proving that particular WAV set had been extracted from someone else's video container.
+      // That is the only thing the embedded tag is evidence of -- it does NOT establish that
+      // those SFX were the cause of a real prior YouTube copyright takedown on this channel; per
+      // the project owner, that takedown was actually triggered by background music, unrelated to
+      // these sound effects. Regardless of that takedown's real cause, shipping WAV bytes that
+      // still carry a third-party platform's own container metadata (video IDs, uploader handles,
+      // etc.) is bad hygiene on its own merits, so this guard stays: shipped assets are cut from
+      // raw PCM samples with container metadata stripped (see sfx-synth.js), never copied verbatim
+      // from a source container, so this should always pass; it exists to catch a future regression.
       assert.doesNotMatch(bytes.toString('latin1'), /\bvid:[a-z0-9]{10,}/i, `${name} SFX contains a suspicious embedded video-ID tag`);
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

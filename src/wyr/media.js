@@ -41,13 +41,20 @@ const createTextMeasurer = ({ renderDir, font, namespace }) => {
   };
 };
 const activeAlpha = ({ start, fadeIn, end, fadeOut }) => `'clip((t-${start})/${fadeIn},0,1)*clip((${end}-t)/${fadeOut},0,1)'`;
-export const buildFramedImageChain = ({ input, width, height, fps, outLabel, chainId }) => {
+// Single-layer, subject-aware framing: scale to fully cover the slot (preserving aspect ratio, never
+// stretching) and crop exactly once. When a `crop` offset was already computed for this asset (see
+// framing.js/images.js -- the offset that keeps the most on-image detail, biased to protect a
+// head/face on vertical crops), scale to that exact cover size and cut the window at that offset. If
+// no crop was computed (e.g. a locked asset from an older run, or a test double), fall back to a
+// plain centered crop -- still single-layer, still no blur/letterbox, just not subject-aware.
+export const buildFramedImageChain = ({ input, width, height, fps, outLabel, chainId, crop = null }) => {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new TypeError('Framed image chain requires a positive width and height.');
+  const hasCrop = crop && Number.isFinite(crop.coverWidth) && Number.isFinite(crop.coverHeight) && Number.isFinite(crop.x) && Number.isFinite(crop.y);
+  const scaleAndCrop = hasCrop
+    ? `scale=${Math.round(crop.coverWidth)}:${Math.round(crop.coverHeight)},crop=${width}:${height}:${Math.round(crop.x)}:${Math.round(crop.y)}`
+    : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2`;
   return [
-    `[${input}]loop=loop=-1:size=1:start=0,setpts=N/${fps}/TB,split=2[${chainId}src1][${chainId}src2]`,
-    `[${chainId}src1]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2,gblur=sigma=24,eq=brightness=-0.12,setsar=1,format=rgba[${chainId}bg]`,
-    `[${chainId}src2]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1,format=rgba[${chainId}fg]`,
-    `[${chainId}bg][${chainId}fg]overlay=x=(W-w)/2:y=(H-h)/2:format=auto,format=rgba[${outLabel}]`,
+    `[${input}]loop=loop=-1:size=1:start=0,setpts=N/${fps}/TB,${scaleAndCrop},setsar=1,format=rgba[${outLabel}]`,
   ];
 };
 export const buildStillImageInputArgs = (localPath, fps = WYR_TEMPLATE.canvas.fps) => {
@@ -89,32 +96,15 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:borderw=7:bordercolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
   const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
-  // Countdown badge: a small circle, visible for the whole countdown window (countdownStart to
-  // revealTime), that pulses once per tick -- the pulse period is derived from the actual tick
-  // spacing in this scene's own schedule, never hardcoded, so it stays in sync with whatever
-  // config/audio-spec.json currently specifies. Omitted entirely when there is no timeline (e.g.
-  // the debug fixture path, which has no countdown data to sync to).
-  const badgeLayer = (() => {
-    if (!timeline?.countdown?.length) return null;
-    const { badgeSize, badgeX, badgeY } = layout;
-    const tickSpacing = timeline.countdown.length > 1 ? timeline.countdown[1].time - timeline.countdown[0].time : 0.2;
-    const pulseDecay = Math.min(0.05, tickSpacing * 0.3);
-    const radius = badgeSize / 2;
-    const pulse = `min(1,0.5+0.5*max(0,1-mod(T-${timeline.countdownStart},${tickSpacing})/${pulseDecay}))`;
-    const windowAlpha = `if(between(T,${timeline.countdownStart},${timeline.revealTime}),${pulse},0)`;
-    const circleMask = `if(lte((X-${radius})*(X-${radius})+(Y-${radius})*(Y-${radius}),${radius * radius}),255,0)`;
-    return `color=c=white@0:s=${badgeSize}x${badgeSize}:r=${canvas.fps}:d=${duration},format=rgba,geq=r=255:g=255:b=255:a='${circleMask}*(${windowAlpha})'[badge]`;
-  })();
   const filter = [
-    ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a' }),
-    ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b' }),
+    ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a', crop: a.framing }),
+    ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b', crop: b.framing }),
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
     `color=c=black@0:s=${layout.orSize}x${layout.orSize}:r=${canvas.fps}:d=${duration},format=rgba,geq=r=0:g=0:b=0:a='if(lte((X-${layout.orSize / 2})*(X-${layout.orSize / 2})+(Y-${layout.orSize / 2})*(Y-${layout.orSize / 2}),${layout.orSize / 2}*${layout.orSize / 2}),255,0)'[orcircle]`,
     `[tmpb][orcircle]overlay=x=(W-w)/2:y=${canvas.height / 2}-${layout.orSize / 2}[withor]`,
-    ...(badgeLayer ? [badgeLayer, `[withor][badge]overlay=x=${layout.badgeX}:y=${layout.badgeY}:format=auto[withbadge]`] : []),
-    `[${badgeLayer ? 'withbadge' : 'withor'}]${[
+    `[withor]${[
       ...textLayer({ textFile: aText, fontSize: aFit.fontSize, x: `'${layout.textX}+${topMotion}'`, y: layout.topTextY, alphaExpression: optionAlphaA }),
       ...textLayer({ textFile: bText, fontSize: bFit.fontSize, x: `'${layout.textX}+${bottomMotion}'`, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
       percentLayer({ textFile: aPercentText, winner: aWinner, y: layout.topPercentageY, motion: topMotion }),
@@ -133,7 +123,7 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   return output;
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR', 'COUNTDOWN_BADGE'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, slide: sfx.slide.filename, reveal: sfx.reveal.filename, whoosh: sfx.whoosh.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, slide: sfx.slide.filename, reveal: sfx.reveal.filename, whoosh: sfx.whoosh.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
 const assertReadableNonEmptyFile = (localPath, label) => {

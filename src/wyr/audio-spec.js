@@ -3,9 +3,9 @@ import path from 'node:path';
 import { PROJECT_ROOT } from './runtime.js';
 
 // Single source of truth for all measured/derived audio timing: countdown tick count/spacing,
-// reveal gap, transition blank duration, generic SFX synthesis parameters, mix target levels, and
-// encode settings. Loaded once from config/audio-spec.json and cached -- nothing in the renderer
-// hardcodes these values; they are all read through this module (or via explicit function
+// reveal gap, transition blank duration, reference SFX source/timing metadata, mix target levels,
+// and encode settings. Loaded once from config/audio-spec.json and cached -- nothing in the
+// renderer hardcodes these values; they are all read through this module (or via explicit function
 // parameters that default to it), so re-measuring a reference and rewriting the JSON is the only
 // thing ever required to retime the whole pipeline.
 export const AUDIO_SPEC_PATH = path.join(PROJECT_ROOT, 'config', 'audio-spec.json');

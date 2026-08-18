@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fetchWithTimeout, log, mapWithConcurrency, retry, writeJsonAtomic } from './utils.js';
 import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
+import { computeSubjectAwareCrop } from './framing.js';
+import { WYR_TEMPLATE } from './template.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
@@ -285,7 +287,7 @@ const chooseStrongCandidate = (state, candidates, used) => {
   return top;
 };
 
-export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
+export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, computeCrop = computeSubjectAwareCrop, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
   const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
   const recoveryConfig = { ...IMAGE_RECOVERY_DEFAULTS, ...recovery };
   const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, Math.max(4, maxRetries + 1)), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [], providerAttemptOrder: [...IMAGE_SELECTION_DEFAULTS.providerOrder], webProviderAttempted: false, fallbackReason: null }));
@@ -338,6 +340,14 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
           if (!inspection?.valid) throw new Error(`downloaded image rejected: ${inspection?.reasons?.join('; ') || 'image failed visual-content validation'}`);
           if (Number.isFinite(inspection.width)) selected.width = inspection.width;
           if (Number.isFinite(inspection.height)) selected.height = inspection.height;
+          // Framing safety gate: compute where the crop would land before committing to this
+          // candidate. A candidate whose subject can't be kept safely in frame (extreme aspect
+          // ratio, or the best crop window still loses most of the image's detail) is rejected here
+          // -- same as a broken download -- so the existing pool/fallback logic below just moves on
+          // to the next ranked candidate instead of ever rendering a bad crop.
+          const framing = await computeCrop({ localPath, sourceWidth: selected.width, sourceHeight: selected.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
+          if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
+          selected.framing = { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight };
           return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection };
         }
         catch (error) { fs.rmSync(localPath, { force: true }); if (/hard-rejected/i.test(error.message)) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${selected.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : selected.provider} | domain=${selected.sourceDomain || 'unknown'} | query="${String(selected.query || '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${error.message.replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}"`); return { ok: false, state, error }; }

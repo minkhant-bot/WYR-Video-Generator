@@ -293,6 +293,34 @@ test('a broken DuckDuckGo result invokes Pexels fallback after download validati
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a candidate whose crop cannot be made safely is rejected for framing reasons and the pipeline falls back to the next ranked candidate', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-framing-fallback-'));
+  const portalCandidate = (id, position) => ({ id, width: 2400, height: 1400, alt: 'dramatic photograph of a person stepping through a glowing teleportation portal', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: `https://example.test/${id}`, downloadUrl: `https://example.test/${id}.jpg`, position });
+  const otherCandidate = { id: 'other', width: 2400, height: 1400, alt: 'dramatic photograph of frozen time in a busy city street', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: 'https://example.test/other', downloadUrl: 'https://example.test/other.jpg', position: 0 };
+  const provider = {
+    search: async query => query.includes('teleport') ? [portalCandidate('first', 0), portalCandidate('second', 1)] : [otherCandidate],
+    downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); return destination; },
+  };
+  const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere', searchQuery: 'teleportation portal' }, optionB: { text: 'Freeze Time For A Day', searchQuery: 'frozen clock city dramatic' } }] };
+  // Simulates framing.js rejecting exactly one candidate's crop as unsafe -- proves the rejection
+  // routes through the same pool/fallback machinery as a broken download, without ever touching
+  // relevance scoring, provider order, or dedupe.
+  const rejectedPaths = []; const computeCrop = async ({ localPath }) => {
+    if (localPath.includes('-first')) { rejectedPaths.push(localPath); return { safe: false, reason: 'framing rejected: synthetic test rejection' }; }
+    return { safe: true, x: 3, y: 5, coverWidth: 900, coverHeight: 450 };
+  };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, assetsDir: dir, maxRetries: 2, computeCrop });
+    assert.equal(assets.length, 2);
+    const teleportAsset = assets.find(asset => asset.slot === 'A');
+    assert.equal(teleportAsset.id, 'second', `expected the framing-unsafe "first" candidate to be skipped in favor of "second"; got ${teleportAsset.id}`);
+    assert.deepEqual(teleportAsset.framing, { x: 3, y: 5, coverWidth: 900, coverHeight: 450 });
+    assert.equal(rejectedPaths.length, 1, 'expected the framing check to run exactly once against the rejected candidate before falling back');
+    assert.ok(teleportAsset.rejectionReasons.some(rejection => rejection.id === 'first' && rejection.reasons.some(reason => reason.includes('framing rejected'))));
+    assert.ok(fs.existsSync(teleportAsset.localPath));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('byte-identical downloads from different IDs and URLs are never selected twice', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-content-hash-'));
   const provider = {
