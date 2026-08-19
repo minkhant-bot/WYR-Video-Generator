@@ -19,6 +19,21 @@ const CORE_SUBJECT_STRIP_WORDS = new Set([
   'around', 'across', 'over', 'under', 'out', 'off', 'up', 'down', 'near', 'someday', 'somewhere',
   'everywhere', 'anyway', 'price', 'prices', 'priced', 'limit', 'limits', 'limited', 'unlimited', 'cost', 'costs',
 ]);
+// Pure manner/frequency adverbs and generic time-words: unlike a concrete noun, nothing can ever
+// literally photograph "freely" or "today" -- no real stock photo is ever meaningfully tagged with
+// them, so keeping them in the subject word list only dilutes it, artificially lowering the
+// coverage percentage a genuinely on-subject candidate (e.g. one tagged "savings") can reach. This
+// was the actual root cause behind two live Railway option texts ("savings doubled today", "spend
+// freely grows") never clearing the dominant-subject/relevance gates despite hundreds of inspected
+// candidates -- their non-visual words ("today", "freely") were counted as MANDATORY subject
+// words with zero real-world matchability. Exported so images.js's own separate "core" relevance
+// measure (assessImageCandidate) can apply the exact same exclusion, instead of only the stricter
+// dominant-subject gate below getting fixed while a second, still-diluted gate keeps rejecting.
+export const NON_VISUAL_MODIFIER_WORDS = new Set([
+  'today', 'tomorrow', 'tonight', 'yesterday', 'now', 'later', 'soon', 'currently',
+  'freely', 'quickly', 'slowly', 'instantly', 'immediately', 'suddenly', 'gradually',
+  'constantly', 'endlessly', 'automatically', 'magically', 'effortlessly', 'easily',
+]);
 // Common activity verbs whose bare dictionary form searches poorly (a literal "shop" search returns
 // storefronts/shop signage as often as people shopping) but whose gerund is a much more literal,
 // photographable search term. Applied AFTER stripping, so e.g. "shop with no price limit" becomes
@@ -42,7 +57,7 @@ const normalize = value => String(value ?? '').toLowerCase().replace(/[^a-z0-9 ]
 // verb->literal-noun rewrites, and demotes non-literal time-of-day modifiers to the end so they
 // never outrank the concrete subject for query relevance.
 export const coreSubjectWords = text => {
-  const stripped = normalize(text).split(' ').filter(word => word.length > 2 && !CORE_SUBJECT_STRIP_WORDS.has(word));
+  const stripped = normalize(text).split(' ').filter(word => word.length > 2 && !CORE_SUBJECT_STRIP_WORDS.has(word) && !NON_VISUAL_MODIFIER_WORDS.has(word));
   const words = (stripped.length ? stripped : normalize(text).split(' ').filter(Boolean)).map(word => SUBJECT_WORD_FORM[word] || word);
   const literal = words.filter(word => !TEMPORAL_MODIFIER_WORDS.has(word));
   const temporal = words.filter(word => TEMPORAL_MODIFIER_WORDS.has(word));

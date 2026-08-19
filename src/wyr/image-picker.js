@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildImageQueries, dominantSubjectWordsFor, inspectDownloadedImage } from './images.js';
+import { PexelsImageProvider, assessImageCandidate, buildImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
@@ -133,6 +133,13 @@ const simpleVisualQuery = option => {
 // (simpleVisualQuery, buildImageQueries' hardcoded phrase groups). The "fantasy cinematic" style
 // suffix is reserved for questions actually classified as fantasy -- appending it to every
 // realistic option (as before) biased Pixabay/Pexels toward stylized art instead of a literal photo.
+// The option's dominant subject with any abstract, non-literally-photographable word (e.g.
+// "doubled", "grows", "spend") swapped for its single most concrete visual synonym (see
+// images.js's firstVisualSynonym/VISUAL_EXPANSIONS) -- a real noun like "savings" or "treehouse"
+// passes through completely unchanged. Only the SEARCH representation is affected; option.text
+// (shown on screen) is never touched.
+const concreteSubjectQuery = optionText => dominantSubjectWordsFor(optionText).map(firstVisualSynonym).join(' ').trim();
+
 const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
   const deterministic = deterministicImageQueries(option, { category });
   const built = buildImageQueries(option);
@@ -142,9 +149,14 @@ const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
   // placed right after the deterministic literal-subject queries -- high enough that a rich set of
   // broader/decorative fallbacks below it can't crowd it out of the bounded 8-query list.
   const stylized = fantasy && subject ? `${subject} fantasy cinematic` : '';
+  // Placed right after the deterministic query, ahead of the broader/decorative fallbacks, so an
+  // abstract option (e.g. "savings doubled today" -> "savings growth") gets a genuinely concrete
+  // search term early instead of only reaching one during bounded Tier-3 gap-fill.
+  const concrete = concreteSubjectQuery(option.text);
   return [...new Set([
     String(option.searchQuery || '').trim(),
     ...deterministic,
+    concrete,
     stylized,
     simple,
     ...built,
@@ -163,12 +175,21 @@ const broadenedSubjectQueries = optionText => {
   if (!words.length) return [];
   const bare = words.join(' ');
   const head = words[words.length - 1]; // rightmost word: typically the most specific/photographable noun
+  // Concrete-synonym variants (e.g. "spend grows" -> "shopping growth"): abstract action words
+  // replaced with their most literal visual synonym, still anchored to the same dominant subject.
+  const concreteWords = words.map(firstVisualSynonym);
+  const concreteBare = concreteWords.join(' ');
+  const concreteHead = concreteWords[concreteWords.length - 1];
   return [...new Set([
     bare,
     head,
     `${bare} photo`,
     `${head} photo`,
     `${bare} real photo`,
+    concreteBare,
+    `${concreteBare} photo`,
+    concreteHead,
+    `${concreteHead} photo`,
   ].filter(query => query && query.length >= 3))];
 };
 

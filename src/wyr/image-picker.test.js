@@ -213,6 +213,56 @@ test('a Tier-3 broadened query that returns BOTH a wrong-subject and a correct-s
   } finally { global.fetch = originalFetch; }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Live Railway failure reproduction: the exact two option texts reported exhausted in production
+// ("savings doubled today", "spend freely grows") must now fill on TIER 1 (the strict, unmodified
+// gate) once a genuinely on-subject candidate is available -- the abstract-word fix (image-query.js's
+// NON_VISUAL_MODIFIER_WORDS, images.js's VISUAL_EXPANSIONS additions) must not require gap-fill at
+// all for candidates that were always semantically relevant, only previously miscounted.
+// ---------------------------------------------------------------------------------------------
+test('the live Railway option "savings doubled today" fills on Tier 1 once a genuine savings candidate is returned', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      return { ok: true, async json() { return { hits: [{ id: '501', imageWidth: 1600, imageHeight: 900, tags: 'piggy bank coins savings jar money', pageURL: 'https://pixabay.com/images/id-501/', largeImageURL: 'https://cdn.pixabay.com/501.jpg' }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'savings doubled today', searchQuery: '' }, optionB: { text: 'spend freely grows', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig() });
+    assert.ok(selection.slots.Q1A.selectedId, 'a genuine savings candidate must be selected for "savings doubled today"');
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, '501');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('the live Railway option "spend freely grows" fills on Tier 1 once a genuine shopping/spending candidate is returned', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      return { ok: true, async json() { return { hits: [{ id: '502', imageWidth: 1600, imageHeight: 900, tags: 'person shopping bags cash spending money store', pageURL: 'https://pixabay.com/images/id-502/', largeImageURL: 'https://cdn.pixabay.com/502.jpg' }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'savings doubled today', searchQuery: '' }, optionB: { text: 'spend freely grows', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig() });
+    assert.ok(selection.slots.Q1B.selectedId, 'a genuine shopping/spending candidate must be selected for "spend freely grows"');
+    const selected = selection.slots.Q1B.candidates.find(c => c.candidateKey === selection.slots.Q1B.selectedId);
+    assert.equal(selected.id, '502');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('an unrelated candidate is still rejected for the live Railway abstract option texts -- the fix never allows a wrong-subject fallback', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: true, async json() { return { hits: [{ id: '999', imageWidth: 1600, imageHeight: 900, tags: 'astronaut floating in outer space near space station', pageURL: 'https://pixabay.com/images/id-999/', largeImageURL: 'https://cdn.pixabay.com/999.jpg' }] }; } });
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'savings doubled today', searchQuery: '' }, optionB: { text: 'spend freely grows', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig({ imageRecoveryMaxRequests: 6, imageRecoveryMaxMs: 3000 }) });
+    assert.equal(selection.slots.Q1A.selectedId, null, 'an unrelated space photo must never be selected for "savings doubled today"');
+    assert.equal(selection.slots.Q1B.selectedId, null, 'an unrelated space photo must never be selected for "spend freely grows"');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('when every tier is genuinely exhausted (provider has nothing usable at all), the slot fails clearly with a bounded, well-formed diagnostic report -- never an unrelated fallback image', async () => {
   const originalFetch = global.fetch;
   try {

@@ -64,6 +64,37 @@ test('weak generic Pexels visual fails the strong short-form quality gate', () =
   assert.equal(abundance.pexelsQualityPassed, true);
 });
 
+// ---------------------------------------------------------------------------------------------
+// Live Railway failure: two real production option texts -- "savings doubled today" and "spend
+// freely grows" -- were reported exhausted at IMAGE_SELECTION_EXHAUSTED with hundreds of
+// candidates inspected and semanticRelevanceRejected as the overwhelming rejection reason. Root
+// cause: pure non-visual adverbs/time-words ("today", "freely") were counted as MANDATORY subject
+// words no real photo could ever match, capping coverage below the 50% gate even for a perfect
+// on-subject photo. These tests prove a genuinely on-subject candidate now clears the gate for
+// each exact live option text, AND that an unrelated candidate for the SAME option text is still
+// correctly rejected -- the fix must never let a wrong-subject image through.
+// ---------------------------------------------------------------------------------------------
+test('a genuine savings photo now clears the relevance/dominant-subject gates for the live option "savings doubled today"', () => {
+  const savings = assessImageCandidate({ id: 'savings', width: 2400, height: 1400, alt: 'piggy bank and stacked coins savings jar on a table', downloadUrl: 'https://images.test/savings.jpg' }, { text: 'savings doubled today' });
+  assert.equal(savings.accepted, true, savings.rejectionReasons.join('; '));
+  const unrelated = assessImageCandidate({ id: 'unrelated', width: 2400, height: 1400, alt: 'person hiking on a forest trail with a backpack', downloadUrl: 'https://images.test/hiking.jpg' }, { text: 'savings doubled today' });
+  assert.equal(unrelated.accepted, false, 'an unrelated hiking photo must never be accepted merely because the abstract words in the option text were relaxed');
+});
+
+test('a genuine shopping/spending photo now clears the relevance/dominant-subject gates for the live option "spend freely grows"', () => {
+  const shopping = assessImageCandidate({ id: 'shopping', width: 2400, height: 1400, alt: 'person carrying shopping bags cash in hand at a store', downloadUrl: 'https://images.test/shopping.jpg' }, { text: 'spend freely grows' });
+  assert.equal(shopping.accepted, true, shopping.rejectionReasons.join('; '));
+  const unrelated = assessImageCandidate({ id: 'unrelated', width: 2400, height: 1400, alt: 'astronaut floating in outer space near a space station', downloadUrl: 'https://images.test/space.jpg' }, { text: 'spend freely grows' });
+  assert.equal(unrelated.accepted, false, 'an unrelated space photo must never be accepted merely because the abstract words in the option text were relaxed');
+});
+
+test('similar abstract finance/lifestyle phrases (not the two live examples) also clear the gates for a genuinely on-subject photo', () => {
+  const income = assessImageCandidate({ id: 'income', width: 2400, height: 1400, alt: 'stack of cash and a pay check on a desk income', downloadUrl: 'https://images.test/income.jpg' }, { text: 'income grows quickly' });
+  assert.equal(income.accepted, true, income.rejectionReasons.join('; '));
+  const debt = assessImageCandidate({ id: 'debt', width: 2400, height: 1400, alt: 'person holding a credit card and a wallet full of cash', downloadUrl: 'https://images.test/creditcard.jpg' }, { text: 'credit card debt grows instantly' });
+  assert.equal(debt.accepted, true, debt.rejectionReasons.join('; '));
+});
+
 test('strong specific Pexels visual passes and a specific photograph is not rejected merely for being stock photography', () => {
   const assessment = assessImageCandidate({ id: 'strong', width: 2400, height: 1400, alt: 'dramatic photograph of a person stepping through a glowing teleportation portal', downloadUrl: 'https://images.test/portal.jpg' }, { text: 'Teleport Anywhere' });
   assert.equal(assessment.accepted, true);

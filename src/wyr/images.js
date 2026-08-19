@@ -6,7 +6,7 @@ import { fetchWithTimeout, log, mapWithConcurrency, retry, writeJsonAtomic } fro
 import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 import { computeSubjectAwareCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
-import { coreSubjectWords } from './image-query.js';
+import { coreSubjectWords, NON_VISUAL_MODIFIER_WORDS } from './image-query.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
@@ -36,8 +36,31 @@ const VISUAL_EXPANSIONS = Object.freeze({
   minds: ['telepathy', 'brain', 'thoughts'], mind: ['telepathy', 'brain', 'thoughts'], read: ['reading'], future: ['fortune', 'crystal', 'vision'],
   teleport: ['teleportation', 'portal', 'gateway'], invisible: ['invisibility', 'transparent', 'disappearing'], invisibility: ['invisible', 'transparent', 'disappearing'],
   time: ['clock', 'temporal', 'vortex'], stop: ['stopped', 'frozen', 'freeze'], travel: ['traveler', 'journey'], dragon: ['fantasy', 'creature'], befriend: ['friendly', 'interacting'], portal: ['fantasy', 'doorway', 'gateway'], door: ['doorway', 'portal'],
-  strangers: ['people', 'person', 'human'], double: ['doubling', 'multiply', 'multiplying'], bank: ['money', 'financial', 'wealth'], balance: ['account', 'money', 'wealth'],
+  strangers: ['people', 'person', 'human'], bank: ['money', 'financial', 'wealth'], balance: ['account', 'money', 'wealth'],
+  // Abstract financial/change verbs -- a real photo can never literally BE "doubled" or "grows",
+  // but it can genuinely show growth/savings/shopping imagery, so these are matchable via a
+  // concrete synonym (exactly like "double"/"bank"/"balance" above) instead of ever being counted
+  // as a required-but-unmatchable literal word. This is what let a real "savings" photo finally
+  // clear the dominant-subject/relevance gates for the live Railway option "savings doubled
+  // today" (which kept "doubled" as a required word, unlike "today" -- see
+  // NON_VISUAL_MODIFIER_WORDS in image-query.js for words dropped outright instead) and a
+  // "shopping/spending" photo for "spend freely grows". Listed as first-alias-first so
+  // firstVisualSynonym (used to build a concrete-concept search query) picks the most literal noun.
+  double: ['growth', 'doubling', 'multiply', 'multiplying'], doubles: ['growth', 'doubling', 'multiply', 'multiplying'],
+  doubled: ['growth', 'doubling', 'multiply', 'multiplying'], doubling: ['growth', 'double', 'multiply', 'multiplying'],
+  grow: ['growth', 'increase', 'rising'], grows: ['growth', 'increase', 'rising'], growing: ['growth', 'increase', 'rising'], grew: ['growth', 'increase', 'rising'], grown: ['growth', 'increase', 'rising'],
+  increase: ['growth', 'rising', 'money'], increases: ['growth', 'rising', 'money'], increasing: ['growth', 'rising', 'money'], increased: ['growth', 'rising', 'money'],
+  multiply: ['multiplying', 'doubling', 'growth'], multiplies: ['multiplying', 'doubling', 'growth'], multiplying: ['multiply', 'doubling', 'growth'], multiplied: ['multiply', 'doubling', 'growth'],
+  spend: ['shopping', 'spending', 'cash'], spends: ['shopping', 'spending', 'cash'], spending: ['shopping', 'cash', 'purchase'], spent: ['shopping', 'spending', 'cash'],
+  save: ['savings', 'bank', 'piggybank'], saves: ['savings', 'bank', 'piggybank'], saving: ['savings', 'bank', 'piggybank'], saved: ['savings', 'bank', 'piggybank'],
+  earn: ['income', 'salary', 'money'], earns: ['income', 'salary', 'money'], earning: ['income', 'salary', 'money'], earned: ['income', 'salary', 'money'],
 });
+// The single most literal, search-friendly synonym for a word (falls back to the word itself when
+// there's no mapping, so a concrete noun like "savings" or "treehouse" passes through unchanged).
+// Used to build a concrete-concept search query variant for abstract option text -- see
+// image-picker.js's selectionQueries/broadenedSubjectQueries -- WITHOUT ever touching the option
+// text shown on screen.
+export const firstVisualSynonym = word => VISUAL_EXPANSIONS[word]?.[0] || word;
 const normalizeWords = value => String(value || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !STOP_WORDS.has(word));
 const uniqueWords = words => [...new Set(words)];
 export const buildImageQueries = option => {
@@ -192,7 +215,15 @@ export const assessImageCandidate = (candidate, option) => {
   // still counts as matching the option text's own form ("ride"/"fly"/"train") instead of forcing
   // an exact string match that real provider alt text/tags routinely miss.
   const matched = concepts.filter(concept => allTokens.has(concept) || allStems.has(stem(concept)));
-  const core = normalizeWords(option.text); const coreMatched = core.filter(concept => textTokens.has(concept) || textStems.has(stem(concept)) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
+  // NON_VISUAL_MODIFIER_WORDS excluded here too (not just from the dominant-subject list below):
+  // these are pure manner/time adverbs ("today", "freely") that no real photo is ever tagged
+  // with, so leaving them in `core` only shrinks coreCoverage for every candidate regardless of
+  // how on-subject it is -- e.g. "savings doubled today" previously required matching "today" (an
+  // impossible word for coreCoverage) alongside "savings", capping a perfect savings photo's
+  // coreCoverage at 2/3 instead of a genuinely achievable 1/1. Concrete nouns are NEVER removed
+  // here -- only words with zero possible visual representation.
+  const core = normalizeWords(option.text).filter(word => !NON_VISUAL_MODIFIER_WORDS.has(word));
+  const coreMatched = core.filter(concept => textTokens.has(concept) || textStems.has(stem(concept)) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
   const relevance = concepts.length ? matched.length / concepts.length : 0;
   const coreCoverage = core.length ? coreMatched.length / core.length : 0;
   // The DOMINANT subject match: unlike `core` above (every non-stopword in the option text, so an
