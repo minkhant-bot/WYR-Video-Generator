@@ -125,6 +125,33 @@ test('buildSceneTimeline never hard-fails an individual scene for being long -- 
   assert.equal(timeline.scenes.length, 1);
   assert.ok(timeline.scenes[0].duration > 20);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Inter-scene blank gap (Fix 4): config/audio-spec.json's transitions.blankDurationSeconds was
+// measured from the reference video but never wired into the timeline -- scenes ran back-to-back
+// with no gap at all. buildSceneTimeline now inserts it BETWEEN scenes only.
+// ---------------------------------------------------------------------------------------------
+test('buildSceneTimeline inserts a frame-aligned blank gap (config/audio-spec.json transitions.blankDurationSeconds) between every pair of scenes, never before the first or after the last', () => {
+  const spec = getAudioSpec();
+  const expectedGap = Math.ceil(spec.transitions.blankDurationSeconds * WYR_TEMPLATE.canvas.fps) / WYR_TEMPLATE.canvas.fps;
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, () => ({ duration: 2 })), baseDuration: 7, voicePaddingSeconds: 1.5 });
+  assert.equal(timeline.blankGapSeconds, expectedGap);
+  assert.ok(expectedGap > 0.4 && expectedGap < 0.55, `expected approximately 0.5s, got ${expectedGap}s`);
+  for (let index = 0; index < timeline.scenes.length; index += 1) {
+    const scene = timeline.scenes[index];
+    const isLast = index === timeline.scenes.length - 1;
+    assert.equal(scene.gapAfter, isLast ? 0 : expectedGap, `scene ${index + 1} gapAfter mismatch`);
+    if (!isLast) {
+      const nextScene = timeline.scenes[index + 1];
+      assert.equal(Number((nextScene.start - scene.end).toFixed(6)), Number(expectedGap.toFixed(6)), `expected exactly the blank gap between scene ${index + 1} and scene ${index + 2}`);
+    }
+  }
+  // No trailing blank after the final scene's reveal hold, and totalDuration accounts for every gap.
+  const lastScene = timeline.scenes[timeline.scenes.length - 1];
+  assert.equal(lastScene.end, timeline.totalDuration, 'the last scene must reach exactly the total duration -- no unaccounted-for trailing gap');
+  const sumOfSceneDurations = timeline.scenes.reduce((sum, scene) => sum + scene.duration, 0);
+  assert.equal(Number(timeline.totalDuration.toFixed(6)), Number((sumOfSceneDurations + expectedGap * 5).toFixed(6)), 'total duration must equal every scene duration plus exactly 5 inter-scene gaps for 6 scenes');
+});
 test('SFX schedule contains slide, reveal, and whoosh at the visual timestamps in every scene except the last (which skips whoosh)', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
   const schedule = buildSfxSchedule(timeline);

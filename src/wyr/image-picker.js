@@ -94,9 +94,17 @@ const assessForReview = (candidate, option) => {
     ...candidate,
     validAsset: result.validAsset !== false,
     formatPass: result.formatPass !== false && result.validAsset !== false,
+    // Whether this candidate cleared assessImageCandidate's full relevance gate (explicit visual
+    // intent, dominant-subject-word coverage, minimum relevance score -- see images.js). Previously
+    // this field didn't exist here at all, so reviewUsable below only checked format/size and NEVER
+    // consulted relevance -- a candidate that matched nothing but an incidental filler word (e.g. a
+    // sports car for "luxury trains", matched only on "luxury") was just as "usable" as a strong
+    // match, and could still win as the least-bad option in a weak pool.
+    accepted: result.accepted !== false && result.rejectionReasons?.length === 0,
     relevanceScore: Number(result.relevanceScore || 0),
     qualityScore: Number(result.qualityScore || 0),
     finalScore: Number(result.finalScore ?? result.qualityScore ?? 0),
+    dominantCoverage: Number(result.dominantCoverage ?? 1),
     rejectionReasons: result.rejectionReasons || [],
     hardRejected: Boolean(result.hardRejected),
   };
@@ -158,6 +166,7 @@ const reviewUsable = candidate =>
   candidate.validAsset &&
   candidate.formatPass &&
   !candidate.hardRejected &&
+  candidate.accepted &&
   Number(candidate.width) >= 750 &&
   Number(candidate.height) >= 450;
 

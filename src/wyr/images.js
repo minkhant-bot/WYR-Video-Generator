@@ -6,6 +6,7 @@ import { fetchWithTimeout, log, mapWithConcurrency, retry, writeJsonAtomic } fro
 import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 import { computeSubjectAwareCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
+import { coreSubjectWords } from './image-query.js';
 
 export class ImageProvider { async search() { throw new Error('ImageProvider.search must be implemented.'); } async downloadAsset() { throw new Error('ImageProvider.downloadAsset must be implemented.'); } }
 export class PexelsImageProvider extends ImageProvider {
@@ -30,7 +31,7 @@ export class PexelsImageProvider extends ImageProvider {
     return destination;
   }
 }
-const STOP_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'in', 'on', 'at', 'with', 'for', 'your', 'you', 'become', 'be', 'own', 'have', 'anywhere', 'through', 'instantly']);
+const STOP_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'in', 'on', 'at', 'with', 'for', 'your', 'you', 'become', 'be', 'own', 'have', 'anywhere', 'through', 'instantly', 'take', 'takes', 'taking', 'win', 'wins', 'winning', 'everywhere', 'every', 'price', 'prices', 'priced', 'limit', 'limits', 'limited', 'unlimited', 'cost', 'costs']);
 const VISUAL_EXPANSIONS = Object.freeze({
   minds: ['telepathy', 'brain', 'thoughts'], mind: ['telepathy', 'brain', 'thoughts'], read: ['reading'], future: ['fortune', 'crystal', 'vision'],
   teleport: ['teleportation', 'portal', 'gateway'], invisible: ['invisibility', 'transparent', 'disappearing'], invisibility: ['invisible', 'transparent', 'disappearing'],
@@ -106,6 +107,24 @@ const candidateKeys = candidate => uniqueWords([candidate.provider && candidate.
 const fileHash = filename => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
 const optionConcepts = option => uniqueWords(normalizeWords(option.text).flatMap(word => [word, ...(VISUAL_EXPANSIONS[word] || [])]));
 const containsAny = (tokens, words) => words.some(word => tokens.has(word));
+// Minimal suffix stemming, used ONLY for the dominant-subject match below -- real provider alt
+// text/tags routinely use a different inflection than the option text ("riding"/"rider",
+// "train"/"trains"), and exact-string matching would otherwise force a real, on-subject photo to
+// fail the same gate meant to catch genuinely wrong subjects. Words of length <=4 are left alone to
+// avoid over-stemming short, already-ambiguous words (e.g. "car", "day").
+const stem = word => {
+  if (word.length <= 4) return word;
+  if (word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+  let base = word;
+  if (base.endsWith('ing') || base.endsWith('ers')) base = base.slice(0, -3);
+  else if (base.endsWith('er') || base.endsWith('ed') || base.endsWith('es')) base = base.slice(0, -2);
+  else if (base.endsWith('s')) base = base.slice(0, -1);
+  // Collapses a doubled final consonant left behind by suffix removal (e.g. "shopping" -> "shopp"
+  // -> "shop", "running" -> "runn" -> "run") so a candidate's inflected form still stem-matches the
+  // option text's word ("shop"/"shopping"), the same class of gap as "train"/"trains".
+  if (base.length > 3 && base[base.length - 1] === base[base.length - 2] && !'aeiou'.includes(base[base.length - 1])) base = base.slice(0, -1);
+  return base;
+};
 const visualIntentGroups = option => {
   const words = normalizeWords(option.text); const has = word => words.includes(word);
   const groups = [];
@@ -152,10 +171,33 @@ export const assessImageCandidate = (candidate, option) => {
   if (INAPPROPRIATE_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears inappropriate or sexualized');
   rejectionReasons.push(...assetRejectionReasons);
   const concepts = optionConcepts(option); const textTokens = new Set(normalizeWords(candidateText(candidate))); const allTokens = new Set([...textTokens, ...normalizeWords(candidate.keywords)]);
-  const matched = concepts.filter(concept => allTokens.has(concept));
-  const core = normalizeWords(option.text); const coreMatched = core.filter(concept => textTokens.has(concept) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
+  const textStems = new Set([...textTokens].map(stem)); const allStems = new Set([...allTokens].map(stem));
+  // Stem-aware (see `stem` above): a candidate's inflected wording ("riding"/"flying"/"trains")
+  // still counts as matching the option text's own form ("ride"/"fly"/"train") instead of forcing
+  // an exact string match that real provider alt text/tags routinely miss.
+  const matched = concepts.filter(concept => allTokens.has(concept) || allStems.has(stem(concept)));
+  const core = normalizeWords(option.text); const coreMatched = core.filter(concept => textTokens.has(concept) || textStems.has(stem(concept)) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
   const relevance = concepts.length ? matched.length / concepts.length : 0;
   const coreCoverage = core.length ? coreMatched.length / core.length : 0;
+  // The DOMINANT subject match: unlike `core` above (every non-stopword in the option text, so an
+  // incidental filler word like "luxury" alone can satisfy coreMatched.length>0 for "luxury trains
+  // everywhere"), this uses image-query.js's connector-stripped literal subject words (e.g. just
+  // ["luxury", "trains"]) and requires at least half of THOSE to actually appear in the candidate's
+  // text/tags. This is what stops a technically-valid but wrong-subject image (a sports car for
+  // "luxury trains", a parked car for "ride a motorbike") from clearing the relevance gate merely
+  // because one unrelated filler word happened to match.
+  // Generic container/setting nouns (a "city," a "day," "the world") are real words but not
+  // visually distinctive subjects on their own -- almost any photo can plausibly be read as
+  // depicting "a city" or "a day," so letting one satisfy 50% coverage on a 2-word subject (e.g.
+  // "motorbike city") let a parked-car photo with no motorbike in it pass on "city" alone. Excluded
+  // from the coverage requirement (falling back to the full list if that would empty it), so the
+  // requirement is anchored to whatever's left -- the actually distinctive noun(s).
+  const WEAK_SUBJECT_WORDS = new Set(['city', 'town', 'place', 'area', 'day', 'time', 'world', 'life', 'way', 'thing', 'things']);
+  const rawDominantSubjectWords = coreSubjectWords(option.text);
+  const strongSubjectWords = rawDominantSubjectWords.filter(word => !WEAK_SUBJECT_WORDS.has(word));
+  const dominantSubjectWords = strongSubjectWords.length ? strongSubjectWords : rawDominantSubjectWords;
+  const dominantMatched = dominantSubjectWords.filter(word => textTokens.has(word) || textStems.has(stem(word)) || (VISUAL_EXPANSIONS[word] || []).some(alias => textTokens.has(alias)));
+  const dominantCoverage = dominantSubjectWords.length ? dominantMatched.length / dominantSubjectWords.length : 1;
   const intentGroups = visualIntentGroups(option); const intentCoverage = intentGroups.length ? visualIntentCoverage(option, allTokens) : 1;
   const targetRatio = 750 / 450; const ratio = candidate.width / candidate.height;
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
@@ -171,7 +213,8 @@ export const assessImageCandidate = (candidate, option) => {
   const qualityScore = clampScore(conceptClarity * 0.34 + specificity * 0.28 + visualImpact * 0.2 + wyrSuitability * 0.18);
   const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
-  if (coreMatched.length === 0 || relevanceScore < 38) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 38.0`);
+  if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
+  if (dominantSubjectWords.length && dominantCoverage < 0.5) rejectionReasons.push(`candidate does not show the option's dominant subject (${dominantSubjectWords.join(' ')}); matched only ${dominantMatched.join(', ') || 'none'}`);
   const accepted = rejectionReasons.length === 0;
   const pexelsQualityReasons = [];
   if (conceptClarity < 70) pexelsQualityReasons.push(`concept clarity ${conceptClarity.toFixed(1)} is below 70.0`);
@@ -181,7 +224,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (!bankGrowthDepicted) pexelsQualityReasons.push('candidate does not depict money or wealth increasing, multiplying, or in dramatic abundance');
   if (weakVisual) pexelsQualityReasons.push('candidate is generic, object-only, clip-art-like, or stock-like');
   if (corporateWeak) pexelsQualityReasons.push('candidate is generic corporate or finance stock imagery for a concept needing a stronger visual');
-  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, formatPass: assetRejectionReasons.length === 0, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, finalScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched) };
+  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, formatPass: assetRejectionReasons.length === 0, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, finalScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched), dominantSubjectWords, dominantCoverage };
 };
 
 const runImageProbe = (binary, args) => new Promise((resolve, reject) => {
@@ -191,7 +234,40 @@ const runImageProbe = (binary, args) => new Promise((resolve, reject) => {
 });
 const statValue = (output, name) => { const match = output.match(new RegExp(`lavfi\\.signalstats\\.${name}=(-?[0-9.]+)`)); return match ? Number(match[1]) : NaN; };
 const probeDimensions = output => { const match = output.match(/\bs:(\d+)x(\d+)\b/); return match ? { width: Number(match[1]), height: Number(match[2]) } : null; };
-export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev }) => {
+// Fraction of the frame that sits within a narrow band of its single most common gray level --
+// a direct, pixel-level (not keyword/metadata) stand-in for "how much of this image is one flat
+// background color". Clipart/text-on-flat-background graphics, isolated product cutouts on plain
+// white, and stock imagery whose background merges into the template's red/blue panel all share
+// this signature (one dominant color filling most of the frame) regardless of how sharp or
+// high-contrast the small foreground subject/text is -- which is why edgeYAvg alone (see below)
+// cannot reliably catch them: a bold, high-contrast "10%" on a huge flat background can score AS
+// HIGH on average edge intensity as a genuinely detailed photo, because the metric only measures
+// edge intensity where edges exist, never how much of the frame has no detail at all.
+const FLAT_FRACTION_ANALYSIS_SIZE = 64;
+const FLAT_FRACTION_TOLERANCE = 6;
+export const readGrayscaleHistogram = async (localPath, { binary = resolveFfmpegPath(), size = FLAT_FRACTION_ANALYSIS_SIZE } = {}) => {
+  const child = spawn(binary, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', `scale=${size}:${size}:flags=area,format=gray`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-frames:v', '1', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks = []; let stderr = '';
+  child.stdout.on('data', chunk => chunks.push(chunk)); child.stderr.on('data', chunk => { stderr += String(chunk); });
+  const buffer = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`FFmpeg histogram probe exited with code ${code}: ${stderr.slice(-500)}`))); });
+  const expected = size * size;
+  if (buffer.length < expected) throw new Error(`Histogram probe produced ${buffer.length} bytes, expected ${expected}.`);
+  const bins = new Array(256).fill(0);
+  for (let i = 0; i < expected; i += 1) bins[buffer[i]] += 1;
+  return { bins, sampleCount: expected };
+};
+export const computeFlatBackgroundFraction = ({ bins, sampleCount }, tolerance = FLAT_FRACTION_TOLERANCE) => {
+  if (!sampleCount) return 0;
+  let best = 0;
+  for (let center = 0; center < 256; center += 1) {
+    let sum = 0;
+    for (let level = Math.max(0, center - tolerance); level <= Math.min(255, center + tolerance); level += 1) sum += bins[level];
+    if (sum > best) best = sum;
+  }
+  return best / sampleCount;
+};
+export const FLAT_BACKGROUND_FRACTION_THRESHOLD = 0.7;
+export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev, flatBackgroundFraction }) => {
   const reasons = [];
   if (!Number.isFinite(width) || !Number.isFinite(height)) reasons.push('hard-rejected: decoded dimensions were unavailable (corrupt image)');
   else if (width < 750 || height < 450) reasons.push('hard-rejected: decoded image is too small for the 750x450 slot');
@@ -200,18 +276,23 @@ export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, 
     const range = yMax - yMin;
     if (range <= 6 || (yMax < 24 && yAvg < 8) || (yMin > 247 && yAvg > 248)) reasons.push('hard-rejected: image is blank, near-black, near-white, or overwhelmingly uniform');
     if (Number.isFinite(stdev) && stdev < 2.5 && range < 24) reasons.push('hard-rejected: image has near-zero contrast and appears to be a placeholder');
-    if (edgeYAvg < 0.15 && range < 48) reasons.push('image has no meaningful edge/detail structure');
+    // edgedetect+signalstats YAVG runs roughly 0-3 in practice (edges are sparse bright pixels on an
+    // otherwise-black frame), not the 0-255 scale of a plain luma average -- thresholds below are
+    // calibrated to that observed scale, not the yAvg/stdev scale used elsewhere in this function.
+    if (edgeYAvg < 0.05 && range < 48) reasons.push('image has no meaningful edge/detail structure');
     const aspectRatio = width / height;
-    if (aspectRatio >= 2.2 && edgeYAvg > 18) reasons.push('hard-rejected: pixel layout resembles a dense text/banner graphic');
-    if (Number.isFinite(stdev) && stdev < 18 && edgeYAvg > 10) reasons.push('hard-rejected: near-uniform background with text-like high-contrast foreground');
+    if (aspectRatio >= 2.2 && edgeYAvg > 1.1) reasons.push('hard-rejected: pixel layout resembles a dense text/banner graphic');
+    if (Number.isFinite(stdev) && stdev < 18 && edgeYAvg > 0.6) reasons.push('hard-rejected: near-uniform background with text-like high-contrast foreground');
+    if (Number.isFinite(flatBackgroundFraction) && flatBackgroundFraction >= FLAT_BACKGROUND_FRACTION_THRESHOLD) reasons.push(`hard-rejected: ${Math.round(flatBackgroundFraction * 100)}% of the frame is a single flat background color -- looks like clipart, an isolated product cutout, or a text/percentage graphic rather than a real-world photographic scene`);
   }
-  return { valid: reasons.length === 0, reasons, width, height, yMin, yMax, yAvg, edgeYAvg, stdev };
+  return { valid: reasons.length === 0, reasons, width, height, yMin, yMax, yAvg, edgeYAvg, stdev, flatBackgroundFraction };
 };
 export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpegPath() } = {}) => {
   const rawOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'info', '-i', localPath, '-vf', 'signalstats,metadata=print:file=-,showinfo', '-frames:v', '1', '-f', 'null', '-']);
   const edgeOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', 'edgedetect=low=0.1:high=0.4,signalstats,metadata=print:file=-', '-frames:v', '1', '-f', 'null', '-']);
   const dimensions = probeDimensions(rawOutput) || {};
-  return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]) });
+  const histogram = await readGrayscaleHistogram(localPath, { binary });
+  return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]), flatBackgroundFraction: computeFlatBackgroundFraction(histogram) });
 };
 
 const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch, phase = 'normal' }) => {

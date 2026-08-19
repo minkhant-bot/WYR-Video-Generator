@@ -46,7 +46,11 @@
   },
   "mix": {
     "sfxPeakDbfs": -13,
-    "narrationPeakDbfs": -3
+    "narrationPeakDbfs": -3,
+    "targetIntegratedLufs": -14,
+    "truePeakCeilingDb": -1.5,
+    "loudnessRangeTarget": 11,
+    "loudnessNote": "Final-output EBU R128 loudnorm target, applied once after the complete voice+SFX mix (see media.js buildAudioMixPlan) -- -14 LUFS integrated is the social-media loudness target; -1.5dBTP true-peak ceiling plus the trailing alimiter keep the result from ever clipping."
   },
   "encode": {
     "profile": "high",

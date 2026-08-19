@@ -11,17 +11,42 @@ const CORE_SUBJECT_STRIP_WORDS = new Set([
   'find', 'finds', 'finding', 'wear', 'wears', 'wearing', 'ride', 'rides', 'riding', 'use', 'uses', 'using',
   'only', 'always', 'never', 'every', 'forever', 'instead', 'anytime', 'anywhere', 'whenever', 'yourself',
   'go', 'goes', 'going', 'do', 'does', 'doing', 'make', 'makes', 'making',
+  // Added: further generic verbs/connectors that add no visual specificity of their own (e.g. "take
+  // luxury trains everywhere" -> "take"/"everywhere" contribute nothing a photo could show, but were
+  // previously left in the query, diluting it toward whatever else "take" or "everywhere" happen to
+  // co-occur with in provider tags).
+  'take', 'takes', 'taking', 'win', 'wins', 'winning', 'through', 'without', 'into', 'onto', 'about',
+  'around', 'across', 'over', 'under', 'out', 'off', 'up', 'down', 'near', 'someday', 'somewhere',
+  'everywhere', 'anyway', 'price', 'prices', 'priced', 'limit', 'limits', 'limited', 'unlimited', 'cost', 'costs',
 ]);
+// Common activity verbs whose bare dictionary form searches poorly (a literal "shop" search returns
+// storefronts/shop signage as often as people shopping) but whose gerund is a much more literal,
+// photographable search term. Applied AFTER stripping, so e.g. "shop with no price limit" becomes
+// "shopping" rather than "shop price limit".
+const SUBJECT_WORD_FORM = Object.freeze({ shop: 'shopping', shops: 'shopping', dine: 'dining', dines: 'dining' });
+// Abstract time-of-day/atmosphere words are real but non-literal modifiers -- a photo search engine
+// tends to weight the leading word(s) of a query most heavily, and these words are strongly
+// associated with their OWN stock-photo cliches (night skies, gothic architecture, sunsets) that can
+// dominate and crowd out the actual literal subject (e.g. "midnight lunch" -> a literal "lunch"
+// photo search polluted by "midnight" leading toward church/night imagery instead of food). Demoting
+// them to the end of the query (never dropping them entirely) keeps the concrete, photographable
+// noun in the lead position regardless of where it fell in the original sentence.
+const TEMPORAL_MODIFIER_WORDS = new Set(['midnight', 'dawn', 'dusk', 'sunrise', 'sunset', 'noon', 'twilight', 'nightfall', 'daybreak']);
 const normalize = value => String(value ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // The literal, photographable subject of an option -- what a real photo of this option should
 // actually show. Strips generic verbs/connectors ("live in a", "eat", "own", "explore") that add
 // no visual specificity and can bias a search away from the exact subject (e.g. keeping "explore"
 // in "explore outer space" doesn't hurt much, but keeping "eat" in "eat pizza forever" risks
-// matching generic eating/restaurant photos instead of pizza itself).
+// matching generic eating/restaurant photos instead of pizza itself), applies a small set of
+// verb->literal-noun rewrites, and demotes non-literal time-of-day modifiers to the end so they
+// never outrank the concrete subject for query relevance.
 export const coreSubjectWords = text => {
-  const words = normalize(text).split(' ').filter(word => word.length > 2 && !CORE_SUBJECT_STRIP_WORDS.has(word));
-  return words.length ? words : normalize(text).split(' ').filter(Boolean);
+  const stripped = normalize(text).split(' ').filter(word => word.length > 2 && !CORE_SUBJECT_STRIP_WORDS.has(word));
+  const words = (stripped.length ? stripped : normalize(text).split(' ').filter(Boolean)).map(word => SUBJECT_WORD_FORM[word] || word);
+  const literal = words.filter(word => !TEMPORAL_MODIFIER_WORDS.has(word));
+  const temporal = words.filter(word => TEMPORAL_MODIFIER_WORDS.has(word));
+  return [...literal, ...temporal];
 };
 export const coreSubjectQuery = (text, maxWords = 4) => coreSubjectWords(text).slice(0, maxWords).join(' ');
 

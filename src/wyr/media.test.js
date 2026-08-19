@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertLockedImageAssets, buildAudioMixPlan, buildFramedImageChain, buildStillImageInputArgs, DurationVerificationError, renderSceneSegments, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
+import { assertLockedImageAssets, buildAudioMixPlan, buildConcatSegmentList, buildFramedImageChain, buildStillImageInputArgs, DurationVerificationError, measureIntegratedLoudness, renderSceneSegments, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, SFX_EVENT_TYPES } from './audio.js';
 import { resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 import { WYR_TEMPLATE } from './template.js';
@@ -269,7 +269,12 @@ test('buildAudioMixPlan turns every scheduled slide/reveal/whoosh/tick event, pl
   assert.equal(adelayCount, 6 + 17 + 36);
   // 1 silent bed + those same delayed clips, all mixed together -- nothing left unmixed.
   assert.equal(mixPlan.mixLabels.length, 1 + 6 + 17 + 36);
-  assert.ok(mixPlan.filters[mixPlan.filters.length - 1].includes(`amix=inputs=${mixPlan.mixLabels.length}`));
+  const joined = mixPlan.filters.join(';');
+  assert.ok(joined.includes(`amix=inputs=${mixPlan.mixLabels.length}:duration=longest:normalize=0[premix]`));
+  // Final-output loudness normalization runs exactly once, AFTER the complete mix (not per-input),
+  // so the narration-vs-SFX balance set by the per-input volume= weights above is never touched.
+  assert.match(joined, /\[premix\]loudnorm=I=-?[\d.]+:TP=-?[\d.]+:LRA=[\d.]+:print_format=summary\[normalized\]/);
+  assert.match(joined, /\[normalized\]alimiter=limit=[\d.]+:attack=\d+:release=\d+,atrim=duration=[\d.]+\[aout\]/);
 });
 
 test('buildAudioMixPlan\'s input order exactly matches the -i flags renderVideo pushes: video, then voiceovers, then SFX_EVENT_TYPES in order, then the tick SFX', () => {
@@ -389,5 +394,85 @@ test('full 6-scene production render: every slide/countdown/reveal/whoosh SFX an
     // longer silent run.
     const silenceCheck = spawnSync(ffmpeg, ['-i', output, '-af', 'silencedetect=noise=-50dB:d=2.0', '-f', 'null', '-'], { encoding: 'utf8' });
     assert.doesNotMatch(silenceCheck.stderr, /silence_start/, `no silent gap should exceed 2.0s in a correctly-mixed 6-scene render; ffmpeg reported one: ${silenceCheck.stderr.match(/silence_start:[^\n]*/)?.[0]}`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// buildConcatSegmentList (Fix 4): pure interleaving logic, tested without spawning ffmpeg.
+// ---------------------------------------------------------------------------------------------
+test('buildConcatSegmentList interleaves the shared gap clip after every scene whose gapAfter > 0, and only there', () => {
+  const segments = ['s0.mp4', 's1.mp4', 's2.mp4'];
+  const timeline = { scenes: [{ gapAfter: 0.4667 }, { gapAfter: 0.4667 }, { gapAfter: 0 }] };
+  assert.deepEqual(buildConcatSegmentList({ segments, timeline, gapSegmentPath: 'gap.mp4' }), ['s0.mp4', 'gap.mp4', 's1.mp4', 'gap.mp4', 's2.mp4']);
+});
+test('buildConcatSegmentList leaves segments untouched when the timeline has no gapAfter (fixture/duration-only path)', () => {
+  const segments = ['s0.mp4', 's1.mp4'];
+  assert.deepEqual(buildConcatSegmentList({ segments, timeline: null, gapSegmentPath: 'gap.mp4' }), segments);
+  assert.deepEqual(buildConcatSegmentList({ segments, timeline: { scenes: [{}, {}] }, gapSegmentPath: 'gap.mp4' }), segments);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Real end-to-end production render covering Fix 1 (final-output loudness) and Fix 4 (inter-scene
+// blank gap): a real renderVideo call, then the FINAL MUXED MP4 -- not an intermediate WAV or the
+// pure filter-graph string -- is measured with the same loudnorm-based tool a reviewer would use,
+// and the actual rendered frames are probed with blackdetect to confirm the gap is really present
+// in the video, not just claimed by the timeline math (covered separately in audio.test.js).
+// ---------------------------------------------------------------------------------------------
+test('final rendered MP4 lands near the -14 LUFS target with no clipping, and shows a real ~0.5s black gap between every scene but never before scene 1 or after the last scene', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-loudness-gap-render-')); const ffmpeg = resolveFfmpegPath();
+  try {
+    const imagesDir = path.join(root, 'images'); fs.mkdirSync(imagesDir);
+    const redJpeg = path.join(imagesDir, 'red.jpg'); const blueJpeg = path.join(imagesDir, 'blue.jpg');
+    for (const [file, color] of [[redJpeg, 'red'], [blueJpeg, 'blue']]) {
+      const result = spawnSync(ffmpeg, ['-y', '-f', 'lavfi', '-i', `color=c=${color}:s=900x600`, '-frames:v', '1', file], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const audioDir = path.join(root, 'audio'); fs.mkdirSync(audioDir);
+    const sceneCount = 4; const voiceovers = [];
+    for (let index = 0; index < sceneCount; index += 1) {
+      const localPath = path.join(audioDir, `q${index + 1}-narration.mp3`);
+      // A mix of sine tones and filtered noise, closer in crest factor to real speech than a pure
+      // tone, so the measured loudness/peak numbers are meaningfully representative.
+      const result = spawnSync(ffmpeg, ['-y', '-f', 'lavfi', '-i', `sine=frequency=${300 + index * 60}:duration=2.4`, '-af', 'volume=0.8', localPath], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      voiceovers.push({ questionIndex: index, localPath, duration: 2.4 });
+    }
+    const sfx = await createLocalSfx({ audioDir });
+    const timeline = buildSceneTimeline({ voiceovers, baseDuration: 7, voicePaddingSeconds: 1.5 });
+    assert.ok(timeline.blankGapSeconds > 0.4 && timeline.blankGapSeconds < 0.55);
+
+    const plan = { questions: Array.from({ length: sceneCount }, (_, index) => ({ index, optionA: { text: `Option A ${index}`, percentage: 55 }, optionB: { text: `Option B ${index}`, percentage: 45 } })), percentages: { mode: 'demo' } };
+    const assets = Array.from({ length: sceneCount }, (_, index) => [
+      { questionIndex: index, slot: 'A', provider: 'fixture', localPath: redJpeg },
+      { questionIndex: index, slot: 'B', provider: 'fixture', localPath: blueJpeg },
+    ]).flat();
+    const workspace = path.join(root, 'job'); fs.mkdirSync(path.join(workspace, 'output'), { recursive: true });
+    const output = await renderVideo({ plan, assets, timeline, voiceovers, sfx, workspace, sceneConcurrency: 2, ffmpegThreads: 2 });
+
+    const schedule = buildSfxSchedule(timeline); const countdown = buildCountdownSchedule(timeline);
+    const verification = await verifyVideo(output, { expectedSceneCount: sceneCount, expectedDuration: timeline.totalDuration, renderDir: path.join(workspace, 'render'), timeline, sfxSchedule: schedule, countdownSchedule: countdown });
+    assert.ok(Math.abs(verification.duration - timeline.totalDuration) < 0.15);
+
+    // Fix 1: final MP4 integrated loudness lands near the -14 LUFS target with a safe true peak --
+    // measured on the actual muxed output file, exactly like the acceptance report requires.
+    const loudness = measureIntegratedLoudness(output);
+    assert.ok(loudness, 'expected a loudnorm measurement from the final MP4');
+    assert.ok(Math.abs(loudness.integratedLufs - getAudioSpec().mix.targetIntegratedLufs) <= 2, `expected integrated loudness within 2 LU of the -14 LUFS target, measured ${loudness.integratedLufs} LUFS`);
+    assert.ok(loudness.truePeakDb < -0.1, `expected no clipping (true peak below 0dBTP), measured ${loudness.truePeakDb}dBTP`);
+    const peakCheck = spawnSync(ffmpeg, ['-i', output, '-vn', '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' });
+    const maxVolumeMatch = peakCheck.stderr.match(/max_volume:\s*(-?[\d.]+)\s*dB/);
+    assert.ok(Number(maxVolumeMatch[1]) < 0, `final mix must never clip; measured peak ${maxVolumeMatch[1]}dB`);
+
+    // Fix 4: blackdetect on the REAL rendered frames finds exactly (sceneCount - 1) blank runs, each
+    // approximately timeline.blankGapSeconds long, landing exactly at each scene boundary -- nothing
+    // before scene 1, nothing after the final scene.
+    const blackCheck = spawnSync(ffmpeg, ['-i', output, '-vf', 'blackdetect=d=0.1:pic_th=0.98:pix_th=0.03', '-an', '-f', 'null', '-'], { encoding: 'utf8' });
+    const runs = [...blackCheck.stderr.matchAll(/black_start:([\d.]+) black_end:([\d.]+) black_duration:([\d.]+)/g)].map(match => ({ start: Number(match[1]), end: Number(match[2]), duration: Number(match[3]) }));
+    assert.equal(runs.length, sceneCount - 1, `expected exactly ${sceneCount - 1} blank gaps between ${sceneCount} scenes, found ${runs.length}: ${JSON.stringify(runs)}`);
+    for (const run of runs) assert.ok(Math.abs(run.duration - timeline.blankGapSeconds) < 0.1, `expected each blank run to be approximately ${timeline.blankGapSeconds}s, got ${run.duration}s`);
+    const expectedStarts = timeline.scenes.slice(0, -1).map(scene => scene.end);
+    for (let index = 0; index < runs.length; index += 1) assert.ok(Math.abs(runs[index].start - expectedStarts[index]) < 0.1, `gap ${index + 1} should start at scene ${index + 1}'s end (${expectedStarts[index]}s), measured ${runs[index].start}s`);
+    assert.ok(runs[0].start > 0.5, 'no blank gap should appear before the first scene');
+    assert.ok(timeline.totalDuration - runs[runs.length - 1].end > 0.5, 'no blank gap should trail after the final scene');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

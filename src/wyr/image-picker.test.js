@@ -35,7 +35,11 @@ test('Pexels fallback still works when no Pixabay key is configured', async () =
   try {
     global.fetch = async url => {
       const parsed = new URL(url); assert.equal(parsed.hostname, 'api.pexels.com'); counter += 1;
-      return { ok: true, async json() { return { photos: [{ id: counter, width: 1600, height: 900, alt: 'person dragon fantasy cinematic', url: `https://pexels.test/${counter}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${counter}-large.jpg`, original: `https://pexels.test/${counter}.jpg` } }] }; } };
+      // Echoes the actual searched query into the mocked candidate's alt text -- a real provider
+      // result plausibly relevant to what was searched, not a fixed unrelated dragon photo for
+      // every slot -- so this stays a meaningful check of the relevance gate rather than tripping it.
+      const query = parsed.searchParams.get('query') || '';
+      return { ok: true, async json() { return { photos: [{ id: counter, width: 1600, height: 900, alt: `${query} person cinematic photo`, url: `https://pexels.test/${counter}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${counter}-large.jpg`, original: `https://pexels.test/${counter}.jpg` } }] }; } };
     };
     const plan = { questions: [{ index: 0, optionA: { text: 'Befriend a Dragon', searchQuery: 'dragon fantasy' }, optionB: { text: 'Explore Mars', searchQuery: 'mars planet' } }] };
     const config = { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 };

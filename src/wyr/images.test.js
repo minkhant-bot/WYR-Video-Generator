@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assessImageCandidate, buildAlternateImageQueries, buildImageQueries, classifyImageStats, compareImageCandidates, createImageReviewArtifacts, findAndDownloadImages, lockSelectedImageAssets } from './images.js';
-import { resolveFfmpegPath } from './runtime.js';
+import { assessImageCandidate, buildAlternateImageQueries, buildImageQueries, classifyImageStats, compareImageCandidates, computeFlatBackgroundFraction, createImageReviewArtifacts, findAndDownloadImages, inspectDownloadedImage, lockSelectedImageAssets, readGrayscaleHistogram } from './images.js';
+import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 import { buildNarration } from './audio.js';
 
 const fixtureFfmpeg = resolveFfmpegPath();
@@ -296,7 +296,7 @@ test('a broken DuckDuckGo result invokes Pexels fallback after download validati
 test('a candidate whose crop cannot be made safely is rejected for framing reasons and the pipeline falls back to the next ranked candidate', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-framing-fallback-'));
   const portalCandidate = (id, position) => ({ id, width: 2400, height: 1400, alt: 'dramatic photograph of a person stepping through a glowing teleportation portal', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: `https://example.test/${id}`, downloadUrl: `https://example.test/${id}.jpg`, position });
-  const otherCandidate = { id: 'other', width: 2400, height: 1400, alt: 'dramatic photograph of frozen time in a busy city street', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: 'https://example.test/other', downloadUrl: 'https://example.test/other.jpg', position: 0 };
+  const otherCandidate = { id: 'other', width: 2400, height: 1400, alt: 'dramatic photograph of freeze time frozen clock in a busy city street for a whole day', photographer: 'Fixture', photographerUrl: 'https://example.test/p', photoUrl: 'https://example.test/other', downloadUrl: 'https://example.test/other.jpg', position: 0 };
   const provider = {
     search: async query => query.includes('teleport') ? [portalCandidate('first', 0), portalCandidate('second', 1)] : [otherCandidate],
     downloadAsset: async (selected, destination) => { writeCandidate(selected, destination); return destination; },
@@ -452,4 +452,98 @@ test('DuckDuckGo exhaustion or timeout falls back to strict Pexels candidates wi
       assert.ok(pexelsSearches > 0); assert.equal(assets[0].selectedProvider, 'Pexels'); assert.match(assets[0].fallbackReason, failure.includes('timed out') ? /timed out/ : /no acceptable/);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Fix 2: relevance gate must reject a candidate that only matches an incidental filler word, not
+// the option's actual dominant/literal subject -- this is the exact failure mode reported in
+// production (a sports car winning for "luxury trains", a parked car winning for a motorbike
+// option) because the OLD gate only required coreMatched.length > 0 (any word at all).
+// ---------------------------------------------------------------------------------------------
+test('assessImageCandidate rejects a candidate that matches only an incidental filler word but not the option\'s dominant subject', () => {
+  const option = { text: 'Take luxury trains everywhere' };
+  // A sports car candidate showing no train at all -- exactly the reported real-world failure
+  // (sports car winning for "luxury trains").
+  const wrongSubject = { id: 'car', width: 1600, height: 900, alt: 'red sports car speeding down a highway at sunset', keywords: 'sports car vehicle speed', downloadUrl: 'https://images.test/car.jpg', position: 0 };
+  const result = assessImageCandidate(wrongSubject, option);
+  assert.equal(result.accepted, false, 'a candidate showing no train at all must not be accepted just because it happens to say "luxury"');
+  assert.ok(result.rejectionReasons.some(reason => reason.includes("does not show the option's dominant subject")), `expected a dominant-subject rejection reason, got: ${JSON.stringify(result.rejectionReasons)}`);
+});
+test('assessImageCandidate accepts a candidate that genuinely shows the option\'s dominant subject', () => {
+  const option = { text: 'Take luxury trains everywhere' };
+  const rightSubject = { id: 'train', width: 1600, height: 900, alt: 'luxury passenger trains interior with plush seats', keywords: 'luxury trains rail travel', downloadUrl: 'https://images.test/train.jpg', position: 0 };
+  const result = assessImageCandidate(rightSubject, option);
+  assert.equal(result.accepted, true, `expected a genuine luxury-train candidate to be accepted; reasons: ${JSON.stringify(result.rejectionReasons)}`);
+});
+test('assessImageCandidate rejects a parked-car candidate for a motorbike option, and accepts a genuine motorbike candidate', () => {
+  const option = { text: 'Ride a motorbike through the city' };
+  const wrongSubject = { id: 'parked-car', width: 1600, height: 900, alt: 'parked car on a city street', keywords: 'car vehicle city parking', downloadUrl: 'https://images.test/parked-car.jpg', position: 0 };
+  const rightSubject = { id: 'motorbike', width: 1600, height: 900, alt: 'person riding a motorbike through city streets', keywords: 'motorbike motorcycle city rider', downloadUrl: 'https://images.test/motorbike.jpg', position: 0 };
+  assert.equal(assessImageCandidate(wrongSubject, option).accepted, false, 'a parked car must not satisfy a motorbike option');
+  assert.equal(assessImageCandidate(rightSubject, option).accepted, true, 'a genuine motorbike-in-city candidate should be accepted');
+});
+test('assessImageCandidate rejects an unrelated group-of-people candidate for "win a luxury car"', () => {
+  const option = { text: 'Win a luxury car' };
+  const wrongSubject = { id: 'group', width: 1600, height: 900, alt: 'group of happy people celebrating together outdoors', keywords: 'people celebration friends', downloadUrl: 'https://images.test/group.jpg', position: 0 };
+  const rightSubject = { id: 'car', width: 1600, height: 900, alt: 'shiny luxury car on display', keywords: 'luxury car vehicle', downloadUrl: 'https://images.test/luxury-car.jpg', position: 0 };
+  assert.equal(assessImageCandidate(wrongSubject, option).accepted, false);
+  assert.equal(assessImageCandidate(rightSubject, option).accepted, true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Fix 3: real, pixel-level photographic-quality gate. Uses actual ffmpeg-rendered images (not
+// fabricated stat objects) so this exercises the SAME inspectDownloadedImage path the production
+// downloader calls, catching the specific reported failure classes (a "10%"-style text/percentage
+// graphic on a flat background, an isolated product cutout on white) while confirming a real photo
+// -- even one carrying a small amount of watermark text -- is never rejected.
+// ---------------------------------------------------------------------------------------------
+test('inspectDownloadedImage rejects a large flat-color background with bold text/percentage graphics (e.g. a "10%" clipart-style image)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-flat-text-'));
+  try {
+    const font = assertFontAvailable();
+    const target = path.join(dir, 'flat-text.jpg');
+    const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0x2255cc:s=1200x800', '-vf', `drawtext=fontfile=${font}:text='10%%':fontsize=240:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2`, '-frames:v', '1', target], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const inspection = await inspectDownloadedImage(target);
+    assert.equal(inspection.valid, false, `expected a flat-background text/percentage graphic to be rejected; got ${JSON.stringify(inspection)}`);
+    assert.ok(inspection.reasons.some(reason => reason.includes('flat background')), `expected a flat-background rejection reason, got: ${JSON.stringify(inspection.reasons)}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('inspectDownloadedImage rejects an isolated product/object cutout on a plain background', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-isolated-product-'));
+  try {
+    const target = path.join(dir, 'isolated.jpg');
+    const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0xf7f7f5:s=1200x800', '-vf', 'drawbox=x=430:y=200:w=340:h=400:color=0x5a3a20:t=fill,drawbox=x=470:y=170:w=260:h=80:color=0x3a2412:t=fill', '-frames:v', '1', target], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const inspection = await inspectDownloadedImage(target);
+    assert.equal(inspection.valid, false, `expected an isolated product cutout on a plain background to be rejected; got ${JSON.stringify(inspection)}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('inspectDownloadedImage accepts a real photographic scene, including one carrying a small watermark/caption text', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-real-photo-'));
+  try {
+    const font = assertFontAvailable();
+    const plain = path.join(dir, 'photo.jpg');
+    const withWatermark = path.join(dir, 'photo-watermark.jpg');
+    let result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=s=1200x800', '-vf', 'noise=alls=18:allf=t+u', '-frames:v', '1', plain], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=s=1200x800', '-vf', `noise=alls=18:allf=t+u,drawtext=fontfile=${font}:text='(c) Example Stock':fontsize=22:fontcolor=white@0.85:x=w-tw-15:y=h-th-15`, '-frames:v', '1', withWatermark], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const plainInspection = await inspectDownloadedImage(plain);
+    const watermarkInspection = await inspectDownloadedImage(withWatermark);
+    assert.equal(plainInspection.valid, true, `expected a genuinely detailed photographic scene to be accepted; got ${JSON.stringify(plainInspection)}`);
+    assert.equal(watermarkInspection.valid, true, `a small watermark/caption must never sink an otherwise real photograph; got ${JSON.stringify(watermarkInspection)}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('computeFlatBackgroundFraction reports near-1.0 for a solid color frame and a low fraction for a richly-detailed one', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-flat-fraction-'));
+  try {
+    const solid = path.join(dir, 'solid.jpg'); const detailed = path.join(dir, 'detailed.jpg');
+    spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'color=c=0x336699:s=800x600', '-frames:v', '1', solid], { encoding: 'utf8' });
+    spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=s=800x600', '-vf', 'noise=alls=20:allf=t+u', '-frames:v', '1', detailed], { encoding: 'utf8' });
+    const solidFraction = computeFlatBackgroundFraction(await readGrayscaleHistogram(solid));
+    const detailedFraction = computeFlatBackgroundFraction(await readGrayscaleHistogram(detailed));
+    assert.ok(solidFraction > 0.95, `expected a solid-color frame to be ~100% flat, got ${solidFraction}`);
+    assert.ok(detailedFraction < 0.3, `expected a richly-detailed frame to have a low flat fraction, got ${detailedFraction}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

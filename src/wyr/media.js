@@ -122,6 +122,26 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   await run(ffmpegPath, ['-y', ...stillInputs, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, '-t', String(duration), output], `render segment ${index + 1}`);
   return output;
 };
+// Renders one reusable black filler clip encoded with the exact same profile/level/pixel-format as
+// the scene segments (see renderSegment) so the concat demuxer's `-c copy` step below can splice it
+// in without a re-encode or a stream mismatch. Video-only (no `-an` needed -- lavfi color has no
+// audio stream); the mixed audio track stays silent here on its own because no voice/SFX/countdown
+// event is ever scheduled inside a gap window (see audio.js's buildSceneTimeline gapAfter).
+const buildBlankGapSegment = async ({ renderDir, seconds, ffmpegThreads }) => {
+  const { canvas } = WYR_TEMPLATE; const encode = getAudioSpec().encode;
+  const output = path.join(renderDir, 'gap.mp4');
+  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', `color=c=black:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${seconds}`, '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, '-t', String(seconds), output], 'render inter-scene blank gap');
+  return output;
+};
+// Interleaves the shared blank-gap clip between consecutive scene segments, driven entirely by each
+// scene's own `gapAfter` (0 on the final scene, per buildSceneTimeline) -- never before the first
+// scene, never trailing the last one. A `timeline` without per-scene `gapAfter` (e.g. the fixture
+// path's plain duration-only calls) falls through unchanged, so fixture rendering keeps its existing
+// back-to-back concatenation.
+export const buildConcatSegmentList = ({ segments, timeline, gapSegmentPath }) => {
+  if (!timeline?.scenes?.some(scene => scene.gapAfter > 0)) return segments;
+  return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapSegmentPath] : [segment]);
+};
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
   const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, slide: sfx.slide.filename, reveal: sfx.reveal.filename, whoosh: sfx.whoosh.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
@@ -143,6 +163,20 @@ const measurePeakDbfs = mediaPath => {
   const result = spawnSync(ffmpegPath, ['-i', mediaPath, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' });
   const match = result.stderr.match(/max_volume:\s*(-?[\d.]+)\s*dB/);
   return match ? Number(match[1]) : null;
+};
+// EBU R128 measurement of a REAL, already-muxed media file's audio track -- used both to verify the
+// final MP4 (not an intermediate WAV) hits config/audio-spec.json's mix.targetIntegratedLufs, and to
+// report before/after numbers. loudnorm's single-pass analysis mode (no measured_I/... supplied)
+// reports what it measured in its own `input_*` fields; those, not any `output_*` field, describe
+// the file actually on disk.
+export const measureIntegratedLoudness = mediaPath => {
+  const result = spawnSync(ffmpegPath, ['-i', mediaPath, '-af', 'loudnorm=print_format=json', '-f', 'null', '-'], { encoding: 'utf8' });
+  const match = result.stderr.match(/\{[^{}]*"input_i"[\s\S]*?\}/);
+  if (!match) return null;
+  const stats = JSON.parse(match[0]);
+  const integratedLufs = Number(stats.input_i); const truePeakDb = Number(stats.input_tp); const loudnessRange = Number(stats.input_lra); const threshold = Number(stats.input_thresh);
+  if (![integratedLufs, truePeakDb, loudnessRange, threshold].every(Number.isFinite)) return null;
+  return { integratedLufs, truePeakDb, loudnessRange, threshold };
 };
 // Measures each voiceover file's own peak and returns the `volume=` multiplier that brings it to
 // targetPeakDbfs in the mix -- narration loudness varies take to take, so a fixed multiplier alone
@@ -172,7 +206,7 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
 // weights (computed from real measured peaks, see computeNarrationVolumes/sfx-synth.js) is what
 // keeps narration and SFX at their intended target levels instead of amix auto-attenuating
 // everything as more inputs are added.
-export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [] }) => {
+export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [], loudnessTarget = getAudioSpec().mix }) => {
   const inputOrder = ['video'];
   const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`];
   const mixLabels = ['[bed]'];
@@ -198,7 +232,18 @@ export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, cou
     const label = `tick${index}`; const delay = Math.round(countdown.events[index].timestamp * 1000);
     filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
   }
-  filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0,alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
+  // Final-output loudness normalization: applied ONCE, after every voice+SFX input has already been
+  // mixed together at its own intended relative level (normalize=0 above keeps amix from
+  // auto-attenuating as inputs are added) -- so loudnorm's single overall gain curve moves the whole
+  // mix up or down together and never changes the narration-vs-SFX balance. EBU R128 loudnorm (not a
+  // blind volume=/gain multiply) targets integrated loudness while its own true-peak limiter (TP)
+  // keeps the result from clipping; the trailing alimiter is a hard backstop in case loudnorm's
+  // single-pass estimate overshoots slightly. Target values live in config/audio-spec.json's `mix`
+  // section, not hardcoded here (see audio-spec.js's module comment).
+  const { targetIntegratedLufs, truePeakCeilingDb, loudnessRangeTarget } = loudnessTarget;
+  filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0[premix]`);
+  filters.push(`[premix]loudnorm=I=${targetIntegratedLufs}:TP=${truePeakCeilingDb}:LRA=${loudnessRangeTarget}:print_format=summary[normalized]`);
+  filters.push(`[normalized]alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
   return { inputOrder, filters, mixLabels, sfxInputIndexByType, tickInputIndex };
 };
 
@@ -206,7 +251,10 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   assertLockedImageAssets(assets);
   const renderDir = path.join(workspace, 'render');
   const segments = await renderSceneSegments({ plan, assets, duration, timeline, renderDir, sceneConcurrency, ffmpegThreads, onProgress });
-  const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${segments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
+  const needsGapSegment = timeline?.scenes?.some(scene => scene.gapAfter > 0);
+  const gapSegmentPath = needsGapSegment ? await buildBlankGapSegment({ renderDir, seconds: timeline.blankGapSeconds, ffmpegThreads }) : null;
+  const concatSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath });
+  const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${concatSegments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
   if (voiceovers.length || (timeline && sfx)) {

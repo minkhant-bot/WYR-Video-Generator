@@ -83,13 +83,18 @@ const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_
 // tickCount/tickSpacingSeconds/revealGapAfterLastTickSeconds/finalSceneHoldSeconds all default from
 // config/audio-spec.json (via getAudioSpec()) rather than being hardcoded -- pass explicit values
 // only to override for a test or a one-off re-measurement.
-export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, tickCount, tickSpacingSeconds, revealGapAfterLastTickSeconds, finalSceneHoldSeconds = FINAL_SCENE_REVEAL_HOLD_SECONDS } = {}) => {
+export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.timing.defaultSceneDuration, voicePaddingSeconds = 1.5, tickCount, tickSpacingSeconds, revealGapAfterLastTickSeconds, finalSceneHoldSeconds = FINAL_SCENE_REVEAL_HOLD_SECONDS, blankGapSeconds } = {}) => {
   if (!Array.isArray(voiceovers) || voiceovers.length === 0) throw new Error('At least one measured narration is required to build the scene timeline.');
   const spec = getAudioSpec();
   const ticks = tickCount ?? spec.countdown.tickCount;
   const tickSpacing = tickSpacingSeconds ?? spec.countdown.tickSpacingSeconds;
   const revealGap = revealGapAfterLastTickSeconds ?? spec.reveal.gapAfterLastTickSeconds;
   const countdownSequenceDuration = (ticks - 1) * tickSpacing + revealGap;
+  // Restores the reference design's measured inter-scene blank (config/audio-spec.json's
+  // transitions.blankDurationSeconds, ~0.45s -- "approximately 0.5s"), frame-ceiled so the gap
+  // segment renders a whole number of frames. Only BETWEEN scenes: the last scene's gapAfter stays
+  // 0, so totalDuration/lastScene.end never grows a trailing blank past the final reveal hold.
+  const gap = frameCeil(blankGapSeconds ?? spec.transitions.blankDurationSeconds);
   let cursor = 0;
   const scenes = voiceovers.map((voiceover, index) => {
     const isLastScene = index === voiceovers.length - 1;
@@ -118,10 +123,11 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
     // within the rendered frames, and the percentage overlay never fades out early.
     const contentEnd = isLastScene ? duration : duration - WYR_TEMPLATE.timing.transitionOutDuration;
     const countdown = Array.from({ length: ticks }, (_, tickIndex) => ({ tick: tickIndex + 1, time: countdownStart + tickIndex * tickSpacing }));
-    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, isLastScene, transitionOutDuration: isLastScene ? 0 : WYR_TEMPLATE.timing.transitionOutDuration };
-    cursor += duration; return scene;
+    const gapAfter = isLastScene ? 0 : gap;
+    const scene = { index, start: cursor, duration, end: cursor + duration, voiceStart, voiceDuration: voiceover.duration, narrationEnd, countdownStart, countdownGap, countdown, revealTime, contentEnd, isLastScene, transitionOutDuration: isLastScene ? 0 : WYR_TEMPLATE.timing.transitionOutDuration, gapAfter };
+    cursor += duration + gapAfter; return scene;
   });
-  return { version: 1, baseDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, totalDuration: cursor, scenes };
+  return { version: 1, baseDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, blankGapSeconds: gap, totalDuration: cursor, scenes };
 };
 
 // 'slide' fires at scene start (accompanies images sliding in), 'whoosh' fires at scene end
