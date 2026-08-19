@@ -145,6 +145,22 @@ const visualIntentGroups = option => {
   else if (has('unicorn')) groups.push(['unicorn', 'horse', 'creature'], ['wish', 'magic', 'fantasy', 'person', 'people']);
   return groups;
 };
+// Generic container/setting nouns (a "city," a "day," "the world") are real words but not
+// visually distinctive subjects on their own -- almost any photo can plausibly be read as
+// depicting "a city" or "a day," so letting one satisfy 50% coverage on a 2-word subject (e.g.
+// "motorbike city") let a parked-car photo with no motorbike in it pass on "city" alone.
+const WEAK_SUBJECT_WORDS = new Set(['city', 'town', 'place', 'area', 'day', 'time', 'world', 'life', 'way', 'thing', 'things']);
+// The option's DOMINANT, mandatory-to-depict subject noun(s) -- image-query.js's connector-stripped
+// literal subject with weak/generic container nouns removed (falling back to the full list if that
+// would empty it, so the requirement stays anchored to whatever's left). Exported so the image
+// search query builder (image-picker.js's Tier-3 broadening) can generate broader queries that are
+// GUARANTEED to still satisfy the exact same dominant-subject gate enforced below, instead of
+// drifting onto a different, unverified notion of "the subject".
+export const dominantSubjectWordsFor = optionText => {
+  const rawDominantSubjectWords = coreSubjectWords(optionText);
+  const strongSubjectWords = rawDominantSubjectWords.filter(word => !WEAK_SUBJECT_WORDS.has(word));
+  return strongSubjectWords.length ? strongSubjectWords : rawDominantSubjectWords;
+};
 const explicitVisualIntent = (option, tokens) => visualIntentGroups(option).every(group => containsAny(tokens, group));
 const visualIntentCoverage = (option, tokens) => { const groups = visualIntentGroups(option); return groups.length ? groups.filter(group => containsAny(tokens, group)).length / groups.length : 1; };
 const clampScore = value => Math.max(0, Math.min(100, Math.round(value * 10) / 10));
@@ -186,16 +202,7 @@ export const assessImageCandidate = (candidate, option) => {
   // text/tags. This is what stops a technically-valid but wrong-subject image (a sports car for
   // "luxury trains", a parked car for "ride a motorbike") from clearing the relevance gate merely
   // because one unrelated filler word happened to match.
-  // Generic container/setting nouns (a "city," a "day," "the world") are real words but not
-  // visually distinctive subjects on their own -- almost any photo can plausibly be read as
-  // depicting "a city" or "a day," so letting one satisfy 50% coverage on a 2-word subject (e.g.
-  // "motorbike city") let a parked-car photo with no motorbike in it pass on "city" alone. Excluded
-  // from the coverage requirement (falling back to the full list if that would empty it), so the
-  // requirement is anchored to whatever's left -- the actually distinctive noun(s).
-  const WEAK_SUBJECT_WORDS = new Set(['city', 'town', 'place', 'area', 'day', 'time', 'world', 'life', 'way', 'thing', 'things']);
-  const rawDominantSubjectWords = coreSubjectWords(option.text);
-  const strongSubjectWords = rawDominantSubjectWords.filter(word => !WEAK_SUBJECT_WORDS.has(word));
-  const dominantSubjectWords = strongSubjectWords.length ? strongSubjectWords : rawDominantSubjectWords;
+  const dominantSubjectWords = dominantSubjectWordsFor(option.text);
   const dominantMatched = dominantSubjectWords.filter(word => textTokens.has(word) || textStems.has(stem(word)) || (VISUAL_EXPANSIONS[word] || []).some(alias => textTokens.has(alias)));
   const dominantCoverage = dominantSubjectWords.length ? dominantMatched.length / dominantSubjectWords.length : 1;
   const intentGroups = visualIntentGroups(option); const intentCoverage = intentGroups.length ? visualIntentCoverage(option, allTokens) : 1;

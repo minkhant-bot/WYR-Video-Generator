@@ -101,6 +101,146 @@ test('when the first (most specific) query returns nothing, a later broader quer
   } finally { global.fetch = originalFetch; }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Bounded gap-fill (Tiers 2-4): previously, runAutomaticPipeline threw IMAGE_SELECTION_EXHAUSTED
+// the instant Tier 1's strict, fixed 8-query/18-call pass left ANY slot unfilled -- with zero
+// broadening or retry (expandImageSelection/replaceImageSelection existed but were never called on
+// the automatic/production path). These tests exercise the fillUnfilledSlot gap-fill this fix adds
+// directly inside createImageSelection.
+// ---------------------------------------------------------------------------------------------
+const gapFillConfig = overrides => ({ pixabayApiKey: 'test-key', pexelsApiKey: '', timeoutMs: 1000, pexelsConcurrency: 2, imageRecoveryMaxRequests: 10, imageRecoveryMaxMs: 5000, imageRecoveryQueryRounds: 3, ...overrides });
+
+test('Tier 1 candidates are all hard-rejected (watermarked) for its entire bounded call budget -- Tier 2\'s extra provider calls still succeed', async () => {
+  const originalFetch = global.fetch; let callCount = 0;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      callCount += 1;
+      // Tier 1 is hard-capped at 18 provider calls (MAX_PROVIDER_CALLS_PER_SLOT); every one of
+      // those calls returns a shutterstock-watermarked preview (hard-rejected). Only calls beyond
+      // that -- which only Tier 2's own extra budget can make -- return a clean, on-subject photo.
+      const clean = callCount > 18;
+      const id = clean ? 'clean-1' : `wm-${callCount}`;
+      const tags = clean ? 'treehouse forest wooden ladder' : 'treehouse shutterstock watermark preview';
+      return { ok: true, async json() { return { hits: [{ id, imageWidth: 1600, imageHeight: 900, tags, pageURL: `https://pixabay.com/images/id-${id}/`, largeImageURL: `https://cdn.pixabay.com/${id}.jpg` }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig() });
+    assert.ok(selection.slots.Q1A.selectedId, 'Tier 2 (extra provider calls beyond Tier 1\'s bounded budget) must fill the slot');
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, 'clean-1');
+    assert.ok(selection.slots.Q1A.gapFillTiers.some(t => t.tier === 'tier2_deeper_pages' && t.filled), 'the fill must be attributed to the tier-2 pass');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('Tier 1 candidates are all semantically wrong-subject (rejected by the dominant-subject gate) -- a Tier 3 subject-preserving broadened query succeeds', async () => {
+  const originalFetch = global.fetch; let id = 1;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      const q = parsed.searchParams.get('q');
+      id += 1;
+      // Only the Tier-3 broadened query "treehouse photo" (bare dominant subject + generic
+      // photographic suffix -- see image-picker.js's broadenedSubjectQueries) ever returns a
+      // candidate that actually shows a treehouse; every other query (including Tier 1's own
+      // deterministic "treehouse" query) returns an office photo that will fail the dominant-subject
+      // gate outright.
+      const tags = q === 'treehouse photo' ? 'treehouse forest wooden ladder' : 'office desk laptop computer keyboard';
+      return { ok: true, async json() { return { hits: [{ id, imageWidth: 1600, imageHeight: 900, tags, pageURL: `https://pixabay.com/images/id-${id}/`, largeImageURL: `https://cdn.pixabay.com/${id}.jpg` }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig() });
+    assert.ok(selection.slots.Q1A.selectedId, 'Tier 3 (subject-preserving broadened query) must fill the slot');
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.match(selected.title, /treehouse/, 'only the genuinely on-subject candidate may ever be selected');
+    assert.equal(selection.slots.Q1A.queries.includes('treehouse photo'), true, 'the broadened query must have been added to the slot\'s query list');
+    assert.ok(selection.slots.Q1A.gapFillTiers.some(t => t.tier === 'tier3_broadened_subject_queries' && t.filled), 'the fill must be attributed to the tier-3 broadened-query pass');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('the same wrong-subject candidate is returned by every query for a long stretch (deduped after its first miss, contributing nothing) -- a later, genuinely new and on-subject candidate still succeeds', async () => {
+  const originalFetch = global.fetch; let callCount = 0;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      callCount += 1;
+      // Calls 1-20 (spanning the whole of Tier 1's 18-call budget plus a couple of Tier 2 calls)
+      // all return the EXACT same id=1, wrong-subject candidate -- the first occurrence is rejected
+      // (wrong subject) and every repeat after that is deduped as a seen candidate, contributing
+      // zero new pool entries either way. Only call 21 onward returns a genuinely different,
+      // on-subject candidate (id=2).
+      const id = callCount > 20 ? '2' : '1';
+      const tags = callCount > 20 ? 'treehouse forest wooden ladder' : 'office desk laptop keyboard';
+      return { ok: true, async json() { return { hits: [{ id, imageWidth: 1600, imageHeight: 900, tags, pageURL: `https://pixabay.com/images/id-${id}/`, largeImageURL: `https://cdn.pixabay.com/${id}.jpg` }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig({ imageRecoveryMaxRequests: 10 }) });
+    assert.ok(selection.slots.Q1A.selectedId, 'a later, genuinely distinct on-subject candidate must still be found and selected');
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, '2');
+    assert.equal(selection.slots.Q1A.candidates.some(c => c.id === '1'), false, 'the wrong-subject candidate must never enter the pool, deduped or not');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('a Tier-3 broadened query that returns BOTH a wrong-subject and a correct-subject candidate never selects the wrong one', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      const q = parsed.searchParams.get('q');
+      if (q !== 'treehouse photo') return { ok: true, async json() { return { hits: [] }; } };
+      return {
+        ok: true, async json() {
+          return {
+            hits: [
+              { id: '10', imageWidth: 1600, imageHeight: 900, tags: 'office desk laptop keyboard', pageURL: 'https://pixabay.com/images/id-10/', largeImageURL: 'https://cdn.pixabay.com/10.jpg' },
+              { id: '11', imageWidth: 1600, imageHeight: 900, tags: 'treehouse forest wooden ladder', pageURL: 'https://pixabay.com/images/id-11/', largeImageURL: 'https://cdn.pixabay.com/11.jpg' },
+            ],
+          };
+        },
+      };
+    };
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig() });
+    assert.ok(selection.slots.Q1A.selectedId);
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, '11', 'the office-desk candidate must never be selected merely because it was returned by a broadened query');
+    assert.equal(selection.slots.Q1A.candidates.some(c => c.id === '10'), false, 'the wrong-subject candidate must never even enter the ranked pool -- it must fail the dominant-subject gate');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('when every tier is genuinely exhausted (provider has nothing usable at all), the slot fails clearly with a bounded, well-formed diagnostic report -- never an unrelated fallback image', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: true, async json() { return { hits: [] }; } });
+    const plan = { questions: [{ index: 0, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } }] };
+    const started = Date.now();
+    const selection = await createImageSelection({ plan, config: gapFillConfig({ imageRecoveryMaxRequests: 6, imageRecoveryMaxMs: 3000 }) });
+    const elapsedMs = Date.now() - started;
+    assert.equal(selection.slots.Q1A.selectedId, null);
+    assert.equal(selection.selectedCount, 0);
+    assert.ok(elapsedMs < 10_000, 'a genuinely-empty provider must fail fast, never hang waiting on an unbounded retry loop');
+
+    const diag = selection.unfilledDiagnostics.find(d => d.slot === 'Q1A');
+    assert.ok(diag, 'an unfilled slot must produce a diagnostic report');
+    assert.equal(diag.scene, 1);
+    assert.equal(diag.option, 'A');
+    assert.equal(diag.optionText, 'Live in a treehouse');
+    assert.equal(diag.dominantSubject, 'treehouse');
+    assert.ok(Array.isArray(diag.queriesAttempted) && diag.queriesAttempted.length > 0);
+    assert.ok(Array.isArray(diag.gapFillTiers) && diag.gapFillTiers.length > 0, 'diagnostics must record which gap-fill tiers were actually attempted');
+    assert.ok(diag.gapFillTiers.every(t => t.filled === false));
+    assert.equal(typeof diag.candidatesInspected, 'number');
+    assert.equal(typeof diag.duplicatesRejected, 'number');
+    assert.equal(typeof diag.semanticRelevanceRejected, 'number');
+    assert.ok(diag.finalReason, 'a final, human-readable reason must be present');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('auto-selection logs a diagnostic line per slot with query, provider, and scores', async () => {
   const originalFetch = global.fetch; const originalInfo = console.info; let counter = 0; const logs = [];
   try {

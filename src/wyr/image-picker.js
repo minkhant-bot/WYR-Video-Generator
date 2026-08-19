@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildImageQueries, inspectDownloadedImage } from './images.js';
+import { PexelsImageProvider, assessImageCandidate, buildImageQueries, dominantSubjectWordsFor, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
@@ -11,6 +11,13 @@ import { WYR_TEMPLATE } from './template.js';
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
 const MAX_PROVIDER_CALLS_PER_SLOT = 18;
+// Bounded gap-fill budget for slots that Tier 1 (the strict, fixed 8-query/18-call pass above)
+// left unfilled -- reuses the SAME config knobs the (otherwise dead-on-the-automatic-path)
+// findAndDownloadImages recovery loop already exposes (WYR_IMAGE_RECOVERY_*), so ops can tune one
+// consistent surface instead of two. Applied ONLY to slots still missing a selection after Tier 1,
+// never to the whole batch, so a healthy 10/12 selection costs nothing extra.
+const GAP_FILL_DEFAULTS = Object.freeze({ maxRequests: 24, maxWallClockMs: 45_000, queryRounds: 3 });
+const GAP_FILL_TIER_CALLS = 18;
 
 const identity = candidate =>
   `${candidate.provider}:${candidate.id}|${candidate.originalImageUrl || candidate.downloadUrl || ''}`;
@@ -145,6 +152,26 @@ const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
   ].filter(query => query && query.length >= 3))].slice(0, 8);
 };
 
+// Tier 3 (gap-fill only, never used for the initial Tier-1 pass): subject-preserving broadening
+// for a slot that found NO usable candidate in the fixed Tier-1 query list. Anchored to
+// dominantSubjectWordsFor -- the EXACT same word list images.js's assessImageCandidate requires
+// >=50% coverage of -- so every variant here is guaranteed capable of clearing the dominant-subject
+// gate; it only ever drops/reorders INCIDENTAL words (adjectives, actions, locations, temporal
+// modifiers), never the mandatory core noun(s).
+const broadenedSubjectQueries = optionText => {
+  const words = dominantSubjectWordsFor(optionText);
+  if (!words.length) return [];
+  const bare = words.join(' ');
+  const head = words[words.length - 1]; // rightmost word: typically the most specific/photographable noun
+  return [...new Set([
+    bare,
+    head,
+    `${bare} photo`,
+    `${head} photo`,
+    `${bare} real photo`,
+  ].filter(query => query && query.length >= 3))];
+};
+
 const createProviders = config => {
   const providers = [];
   if (config.pixabayApiKey) {
@@ -196,16 +223,33 @@ const logSelectionResult = state => {
   console.info(`WYR_SELECTION_RESULT | ${state.key} | NO CANDIDATE SELECTED | reason="${logSafe(state.error)}" | candidatesConsidered=${state.candidates.length} | providerRequestCount=${state.providerRequestCount}`);
 };
 
-const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_POOL_SIZE) => {
+// Buckets a rejected/dropped candidate into the diagnostic category a production failure report
+// needs (see ImageSelectionExhaustedError below) -- never stores the full candidate, just a count,
+// so an exhausted slot's diagnostics stay small regardless of how many candidates were inspected.
+const classifyRejection = checked => {
+  if (checked.hardRejected) return 'hardRejected';
+  const reasons = checked.rejectionReasons || [];
+  if (reasons.some(reason => reason.includes('dominant subject'))) return 'dominantSubjectRejected';
+  if (reasons.some(reason => reason.includes('relevance score') || reason.includes('visual intent'))) return 'semanticRejected';
+  return 'otherRejected';
+};
+
+const emptyDiagnostics = () => ({
+  candidatesInspected: 0, duplicatesRejected: 0, hardRejected: 0,
+  semanticRejected: 0, dominantSubjectRejected: 0, otherRejected: 0,
+});
+
+const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_POOL_SIZE, { maxCalls = MAX_PROVIDER_CALLS_PER_SLOT, deadline = Infinity } = {}) => {
   if (!providers.length) {
     state.error = 'No image provider is configured.';
     return state;
   }
+  state.diagnostics = state.diagnostics || emptyDiagnostics();
 
   const seen = new Set(state.seen || []);
   let calls = 0;
 
-  while (state.candidates.length < minimumPool && calls < MAX_PROVIDER_CALLS_PER_SLOT) {
+  while (state.candidates.length < minimumPool && calls < maxCalls && Date.now() < deadline) {
     const provider = providers[state.providerIndex % providers.length];
     const query = state.queries[state.queryIndex % state.queries.length];
     const pageKey = `${provider.name}:${query}`;
@@ -223,11 +267,12 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
           searchQuery: query,
         });
         const key = identity(checked);
-        if (seen.has(key)) continue;
+        if (seen.has(key)) { state.diagnostics.duplicatesRejected += 1; continue; }
         seen.add(key);
         state.seen.push(key);
+        state.diagnostics.candidatesInspected += 1;
 
-        if (!reviewUsable(checked)) continue;
+        if (!reviewUsable(checked)) { state.diagnostics[classifyRejection(checked)] += 1; continue; }
 
         state.candidates.push({
           ...checked,
@@ -252,7 +297,63 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
     if (state.candidates.length >= minimumPool) break;
   }
 
-  state.exhausted = state.candidates.length === 0 && calls >= MAX_PROVIDER_CALLS_PER_SLOT;
+  state.exhausted = state.candidates.length === 0 && calls >= maxCalls;
+  return state;
+};
+
+// Tiers 2-4 (bounded gap-fill): reached ONLY for a slot Tier 1 left with zero selectable
+// candidates. Each tier is a fresh, small provider-call budget so total extra latency for the
+// common case (one or two stubborn slots) stays bounded, and the whole gap-fill run additionally
+// respects a shared request-count/wall-clock ceiling (config.imageRecoveryMaxRequests/
+// imageRecoveryMaxMs -- the same knobs already exposed for the legacy recovery path) so a
+// genuinely-empty provider result can never turn into an unbounded retry loop.
+const fillUnfilledSlot = async (state, providers, config) => {
+  if (state.selectedId) return state;
+  const maxRequests = config.imageRecoveryMaxRequests ?? GAP_FILL_DEFAULTS.maxRequests;
+  const maxWallClockMs = config.imageRecoveryMaxMs ?? GAP_FILL_DEFAULTS.maxWallClockMs;
+  const queryRounds = config.imageRecoveryQueryRounds ?? GAP_FILL_DEFAULTS.queryRounds;
+  const deadline = Date.now() + maxWallClockMs;
+  const requestsAtStart = state.providerRequestCount;
+  const remainingBudget = () => Math.max(0, maxRequests - (state.providerRequestCount - requestsAtStart));
+  state.gapFillTiers = [];
+  const TOTAL_TIERS = 3;
+  let tiersAttempted = 0;
+
+  const runTier = async (label, extraQueries = []) => {
+    tiersAttempted += 1;
+    if (state.selectedId || Date.now() >= deadline || remainingBudget() <= 0) return;
+    if (extraQueries.length) {
+      const fresh = extraQueries.filter(query => !state.queries.includes(query));
+      if (fresh.length) {
+        state.queries.push(...fresh);
+        state.queryIndex = state.queries.length - fresh.length; // try the new queries first, not after a full old cycle
+      }
+    }
+    // A fair SHARE of whatever budget remains, not the whole thing: an earlier tier making no
+    // progress (e.g. deeper pages of a query set a wrong-subject provider result keeps satisfying)
+    // must never be able to spend the entire gap-fill budget and starve a later, more promising
+    // tier (the subject-preserving broadened queries) of its own chance to run at all.
+    const tiersLeft = TOTAL_TIERS - tiersAttempted + 1;
+    const share = Math.max(1, Math.ceil(remainingBudget() / tiersLeft));
+    const before = state.candidates.length;
+    await fetchPoolForSlot(state, providers, config, before + REVIEW_POOL_SIZE, {
+      maxCalls: Math.min(GAP_FILL_TIER_CALLS, share),
+      deadline,
+    });
+    selectBestAvailable(state);
+    state.gapFillTiers.push({ tier: label, queriesAdded: extraQueries, candidatesAfter: state.candidates.length, filled: Boolean(state.selectedId) });
+  };
+
+  // Tier 2: same subject-preserving query list, deeper provider pages -- catches results that only
+  // show up past page 1 without changing what's being searched for.
+  await runTier('tier2_deeper_pages');
+  // Tier 3: broadened, dominant-subject-preserving query variants (bare subject, single head noun,
+  // generic photographic suffixes) -- never drops the mandatory subject noun(s).
+  if (!state.selectedId) await runTier('tier3_broadened_subject_queries', broadenedSubjectQueries(state.optionText).slice(0, queryRounds + 2));
+  // Tier 4: one further round on top of tier 3's now-larger query set, in case a genuinely usable
+  // candidate exists but only turns up on a later page of the broadened queries themselves.
+  if (!state.selectedId) await runTier('tier4_broadened_deeper_pages');
+
   return state;
 };
 
@@ -260,6 +361,33 @@ const updateSelectedCount = selection => {
   selection.selectedCount = Object.values(selection.slots)
     .filter(slot => slot.selectedId).length;
   return selection.selectedCount;
+};
+
+// Full per-slot diagnostic report for a slot that could not be filled -- everything Railway-failure
+// triage needs (see ImageSelectionExhaustedError), with nothing secret in it: just option text,
+// queries tried, and rejection counts. Reused for a selection-stage failure (below) and re-derived
+// with download-stage counts merged in for a download-stage failure (downloadSelectedCandidates).
+export const buildSlotDiagnostics = (state, reasonOverride = null) => {
+  const diagnostics = state.diagnostics || emptyDiagnostics();
+  return {
+    slot: state.key,
+    scene: state.questionIndex + 1,
+    option: state.slot,
+    optionText: state.optionText,
+    dominantSubject: dominantSubjectWordsFor(state.optionText).join(' '),
+    queriesAttempted: [...(state.queries || [])],
+    gapFillTiers: state.gapFillTiers || [],
+    candidatesInspected: diagnostics.candidatesInspected,
+    duplicatesRejected: diagnostics.duplicatesRejected,
+    downloadsFailed: state.downloadsFailed || 0,
+    framingRejected: state.framingRejected || 0,
+    semanticRelevanceRejected: diagnostics.semanticRejected + diagnostics.dominantSubjectRejected,
+    hardRejected: diagnostics.hardRejected,
+    otherRejected: diagnostics.otherRejected,
+    finalReason: reasonOverride || (state.selectedId
+      ? null
+      : (state.error || 'No candidate cleared the relevance/quality gates within the bounded search budget.')),
+  };
 };
 
 export const createImageSelection = async ({ plan, config }) => {
@@ -287,14 +415,27 @@ export const createImageSelection = async ({ plan, config }) => {
         exhausted: false,
         error: null,
         providerRequestCount: 0,
+        diagnostics: emptyDiagnostics(),
       };
 
+      // Tier 1: strict, fixed query list -- unchanged behavior/gates from before this fix.
       await fetchPoolForSlot(state, providers, config, REVIEW_POOL_SIZE);
       selectBestAvailable(state);
-      logSelectionResult(state);
       slots[key] = state;
     }
   }
+
+  // Tiers 2-4 (bounded gap-fill): only for slots Tier 1 left unfilled. This is what was previously
+  // completely missing on the automatic/production path -- expandImageSelection/replaceImageSelection
+  // already existed but were only ever wired to the manual-review HTTP endpoints, never called here,
+  // so runAutomaticPipeline threw IMAGE_SELECTION_EXHAUSTED the instant Tier 1 left ANY slot short,
+  // with zero broadening or retry. See pipeline.js's runAutomaticPipeline for where the final
+  // (still-bounded) exhaustion check now lives.
+  const unfilled = Object.values(slots).filter(state => !state.selectedId);
+  for (const state of unfilled) {
+    await fillUnfilledSlot(state, providers, config);
+  }
+  for (const state of Object.values(slots)) logSelectionResult(state);
 
   const selection = {
     mode: 'auto_review',
@@ -305,6 +446,9 @@ export const createImageSelection = async ({ plan, config }) => {
     providers: providers.map(provider => provider.name),
   };
   updateSelectedCount(selection);
+  selection.unfilledDiagnostics = Object.values(slots)
+    .filter(state => !state.selectedId)
+    .map(state => buildSlotDiagnostics(state));
   return selection;
 };
 
@@ -451,6 +595,10 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
         };
       } catch (error) {
         failedKeys.add(candidate.candidateKey); lastError = error;
+        state.diagnostics = state.diagnostics || emptyDiagnostics();
+        if (/framing rejected/i.test(error.message)) state.framingRejected = (state.framingRejected || 0) + 1;
+        else if (/duplicate image bytes/i.test(error.message)) state.diagnostics.duplicatesRejected += 1;
+        else state.downloadsFailed = (state.downloadsFailed || 0) + 1;
         log('image.candidate_rejected', { slot: item.key, provider: candidate.provider, query: candidate.queryUsed, candidateRank: rank, reason: error.message });
         return null;
       }
@@ -463,7 +611,26 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
       await fetchPoolForSlot(state, [...providers.values()], config, before + REVIEW_POOL_SIZE);
       for (const candidate of state.candidates.slice(before)) { result = await tryCandidate(candidate); if (result) break; }
     }
-    if (!result) throw new ImageSelectionExhaustedError(`${item.key}: every image candidate (${rank} tried) failed download or validation. Last error: ${lastError?.message || 'no candidates were available'}`, { slot: item.key, candidatesTried: rank });
+    if (!result) {
+      // Tier 3/4 continuation (see fillUnfilledSlot): the known pool -- even widened -- is
+      // exhausted purely at the download/validation/framing stage (item #8/#4 in the production
+      // audit: failed downloads and framing rejections must trigger replacement searches, not an
+      // immediate failure). Broaden to subject-preserving queries -- guaranteed to still satisfy
+      // the dominant-subject gate -- for one more bounded round before finally giving up.
+      const extraQueries = broadenedSubjectQueries(item.optionText).filter(query => !(state.queries || []).includes(query));
+      if (extraQueries.length) {
+        state.queries = state.queries || [];
+        state.queries.push(...extraQueries);
+        state.queryIndex = state.queries.length - extraQueries.length;
+        const before = state.candidates.length;
+        await fetchPoolForSlot(state, [...providers.values()], config, before + REVIEW_POOL_SIZE);
+        for (const candidate of state.candidates.slice(before)) { result = await tryCandidate(candidate); if (result) break; }
+      }
+    }
+    if (!result) {
+      const reason = `${item.key}: every image candidate (${rank} tried) failed download or validation. Last error: ${lastError?.message || 'no candidates were available'}`;
+      throw new ImageSelectionExhaustedError(reason, { ...buildSlotDiagnostics(state, reason), candidatesTried: rank });
+    }
     return result;
   });
 };

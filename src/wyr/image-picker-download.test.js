@@ -242,6 +242,67 @@ test('a framing-safe candidate carries its computed crop offset onto the final a
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Download-stage Tier 3/4 continuation: previously, once a slot's whole known pool AND one widened
+// search (same query list, deeper pages) were both exhausted, the slot failed immediately. Now one
+// more bounded round of dominant-subject-preserving broadened queries (image-picker.js's
+// broadenedSubjectQueries -- the SAME helper the selection-stage gap-fill uses) is tried before
+// finally giving up, so a slot doesn't fail just because every candidate the ORIGINAL query
+// phrasing turned up happened to break at the download/framing stage.
+// ---------------------------------------------------------------------------------------------
+const pixabayUrl = (q, page = 1) => `https://pixabay.com/api/?key=test-pixabay-key&q=${encodeURIComponent(q).replace(/%20/g, '+')}&page=${page}&per_page=40&safesearch=true&orientation=horizontal&image_type=all`;
+const searchResponse = hits => () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ hits }) });
+
+test('download failures exhaust the known pool AND the first widened search -- a Tier 3 subject-preserving broadened query still succeeds', () => {
+  const handlers = new Map();
+  const bad = makeCandidate('Pixabay', handlers, () => notFoundResponse());
+  const broadenedUrl = 'https://fixture.test/pixabay/broadened-download.jpg';
+  handlers.set(broadenedUrl, () => jpegResponse(validImageBytes()));
+  // The first widen (fetchPoolForSlot, same "test" query) comes back empty; the bare broadened
+  // subject query "treehouse" also comes back empty; only "treehouse photo" -- still anchored to
+  // the option's dominant subject "treehouse" -- returns a usable candidate.
+  handlers.set(pixabayUrl('test'), emptySearchResponse);
+  handlers.set(pixabayUrl('treehouse'), emptySearchResponse);
+  handlers.set(pixabayUrl('treehouse photo'), searchResponse([{ id: 777, imageWidth: 1600, imageHeight: 900, tags: 'treehouse forest wooden ladder', pageURL: 'https://pixabay.com/images/id-777/', largeImageURL: broadenedUrl }]));
+  handlers.set(pixabayUrl('treehouse real photo'), emptySearchResponse);
+
+  const testSlot = { key: 'QT0', questionIndex: 0, slot: 'A', optionText: 'Live in a treehouse', queries: ['test'], queryIndex: 0, providerIndex: 0, pages: {}, seen: [], candidates: [bad], selectedId: bad.candidateKey };
+  const selection = buildSelection([testSlot], handlers);
+  return withMockedFetch(handlers, async () => {
+    const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-dl-')), config: { ...config, pexelsApiKey: '' } });
+    const result = assets.find(asset => asset.questionIndex === 0);
+    assert.equal(result.id, '777', 'the Tier 3 broadened-query candidate must be found and downloaded after the known pool and first widen are exhausted');
+  });
+});
+
+test('framing rejections exhaust the known pool AND the first widened search -- a Tier 3 subject-preserving broadened query still succeeds', () => {
+  const handlers = new Map();
+  const unsafeKnown = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));
+  const widenedUrl = 'https://fixture.test/pixabay/widened-unsafe.jpg';
+  handlers.set(widenedUrl, () => jpegResponse(validImageBytes()));
+  const broadenedUrl = 'https://fixture.test/pixabay/broadened-safe.jpg';
+  handlers.set(broadenedUrl, () => jpegResponse(validImageBytes()));
+
+  handlers.set(pixabayUrl('test'), searchResponse([{ id: 501, imageWidth: 1600, imageHeight: 900, tags: 'treehouse forest wooden ladder', pageURL: 'https://pixabay.com/images/id-501/', largeImageURL: widenedUrl }]));
+  handlers.set(pixabayUrl('treehouse'), emptySearchResponse);
+  handlers.set(pixabayUrl('treehouse photo'), searchResponse([{ id: 502, imageWidth: 1600, imageHeight: 900, tags: 'treehouse forest wooden ladder', pageURL: 'https://pixabay.com/images/id-502/', largeImageURL: broadenedUrl }]));
+  handlers.set(pixabayUrl('treehouse real photo'), emptySearchResponse);
+
+  const testSlot = { key: 'QT0', questionIndex: 0, slot: 'A', optionText: 'Live in a treehouse', queries: ['test'], queryIndex: 0, providerIndex: 0, pages: {}, seen: [], candidates: [unsafeKnown], selectedId: unsafeKnown.candidateKey };
+  const selection = buildSelection([testSlot], handlers);
+  // Both the known-pool candidate and the widened-search candidate (id 501) are framing-unsafe;
+  // only the Tier 3 broadened-query candidate (id 502) gets a safe crop.
+  const computeCrop = async ({ localPath }) => {
+    if (localPath.includes(`-pixabay-${unsafeKnown.id}`) || localPath.includes('-pixabay-501')) return { safe: false, reason: 'framing rejected: synthetic test rejection' };
+    return { safe: true, x: 1, y: 2, coverWidth: 900, coverHeight: 450 };
+  };
+  return withMockedFetch(handlers, async () => {
+    const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-dl-')), config: { ...config, pexelsApiKey: '' }, computeCrop });
+    const result = assets.find(asset => asset.questionIndex === 0);
+    assert.equal(result.id, '502', 'the Tier 3 broadened-query candidate must be found once every framing-unsafe candidate from the known pool and first widen is exhausted');
+  });
+});
+
 test('selectedCandidates only returns slots that actually have a selection', () => {
   const handlers = new Map();
   const candidate = makeCandidate('Pixabay', handlers, () => jpegResponse(validImageBytes()));
