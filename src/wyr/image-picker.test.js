@@ -291,6 +291,151 @@ test('when every tier is genuinely exhausted (provider has nothing usable at all
   } finally { global.fetch = originalFetch; }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Tier 5 (semantic visual concept): a THIRD live Railway option -- "All your debt erased today"
+// (dominantSubject: "all debt erased") -- proved the previous fix was still a finite dictionary:
+// "erased" was never mapped to a synonym, so Tiers 1-4 exhausted at 1057 candidates inspected,
+// 1033 semanticRelevanceRejected. The general fix is architectural: when literal
+// extraction/broadening (Tiers 1-4) can't find anything, ask Groq (visualQueryProvider,
+// dependency-injected here -- never a real network call in tests) to translate the option's
+// MEANING into concrete photographable phrases, then gate-check candidates against THOSE phrases
+// instead of the original non-photographable words. These tests inject a fake visualQueryProvider
+// directly (bypassing config.groqApiKey) so no test ever makes a real Groq call.
+// ---------------------------------------------------------------------------------------------
+const alwaysEmptyPixabay = async () => ({ ok: true, async json() { return { hits: [] }; } });
+
+test('[A] literal non-photographable wording is never used as the final search concept -- Tier 5 fills the live "All your debt erased today" slot via a Groq-derived concrete phrase', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      const q = parsed.searchParams.get('q') || '';
+      // Every LITERAL query (containing "debt"/"erased"/etc.) returns nothing usable; only the
+      // Groq-derived concrete phrase returns a real, on-concept candidate.
+      if (q !== 'person reviewing paid bills relief') return alwaysEmptyPixabay();
+      return { ok: true, async json() { return { hits: [{ id: '701', imageWidth: 1600, imageHeight: 900, tags: 'person relieved reviewing paid bills financial paperwork relief', pageURL: 'https://pixabay.com/images/id-701/', largeImageURL: 'https://cdn.pixabay.com/701.jpg' }] }; } };
+    };
+    const visualQueryProvider = { generateVisualQueries: async () => ['person reviewing paid bills relief'] };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'All your debt erased today', searchQuery: '' }, optionB: { text: 'Own a yacht', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig(), visualQueryProvider });
+    assert.ok(selection.slots.Q1A.selectedId, 'Tier 5 must fill the slot once literal Tiers 1-4 are exhausted');
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, '701');
+    assert.equal(selected.queryUsed, 'person reviewing paid bills relief', 'the winning candidate must have been found via the Groq-derived concept query, not a literal "erased" query');
+    assert.ok(selection.slots.Q1A.gapFillTiers.some(t => t.tier === 'tier5_semantic_visual_concept' && t.filled), 'the fill must be attributed to Tier 5');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('[B] the derived concept is generated from -- and stays semantically tied to -- the option\'s real original text (never a hardcoded stand-in)', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = alwaysEmptyPixabay;
+    // Both options in this plan end up stuck (the mock provider returns nothing at all), so
+    // Tier 5 fires for BOTH slots -- collect every call rather than a single overwritten variable.
+    const calls = [];
+    const visualQueryProvider = { generateVisualQueries: async ({ optionText, attemptedQueries }) => { calls.push({ optionText, attemptedQueries }); return ['relieved person with paid bills']; } };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'All your debt erased today', searchQuery: '' }, optionB: { text: 'Own a yacht', searchQuery: '' } }] };
+    await createImageSelection({ plan, config: gapFillConfig({ imageRecoveryMaxRequests: 6, imageRecoveryMaxMs: 3000 }), visualQueryProvider });
+    const debtCall = calls.find(call => call.optionText === 'All your debt erased today');
+    assert.ok(debtCall, 'Groq must be given the option\'s real, unmodified text so its concept stays tied to the actual meaning');
+    assert.ok(Array.isArray(debtCall.attemptedQueries) && debtCall.attemptedQueries.length > 0, 'Groq must be told what literal queries already failed, so it does not repeat them');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('[C] an unrelated candidate is still rejected even when it is returned alongside a genuinely on-concept Tier-5 candidate', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      const q = parsed.searchParams.get('q') || '';
+      if (q !== 'person reviewing paid bills relief') return alwaysEmptyPixabay();
+      return {
+        ok: true, async json() {
+          return {
+            hits: [
+              { id: '800', imageWidth: 1600, imageHeight: 900, tags: 'astronaut floating in outer space', pageURL: 'https://pixabay.com/images/id-800/', largeImageURL: 'https://cdn.pixabay.com/800.jpg' },
+              { id: '801', imageWidth: 1600, imageHeight: 900, tags: 'person relieved reviewing paid bills financial paperwork relief', pageURL: 'https://pixabay.com/images/id-801/', largeImageURL: 'https://cdn.pixabay.com/801.jpg' },
+            ],
+          };
+        },
+      };
+    };
+    const visualQueryProvider = { generateVisualQueries: async () => ['person reviewing paid bills relief'] };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'All your debt erased today', searchQuery: '' }, optionB: { text: 'Own a yacht', searchQuery: '' } }] };
+    const selection = await createImageSelection({ plan, config: gapFillConfig(), visualQueryProvider });
+    assert.ok(selection.slots.Q1A.selectedId);
+    const selected = selection.slots.Q1A.candidates.find(c => c.candidateKey === selection.slots.Q1A.selectedId);
+    assert.equal(selected.id, '801', 'the unrelated space photo must never be selected merely because it shared a search response with the on-concept candidate');
+    assert.equal(selection.slots.Q1A.candidates.some(c => c.id === '800'), false, 'the unrelated candidate must fail the dominant-subject gate against the Groq-derived concept and never even enter the ranked pool');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('[D] all 12 slots fill when providers hold semantically appropriate photographs, mixing ordinary options with abstract ones needing Tier 5', async () => {
+  const originalFetch = global.fetch;
+  try {
+    // Two DIFFERENT abstract options from two DIFFERENT domains (finance, emotion) both need
+    // Tier 5; the rest are ordinary concrete options that fill on Tier 1 as always.
+    const ORDINARY_TAGS = {
+      yacht: 'luxury yacht ocean boat', mansion: 'mansion estate luxury exterior', treehouse: 'treehouse forest wooden ladder',
+      penthouse: 'penthouse city skyline apartment', backpack: 'backpacker europe street travel', cruise: 'cruise ship caribbean ocean',
+      chef: 'chef cooking kitchen', skydive: 'skydive skydiving parachute sky jump', movie: 'movie star red carpet premiere',
+    };
+    const GROQ_CONCEPTS = {
+      'all your debt erased today': 'person reviewing paid bills relief',
+      'every trace of worry vanishes instantly': 'relieved person smiling peaceful calm',
+    };
+    global.fetch = async url => {
+      const parsed = new URL(url);
+      if (parsed.hostname !== 'pixabay.com') return { ok: true, async json() { return { hits: [] }; } };
+      const q = (parsed.searchParams.get('q') || '').toLowerCase();
+      // Match the QUERY against the Groq-derived PHRASE (what's actually searched for), not the
+      // original option text (the map key) -- the phrase is what a real provider would be asked.
+      for (const phrase of Object.values(GROQ_CONCEPTS)) {
+        if (q === phrase) return { ok: true, async json() { return { hits: [{ id: phrase, imageWidth: 1600, imageHeight: 900, tags: phrase, pageURL: 'https://pixabay.com/images/id-x/', largeImageURL: `https://cdn.pixabay.com/${encodeURIComponent(phrase)}.jpg` }] }; } };
+      }
+      for (const [keyword, tag] of Object.entries(ORDINARY_TAGS)) {
+        if (q.includes(keyword)) return { ok: true, async json() { return { hits: [{ id: keyword, imageWidth: 1600, imageHeight: 900, tags: tag, pageURL: 'https://pixabay.com/images/id-x/', largeImageURL: `https://cdn.pixabay.com/${keyword}.jpg` }] }; } };
+      }
+      return { ok: true, async json() { return { hits: [] }; } };
+    };
+    const visualQueryProvider = { generateVisualQueries: async ({ optionText }) => { const concept = GROQ_CONCEPTS[optionText.toLowerCase()]; return concept ? [concept] : []; } };
+    const plan = {
+      questions: [
+        { index: 0, category: 'money', optionA: { text: 'Own a yacht', searchQuery: '' }, optionB: { text: 'Live in a mansion', searchQuery: '' } },
+        { index: 1, category: 'dream homes', optionA: { text: 'Live in a treehouse', searchQuery: '' }, optionB: { text: 'Live in a penthouse', searchQuery: '' } },
+        { index: 2, category: 'money', optionA: { text: 'All your debt erased today', searchQuery: '' }, optionB: { text: 'Cook with a chef', searchQuery: '' } },
+        { index: 3, category: 'travel', optionA: { text: 'Backpack Europe', searchQuery: '' }, optionB: { text: 'Cruise the Caribbean', searchQuery: '' } },
+        { index: 4, category: 'emotions', optionA: { text: 'Every trace of worry vanishes instantly', searchQuery: '' }, optionB: { text: 'Skydive', searchQuery: '' } },
+        { index: 5, category: 'fame', optionA: { text: 'Be a movie star', searchQuery: '' }, optionB: { text: 'Cruise the Caribbean', searchQuery: '' } },
+      ],
+    };
+    const selection = await createImageSelection({ plan, config: gapFillConfig(), visualQueryProvider });
+    assert.equal(selection.selectedCount, 12, `expected 12/12; unfilled: ${JSON.stringify(selection.unfilledDiagnostics?.map(d => d.slot))}`);
+    const debtSlot = selection.slots.Q3A; const worrySlot = selection.slots.Q5A;
+    assert.ok(debtSlot.gapFillTiers.some(t => t.tier === 'tier5_semantic_visual_concept' && t.filled));
+    assert.ok(worrySlot.gapFillTiers.some(t => t.tier === 'tier5_semantic_visual_concept' && t.filled));
+  } finally { global.fetch = originalFetch; }
+});
+
+test('[E] genuine exhaustion (Groq itself returns nothing usable) still fails safely with rich diagnostics, never selecting a wrong-subject fallback', async () => {
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = alwaysEmptyPixabay;
+    const visualQueryProvider = { generateVisualQueries: async () => { throw new Error('Groq visual-query generation unavailable'); } };
+    const plan = { questions: [{ index: 0, category: 'money', optionA: { text: 'All your debt erased today', searchQuery: '' }, optionB: { text: 'Own a yacht', searchQuery: '' } }] };
+    const started = Date.now();
+    const selection = await createImageSelection({ plan, config: gapFillConfig({ imageRecoveryMaxRequests: 6, imageRecoveryMaxMs: 3000 }), visualQueryProvider });
+    const elapsedMs = Date.now() - started;
+    assert.equal(selection.slots.Q1A.selectedId, null);
+    assert.ok(elapsedMs < 10_000, 'a Groq failure must never hang; the bounded budget must still apply');
+    const diag = selection.unfilledDiagnostics.find(d => d.slot === 'Q1A');
+    assert.ok(diag, 'a genuinely exhausted slot (including a failed Tier 5) must still produce a full diagnostic report');
+    assert.ok(diag.gapFillTiers.some(t => t.tier === 'tier5_semantic_visual_concept'), 'Tier 5 must be recorded as attempted even though it failed');
+  } finally { global.fetch = originalFetch; }
+});
+
 test('auto-selection logs a diagnostic line per slot with query, provider, and scores', async () => {
   const originalFetch = global.fetch; const originalInfo = console.info; let counter = 0; const logs = [];
   try {

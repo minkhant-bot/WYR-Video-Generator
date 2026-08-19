@@ -218,12 +218,14 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
       const selection = await selectImages({ plan, config });
       if (selection.selectedCount !== selection.total) {
-        // selectImages (createImageSelection) already ran its own bounded Tiers 2-4 gap-fill for
+        // selectImages (createImageSelection) already ran its own bounded Tiers 2-5 gap-fill for
         // every slot that came out of its strict Tier-1 pass unfilled -- see image-picker.js's
-        // fillUnfilledSlot -- so reaching here means those tiers were genuinely exhausted, not that
-        // they were never attempted. unfilledDiagnostics (when the real createImageSelection is in
-        // use, not a test double) carries a full per-slot report so this failure is diagnosable
-        // without reproducing it.
+        // fillUnfilledSlot, including Tier 5's Groq-based semantic-to-visual-concept translation
+        // for options whose literal wording is not photographable at all (e.g. "erased", "grows")
+        // -- so reaching here means those tiers were genuinely exhausted, not that they were never
+        // attempted. unfilledDiagnostics (when the real createImageSelection is in use, not a test
+        // double) carries a full per-slot report so this failure is diagnosable without
+        // reproducing it.
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
         log('image.selection_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics });
         throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${selection.total} image slots after bounded subject-preserving fallback search; selected ${selection.selectedCount}/${selection.total}.`, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });

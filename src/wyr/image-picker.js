@@ -7,6 +7,7 @@ import { deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
 import { computeSubjectAwareCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
+import { GroqContentProvider } from './content.js';
 
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
@@ -260,7 +261,7 @@ const emptyDiagnostics = () => ({
   semanticRejected: 0, dominantSubjectRejected: 0, otherRejected: 0,
 });
 
-const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_POOL_SIZE, { maxCalls = MAX_PROVIDER_CALLS_PER_SLOT, deadline = Infinity } = {}) => {
+const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_POOL_SIZE, { maxCalls = MAX_PROVIDER_CALLS_PER_SLOT, deadline = Infinity, assessmentText = null } = {}) => {
   if (!providers.length) {
     state.error = 'No image provider is configured.';
     return state;
@@ -283,8 +284,13 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
       state.providerRequestCount += 1;
 
       for (const raw of results) {
+        // assessmentText (Tier 5 only, see fillUnfilledSlot): candidates found via a Groq-derived
+        // concrete visual phrase are gate-checked against THAT concrete phrase, not the original
+        // (possibly non-photographable, e.g. "debt erased") option text -- reusing the exact same
+        // dominant-subject/relevance machinery, just pointed at the semantically-translated
+        // concept. state.optionText (shown on screen) itself is never modified anywhere.
         const checked = assessForReview(candidateForBrowser(raw), {
-          text: state.optionText,
+          text: assessmentText || state.optionText,
           searchQuery: query,
         });
         const key = identity(checked);
@@ -328,7 +334,7 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
 // respects a shared request-count/wall-clock ceiling (config.imageRecoveryMaxRequests/
 // imageRecoveryMaxMs -- the same knobs already exposed for the legacy recovery path) so a
 // genuinely-empty provider result can never turn into an unbounded retry loop.
-const fillUnfilledSlot = async (state, providers, config) => {
+const fillUnfilledSlot = async (state, providers, config, visualQueryProvider = null) => {
   if (state.selectedId) return state;
   const maxRequests = config.imageRecoveryMaxRequests ?? GAP_FILL_DEFAULTS.maxRequests;
   const maxWallClockMs = config.imageRecoveryMaxMs ?? GAP_FILL_DEFAULTS.maxWallClockMs;
@@ -337,7 +343,11 @@ const fillUnfilledSlot = async (state, providers, config) => {
   const requestsAtStart = state.providerRequestCount;
   const remainingBudget = () => Math.max(0, maxRequests - (state.providerRequestCount - requestsAtStart));
   state.gapFillTiers = [];
-  const TOTAL_TIERS = 3;
+  // Tiers 2-4 are always attempted; Tier 5 (Groq semantic repair) only exists when a
+  // visualQueryProvider was actually supplied -- the fair-share division below must count it too,
+  // or tiers 2-4 would exhaust the ENTIRE budget among themselves and leave literally nothing for
+  // Tier 5 to ever run with.
+  const TOTAL_TIERS = visualQueryProvider ? 4 : 3;
   let tiersAttempted = 0;
 
   const runTier = async (label, extraQueries = []) => {
@@ -375,6 +385,43 @@ const fillUnfilledSlot = async (state, providers, config) => {
   // candidate exists but only turns up on a later page of the broadened queries themselves.
   if (!state.selectedId) await runTier('tier4_broadened_deeper_pages');
 
+  // Tier 5 (semantic visual concept -- last resort, bounded to ONE Groq call per stuck slot):
+  // Tiers 1-4 are all LITERAL word extraction/broadening -- they can only ever search for words
+  // that already appear in the option text, so a genuinely non-photographable option (e.g. "All
+  // your debt erased today" -- "erased" cannot be literally photographed, and no finite hand-
+  // maintained synonym dictionary can ever cover every abstract verb English has) will exhaust
+  // every literal tier no matter how much they're broadened. Tier 5 instead asks Groq -- already
+  // part of this pipeline's content-generation stack -- to translate the option's MEANING into
+  // concrete, photographable phrases ("person reviewing paid bills financial paperwork relief"),
+  // then gate-checks candidates against THAT concrete phrase (see fetchPoolForSlot's
+  // assessmentText) instead of the original abstract words. This is the general fix: instead of a
+  // human enumerating abstract-word->synonym mappings one at a time (which just breaks again on
+  // the next unmapped verb, as "erased" proved), the SAME semantic-translation step now runs for
+  // ANY option, in ANY domain, that literal extraction can't handle -- bounded to exactly one
+  // Groq call, only for slots that are still stuck after every free/local tier.
+  if (!state.selectedId && visualQueryProvider && typeof visualQueryProvider.generateVisualQueries === 'function' && Date.now() < deadline && remainingBudget() > 0) {
+    tiersAttempted += 1;
+    let phrases = [];
+    try {
+      phrases = await visualQueryProvider.generateVisualQueries({ optionText: state.optionText, attemptedQueries: state.queries, maxQueries: Math.max(1, queryRounds) });
+    } catch (error) {
+      state.semanticVisualConceptError = error.message;
+    }
+    state.semanticVisualConcept = phrases.join('; ') || null;
+    for (const phrase of phrases) {
+      if (state.selectedId || Date.now() >= deadline || remainingBudget() <= 0) break;
+      if (!state.queries.includes(phrase)) { state.queries.push(phrase); state.queryIndex = state.queries.length - 1; }
+      const before = state.candidates.length;
+      await fetchPoolForSlot(state, providers, config, before + REVIEW_POOL_SIZE, {
+        maxCalls: Math.min(GAP_FILL_TIER_CALLS, remainingBudget()),
+        deadline,
+        assessmentText: phrase,
+      });
+      selectBestAvailable(state);
+    }
+    state.gapFillTiers.push({ tier: 'tier5_semantic_visual_concept', queriesAdded: phrases, candidatesAfter: state.candidates.length, filled: Boolean(state.selectedId) });
+  }
+
   return state;
 };
 
@@ -405,13 +452,21 @@ export const buildSlotDiagnostics = (state, reasonOverride = null) => {
     semanticRelevanceRejected: diagnostics.semanticRejected + diagnostics.dominantSubjectRejected,
     hardRejected: diagnostics.hardRejected,
     otherRejected: diagnostics.otherRejected,
+    semanticVisualConcept: state.semanticVisualConcept || null,
     finalReason: reasonOverride || (state.selectedId
       ? null
       : (state.error || 'No candidate cleared the relevance/quality gates within the bounded search budget.')),
   };
 };
 
-export const createImageSelection = async ({ plan, config }) => {
+// Tier 5's Groq client (see fillUnfilledSlot) -- built once from config, exactly like
+// createProviders(config) builds the image providers, so createImageSelection stays a single
+// self-contained entry point. Returns null (Tier 5 silently skipped, zero behavior change) when
+// no Groq key is configured -- Tiers 1-4 alone are unaffected either way.
+const createVisualQueryProvider = config =>
+  config.groqApiKey ? new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs }) : null;
+
+export const createImageSelection = async ({ plan, config, visualQueryProvider = createVisualQueryProvider(config) }) => {
   const providers = createProviders(config);
   const slots = {};
 
@@ -454,7 +509,7 @@ export const createImageSelection = async ({ plan, config }) => {
   // (still-bounded) exhaustion check now lives.
   const unfilled = Object.values(slots).filter(state => !state.selectedId);
   for (const state of unfilled) {
-    await fillUnfilledSlot(state, providers, config);
+    await fillUnfilledSlot(state, providers, config, visualQueryProvider);
   }
   for (const state of Object.values(slots)) logSelectionResult(state);
 
