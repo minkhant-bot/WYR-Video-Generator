@@ -22,9 +22,25 @@ const BLOCKED_CONTENT = /\b(politic(?:s|al)?|election|president|partisan|sexual|
 // literal photographic stand-in, is blocked here.
 const ABSTRACT_FINANCIAL_OBLIGATION_PATTERN = /\b(debts?|balances?|loans?|interest|fees?|fines?|mortgages?|bills?)\b/i;
 const ABSTRACT_ERASURE_VERB_PATTERN = /\b(erased|erase|erases|forgiven|forgive|forgives|forgave|cancell?ed|cancels?|wiped|wipes?|vanish(?:ed|es)?|disappear(?:ed|s)?)\b/i;
+// Four further categories of option text with no concrete, photographable real-world subject --
+// same "mechanical, testable heuristic" style as the rest of this file, added after live production
+// selected options like "Arrive knowing nothing", "Chew everything fifty times", and "Swallow
+// everything in seconds": none of these are financial (the pattern above doesn't cover them), but
+// none has a real-world visual subject a stock photo search could ever reliably represent either.
+// A camera can photograph a mansion, a dog, a beach -- it cannot photograph "everything", "knowing",
+// "fifty times", or "seconds".
+const VAGUE_REFERENCE_PATTERN = /\b(everything|nothing|anything|something|everyone|anyone|someone|nobody|everybody|anybody|somebody)\b/i;
+const MENTAL_STATE_PATTERN = /\b(knowing|knows?|knew|known|understand(?:s|ing)?|understood|realiz(?:e|es|ing|ed)|believ(?:e|es|ing|ed)|rememb(?:er|ers|ering|ered)|forg(?:et|ets|etting|ot|otten)|thinks?|thinking|thought|wonder(?:s|ing|ed)?)\b/i;
+const ARBITRARY_COUNT_PATTERN = /\b(\d+|once|twice|thrice|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\s+times\b/i;
+const TIMING_UNIT_PATTERN = /\b(seconds?|minutes?|hours?)\b/i;
 export const isNonPhotographableAbstractOption = text => {
   const value = String(text ?? '');
-  return ABSTRACT_FINANCIAL_OBLIGATION_PATTERN.test(value) && ABSTRACT_ERASURE_VERB_PATTERN.test(value);
+  if (ABSTRACT_FINANCIAL_OBLIGATION_PATTERN.test(value) && ABSTRACT_ERASURE_VERB_PATTERN.test(value)) return true;
+  if (VAGUE_REFERENCE_PATTERN.test(value)) return true;
+  if (MENTAL_STATE_PATTERN.test(value)) return true;
+  if (ARBITRARY_COUNT_PATTERN.test(value)) return true;
+  if (TIMING_UNIT_PATTERN.test(value)) return true;
+  return false;
 };
 
 const cleanText = value => String(value ?? '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9$ ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -116,7 +132,7 @@ export const assessQuestionQuality = question => {
     if (String(option?.text || '').length > 55) reasons.push(`option ${label} exceeds 55 characters`);
     const queryWords = queryWordCount(option?.searchQuery);
     if (queryWords < 2 || queryWords > 6) reasons.push(`option ${label} searchQuery must contain 2–6 concrete words`);
-    if (isNonPhotographableAbstractOption(option?.text)) reasons.push(`option ${label} describes an abstract, non-photographable state change (e.g. a debt/balance/loan erased or forgiven) with no concrete visual subject`);
+    if (isNonPhotographableAbstractOption(option?.text)) reasons.push(`option ${label} has no concrete, photographable real-world subject (abstract state change, vague reference, knowledge/mental state, arbitrary count, or timing concept)`);
   }
   const boring = [compactOption(question.optionA.text), compactOption(question.optionB.text)].sort().join('|');
   if (BORING_PAIRS.has(boring)) reasons.push('generic low-stakes dilemma is blocked');
