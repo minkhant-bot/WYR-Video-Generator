@@ -43,6 +43,29 @@ export const isNonPhotographableAbstractOption = text => {
   return false;
 };
 
+// The concrete, photographable description of what an option's image should show -- separate from
+// `text` (short punchy display wording) and `searchQuery` (the compressed provider search phrase).
+// Prefers an explicitly authored visualSubject (see content.js's Groq schema); falls back to
+// searchQuery (already required to be "a real, literal, photographable scene or object") for
+// content authored before this field existed -- a legacy DB row or the static seed-questions.js
+// bank -- so every option always has SOME usable visual-subject description, never re-derived by
+// stripping words out of the display text.
+export const deriveVisualSubject = option => {
+  const provided = String(option?.visualSubject ?? '').trim();
+  if (provided) return provided;
+  return String(option?.searchQuery ?? '').trim();
+};
+// The visual-feasibility gate: a resolved visualSubject must be non-empty and must not be made up
+// entirely of the same non-photographable categories isNonPhotographableAbstractOption already
+// screens display text for (vague reference, mental state, arbitrary count, timing, abstract
+// financial erasure) -- general categories, not a per-phrase dictionary, applied to whichever text
+// (author-provided or derived) is actually going to reach image search.
+export const isVisualSubjectFeasible = visualSubject => {
+  const value = String(visualSubject ?? '').trim();
+  if (!value) return false;
+  return !isNonPhotographableAbstractOption(value);
+};
+
 const cleanText = value => String(value ?? '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9$ ]/g, ' ').replace(/\s+/g, ' ').trim();
 const stem = token => {
   if (TOKEN_ALIASES[token]) return TOKEN_ALIASES[token];
@@ -133,6 +156,9 @@ export const assessQuestionQuality = question => {
     const queryWords = queryWordCount(option?.searchQuery);
     if (queryWords < 2 || queryWords > 6) reasons.push(`option ${label} searchQuery must contain 2–6 concrete words`);
     if (isNonPhotographableAbstractOption(option?.text)) reasons.push(`option ${label} has no concrete, photographable real-world subject (abstract state change, vague reference, knowledge/mental state, arbitrary count, or timing concept)`);
+    const visualSubject = deriveVisualSubject(option);
+    if (!visualSubject) reasons.push(`option ${label} has no visualSubject or searchQuery to derive a visual target from`);
+    else if (!isVisualSubjectFeasible(visualSubject)) reasons.push(`option ${label} visualSubject "${visualSubject}" has no concrete, photographable subject`);
   }
   const boring = [compactOption(question.optionA.text), compactOption(question.optionB.text)].sort().join('|');
   if (BORING_PAIRS.has(boring)) reasons.push('generic low-stakes dilemma is blocked');

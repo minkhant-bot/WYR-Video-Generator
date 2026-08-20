@@ -2,7 +2,7 @@
 // from question-pool.js (which only does I/O: run a query, hand rows to these functions, write
 // the result back) so the actual diversity/hook/fantasy rules are unit-testable without a
 // database, and reused identically by both insertion (refill) and selection (video generation).
-import { canonicalDilemma, canonicalMotifKey, deriveTopic, isFantasyQuestion, questionMotifs } from './content-engine.js';
+import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, questionMotifs } from './content-engine.js';
 import { computeHookScore, computeQualityScore, computeVisualScore } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
@@ -35,8 +35,8 @@ export const computeInsertionFields = question => {
     category: question.category,
     contentFamily: contentFamilyForCategory(question.category),
     motifKey, motifKeyA: motifA || null, motifKeyB: motifB || null,
-    optionAText: question.optionA.text, optionASearchQuery: question.optionA.searchQuery,
-    optionBText: question.optionB.text, optionBSearchQuery: question.optionB.searchQuery,
+    optionAText: question.optionA.text, optionASearchQuery: question.optionA.searchQuery, optionAVisualSubject: deriveVisualSubject(question.optionA),
+    optionBText: question.optionB.text, optionBSearchQuery: question.optionB.searchQuery, optionBVisualSubject: deriveVisualSubject(question.optionB),
     dedupeKey: canonicalDilemma(question),
     isFantasy: isFantasyQuestion(question, [motifA, motifB]),
     hookScore: computeHookScore(question), qualityScore: computeQualityScore(question), visualScore: computeVisualScore(question),
@@ -136,10 +136,14 @@ export const arrangeForHook = rows => {
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 
+// option_a_visual_subject/option_b_visual_subject are nullable (see migration 003) -- a row
+// inserted before that column existed falls back to its own search query (deriveVisualSubject's
+// same rule, inlined here since a DB row's snake_case shape isn't the {searchQuery} shape that
+// helper expects), never re-derived by stripping words out of display text.
 export const rowToQuestion = (row, index) => ({
   index, category: row.category,
-  optionA: { text: row.option_a_text, searchQuery: row.option_a_search_query },
-  optionB: { text: row.option_b_text, searchQuery: row.option_b_search_query },
+  optionA: { text: row.option_a_text, searchQuery: row.option_a_search_query, visualSubject: row.option_a_visual_subject || row.option_a_search_query },
+  optionB: { text: row.option_b_text, searchQuery: row.option_b_search_query, visualSubject: row.option_b_visual_subject || row.option_b_search_query },
   poolId: row.id,
 });
 

@@ -1,7 +1,7 @@
 import { withClient, withTransaction } from './db.js';
 import { computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
-import { isNonPhotographableAbstractOption } from './content-engine.js';
+import { isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { log } from './utils.js';
 
 export class ContentPoolExhaustedError extends Error {
@@ -47,13 +47,15 @@ export const insertQuestions = async (rawQuestions, { sourceProvider = 'groq' } 
       const { rows } = await client.query(
         `INSERT INTO wyr_questions
            (category, content_family, motif_key, motif_key_a, motif_key_b,
-            option_a_text, option_a_search_query, option_b_text, option_b_search_query,
+            option_a_text, option_a_search_query, option_a_visual_subject,
+            option_b_text, option_b_search_query, option_b_visual_subject,
             dedupe_key, is_fantasy, hook_score, quality_score, visual_score, source_provider)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          ON CONFLICT (dedupe_key) DO NOTHING
          RETURNING id`,
         [fields.category, fields.contentFamily, fields.motifKey, fields.motifKeyA, fields.motifKeyB,
-          fields.optionAText, fields.optionASearchQuery, fields.optionBText, fields.optionBSearchQuery,
+          fields.optionAText, fields.optionASearchQuery, fields.optionAVisualSubject,
+          fields.optionBText, fields.optionBSearchQuery, fields.optionBVisualSubject,
           fields.dedupeKey, fields.isFantasy, fields.hookScore, fields.qualityScore, fields.visualScore, sourceProvider],
       );
       if (rows.length) inserted.push(rows[0].id);
@@ -101,12 +103,17 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   );
   // Runtime defense-in-depth: assessQuestionQuality/computeInsertionFields already reject this
   // content at insertion time for anything inserted from now on (see content-engine.js's
-  // isNonPhotographableAbstractOption), but a row inserted before that check existed could still be
-  // sitting in the pool with status='ready'. Excluding it from the candidate window here means
-  // selectDiversePlan/repairPlanForDuration below simply never see it -- the existing "choose
-  // another ready question from this window" machinery does the rest, with zero new reservation
-  // state and zero new DB round-trip.
-  const candidates = rawCandidates.filter(row => !isNonPhotographableAbstractOption(row.option_a_text) && !isNonPhotographableAbstractOption(row.option_b_text));
+  // isNonPhotographableAbstractOption and isVisualSubjectFeasible), but a row inserted before
+  // those checks existed could still be sitting in the pool with status='ready'. A legacy row with
+  // no option_a_visual_subject/option_b_visual_subject falls back to its own search query (same
+  // rule as rowToQuestion below) and is validated the same way a fresh visualSubject would be --
+  // if that still isn't feasible, the row is excluded here so selectDiversePlan/repairPlanForDuration
+  // below simply never see it, and the existing "choose another ready question from this window"
+  // machinery does the rest, with zero new reservation state and zero new DB round-trip.
+  const candidates = rawCandidates.filter(row =>
+    !isNonPhotographableAbstractOption(row.option_a_text) && !isNonPhotographableAbstractOption(row.option_b_text)
+    && isVisualSubjectFeasible(row.option_a_visual_subject || row.option_a_search_query)
+    && isVisualSubjectFeasible(row.option_b_visual_subject || row.option_b_search_query));
   const blockedMotifs = await recentMotifsFromDb(client);
   const result = selectDiversePlan(candidates, { count, blockedMotifs });
   if (!result) return null;
@@ -180,6 +187,11 @@ export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPla
     if (row.motif_key_a && inPlanMotifs.has(row.motif_key_a)) return false;
     if (row.motif_key_b && inPlanMotifs.has(row.motif_key_b)) return false;
     if (row.is_fantasy && fantasyCapReached) return false;
+    // Same visual-feasibility check as selectAndReservePlan's candidate window above -- a
+    // replacement must not itself be a legacy row with no reliable visual metadata.
+    if (isNonPhotographableAbstractOption(row.option_a_text) || isNonPhotographableAbstractOption(row.option_b_text)) return false;
+    if (!isVisualSubjectFeasible(row.option_a_visual_subject || row.option_a_search_query)) return false;
+    if (!isVisualSubjectFeasible(row.option_b_visual_subject || row.option_b_search_query)) return false;
     return true;
   });
   if (!candidate) return null;

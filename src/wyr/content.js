@@ -20,7 +20,16 @@ const normalizeOption = (option, index, label) => {
   const text = normalize(option?.text); const searchQuery = normalize(option?.searchQuery);
   if (text.length < 3 || text.length > 500) throw new Error(`Question ${index + 1} option ${label} text must contain 3–500 characters before visual fitting.`);
   if (searchQuery.length < 3 || searchQuery.length > 100) throw new Error(`Question ${index + 1} option ${label} search query must contain 3–100 characters.`);
-  return { text, searchQuery };
+  // visualSubject is the concrete, photographable description of what the image should show --
+  // separate from `text` (short punchy display wording, e.g. "Trek a jungle with guides") and
+  // `searchQuery` (the compressed provider search phrase derived from it, e.g. "people hiking
+  // tropical rainforest trail"). Falls back to searchQuery (already required to be "a real,
+  // literal, photographable scene or object", see CORE_INSTRUCTIONS) when the model omits it or
+  // returns something too short to be meaningful, rather than rejecting the whole plan -- image
+  // selection always has a usable visual target either way.
+  const rawVisualSubject = normalize(option?.visualSubject);
+  const visualSubject = rawVisualSubject.length >= 3 ? rawVisualSubject : searchQuery;
+  return { text, searchQuery, visualSubject };
 };
 
 const significantWords = text => new Set(text.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 2 && !['the', 'and', 'for', 'you', 'your', 'with', 'every'].includes(word)));
@@ -119,7 +128,7 @@ const MAX_PROACTIVE_WAIT_MS = 20_000;
 const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const planSchema = () => {
-  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' } }, required: ['text', 'searchQuery'], additionalProperties: false };
+  const option = { type: 'object', properties: { text: { type: 'string' }, searchQuery: { type: 'string' }, visualSubject: { type: 'string' } }, required: ['text', 'searchQuery', 'visualSubject'], additionalProperties: false };
   const question = { type: 'object', properties: { category: { type: 'string', enum: CONTENT_CATEGORIES }, optionA: option, optionB: option }, required: ['category', 'optionA', 'optionB'], additionalProperties: false };
   return { type: 'object', properties: { questions: { type: 'array', items: question } }, required: ['questions'], additionalProperties: false };
 };
@@ -131,10 +140,10 @@ const contextText = context => {
   const categories = Array.isArray(context?.categories) ? context.categories.filter(category => CONTENT_CATEGORIES.includes(category)) : [];
   return categories.length ? ` Use these categories once each, in order: ${categories.join(', ')}.` : '';
 };
-const CORE_INSTRUCTIONS = 'Each option: 2-8 words, under 55 characters, visually concrete, instantly readable. Both options tempting and roughly balanced — no obviously better choice. No politics, violence, sexual content, or hate speech. At most ONE question may involve a fantasy, superpower, or otherwise impossible ability; make the rest realistic, everyday choices. Avoid overused pairs like coffee/tea or cats/dogs. Give each option a short searchQuery: 2-5 concrete words naming a real, literal, photographable scene or object.';
+const CORE_INSTRUCTIONS = 'Each option: 2-8 words, under 55 characters, visually concrete, instantly readable. Both options tempting and roughly balanced — no obviously better choice. No politics, violence, sexual content, or hate speech. At most ONE question may involve a fantasy, superpower, or otherwise impossible ability; make the rest realistic, everyday choices. Avoid overused pairs like coffee/tea or cats/dogs. Every option must have an obvious real-world visual subject a camera could photograph — never an abstract mental state, an invisible change, a vague financial outcome, an arbitrary count or frequency, a time-only concept, or a generic word like nothing/everything/times/seconds/today/forever. For each option give: a short searchQuery (2-5 concrete words naming a real, literal, photographable scene or object) and a visualSubject (one concrete sentence describing exactly what the photo should visibly show, e.g. "person hiking through a tropical jungle").';
 const initialPrompt = (questionCount, context) => `Create exactly ${questionCount} short, punchy Would You Rather dilemmas for a vertical short-form video.${contextText(context)} ${CORE_INSTRUCTIONS} Return JSON only.`;
 const repairPrompt = (questionCount, context) => `Create exactly ${questionCount} more distinct Would You Rather dilemmas, different from anything already used.${contextText(context)} ${CORE_INSTRUCTIONS} Return JSON only.`;
-const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, context)} Shape: {"questions":[{"category":"food","optionA":{"text":"...","searchQuery":"..."},"optionB":{"text":"...","searchQuery":"..."}}]}`;
+const objectPrompt = (questionCount, context) => `${repairPrompt(questionCount, context)} Shape: {"questions":[{"category":"food","optionA":{"text":"...","searchQuery":"...","visualSubject":"..."},"optionB":{"text":"...","searchQuery":"...","visualSubject":"..."}}]}`;
 
 const groqErrorFromResponse = async response => {
   const raw = await response.text(); let payload;

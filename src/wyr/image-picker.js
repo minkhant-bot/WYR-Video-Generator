@@ -514,7 +514,13 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         key,
         questionIndex: question.index,
         slot,
-        optionText: option.text,
+        // The semantic-relevance target for image matching/query-broadening/diagnostics is the
+        // option's explicit visualSubject (a concrete, photographable description -- see
+        // content-engine.js's deriveVisualSubject) when one is available, NOT the short punchy
+        // display text (option.text) that assessImageCandidate/dominantSubjectWordsFor used to be
+        // pointed at. displayText itself is never touched -- it still flows separately, unchanged,
+        // into the actual rendered video via plan.questions[i].optionA/B.text (see media.js).
+        optionText: option.visualSubject || option.text,
         queries: selectionQueries(option, { category: question.category, fantasy }),
         queryIndex: 0,
         providerIndex: 0,
