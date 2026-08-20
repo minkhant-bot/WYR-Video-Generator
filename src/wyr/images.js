@@ -62,6 +62,17 @@ const VISUAL_EXPANSIONS = Object.freeze({
   spend: ['shopping', 'spending', 'cash'], spends: ['shopping', 'spending', 'cash'], spending: ['shopping', 'cash', 'purchase'], spent: ['shopping', 'spending', 'cash'],
   save: ['savings', 'bank', 'piggybank'], saves: ['savings', 'bank', 'piggybank'], saving: ['savings', 'bank', 'piggybank'], saved: ['savings', 'bank', 'piggybank'],
   earn: ['income', 'salary', 'money'], earns: ['income', 'salary', 'money'], earning: ['income', 'salary', 'money'], earned: ['income', 'salary', 'money'],
+  // "paid" alone (e.g. "Get paid daily, small amounts" / "Get paid yearly, one lump") never
+  // literally appears in a stock photo's tags -- the genuine visual concept is money/cash/a
+  // paycheck, exactly like "earn"/"save"/"spend" above. Without this alias, PURE_FILLER_WORDS
+  // removing "daily"/"small"/"amounts"/"yearly"/"one"/"lump" from the dominant-subject list left
+  // "paid" as the sole literal requirement, which no real payment photo is ever tagged with.
+  paid: ['money', 'cash', 'paycheck'], pay: ['money', 'cash', 'paycheck'], pays: ['money', 'cash', 'paycheck'], paying: ['money', 'cash', 'paycheck'],
+  // "city" is a real, literal word real stock photos ARE tagged with, but provider alt text just as
+  // often says "urban" or names a "street"/"downtown" scene instead -- this only matters once city
+  // is the option's ONLY meaningful subject (e.g. "Get lost in a new city", after PURE_FILLER_WORDS
+  // removes "lost"/"new"), where the literal word alone was too narrow a requirement.
+  city: ['urban', 'street', 'downtown'],
 });
 // The single most literal, search-friendly synonym for a word (falls back to the word itself when
 // there's no mapping, so a concrete noun like "savings" or "treehouse" passes through unchanged).
@@ -186,16 +197,31 @@ const visualIntentGroups = option => {
 // depicting "a city" or "a day," so letting one satisfy 50% coverage on a 2-word subject (e.g.
 // "motorbike city") let a parked-car photo with no motorbike in it pass on "city" alone.
 const WEAK_SUBJECT_WORDS = new Set(['city', 'town', 'place', 'area', 'day', 'time', 'world', 'life', 'way', 'thing', 'things']);
+// Pure filler words: size/intensity adjectives, frequency/period words, and vague quantity/state
+// words that carry NO visual meaning of their own -- unlike WEAK_SUBJECT_WORDS above (a "city" or
+// "day" is at least a minimally depictable setting, so it's kept as a last-resort anchor below),
+// these can NEVER anchor the dominant-subject requirement, not even when nothing else is left. This
+// is the demonstrated root cause behind real production images that matched the wrong subject: "Get
+// lost in a new city" reduced to requiring only "lost"/"new" (an animal photo passed by coincidence);
+// "Get paid daily, small amounts" / "Get paid yearly, one lump" reduced to "daily"/"small"/"amounts"
+// or "yearly"/"one"/"lump" (a generic street/landscape photo passed with zero money imagery); "Big
+// house, huge mortgage" let "big"/"huge" alone satisfy 50% coverage with no house ever required.
+const PURE_FILLER_WORDS = new Set(['big', 'huge', 'large', 'giant', 'massive', 'small', 'tiny', 'little', 'daily', 'weekly', 'monthly', 'yearly', 'annual', 'annually', 'new', 'old', 'lost', 'one', 'single', 'extra', 'amounts', 'amount', 'lump']);
 // The option's DOMINANT, mandatory-to-depict subject noun(s) -- image-query.js's connector-stripped
-// literal subject with weak/generic container nouns removed (falling back to the full list if that
-// would empty it, so the requirement stays anchored to whatever's left). Exported so the image
-// search query builder (image-picker.js's Tier-3 broadening) can generate broader queries that are
-// GUARANTEED to still satisfy the exact same dominant-subject gate enforced below, instead of
-// drifting onto a different, unverified notion of "the subject".
+// literal subject with pure filler words removed first (never usable as the sole requirement, see
+// PURE_FILLER_WORDS above), then weak/generic container nouns removed IF a stronger word survives
+// (falling back to the container noun, then finally to the unfiltered list, so the requirement stays
+// anchored to the most meaningful words actually available). Exported so the image search query
+// builder (image-picker.js's Tier-3 broadening) can generate broader queries that are GUARANTEED to
+// still satisfy the exact same dominant-subject gate enforced below, instead of drifting onto a
+// different, unverified notion of "the subject".
 export const dominantSubjectWordsFor = optionText => {
   const rawDominantSubjectWords = coreSubjectWords(optionText);
-  const strongSubjectWords = rawDominantSubjectWords.filter(word => !WEAK_SUBJECT_WORDS.has(word));
-  return strongSubjectWords.length ? strongSubjectWords : rawDominantSubjectWords;
+  const meaningfulWords = rawDominantSubjectWords.filter(word => !PURE_FILLER_WORDS.has(word));
+  const strongSubjectWords = meaningfulWords.filter(word => !WEAK_SUBJECT_WORDS.has(word));
+  if (strongSubjectWords.length) return strongSubjectWords;
+  if (meaningfulWords.length) return meaningfulWords;
+  return rawDominantSubjectWords;
 };
 const explicitVisualIntent = (option, tokens) => visualIntentGroups(option).every(group => containsAny(tokens, group));
 const visualIntentCoverage = (option, tokens) => { const groups = visualIntentGroups(option); return groups.length ? groups.filter(group => containsAny(tokens, group)).length / groups.length : 1; };
@@ -228,14 +254,18 @@ export const assessImageCandidate = (candidate, option) => {
   // still counts as matching the option text's own form ("ride"/"fly"/"train") instead of forcing
   // an exact string match that real provider alt text/tags routinely miss.
   const matched = concepts.filter(concept => allTokens.has(concept) || allStems.has(stem(concept)));
-  // NON_VISUAL_MODIFIER_WORDS excluded here too (not just from the dominant-subject list below):
-  // these are pure manner/time adverbs ("today", "freely") that no real photo is ever tagged
-  // with, so leaving them in `core` only shrinks coreCoverage for every candidate regardless of
-  // how on-subject it is -- e.g. "savings doubled today" previously required matching "today" (an
-  // impossible word for coreCoverage) alongside "savings", capping a perfect savings photo's
-  // coreCoverage at 2/3 instead of a genuinely achievable 1/1. Concrete nouns are NEVER removed
-  // here -- only words with zero possible visual representation.
-  const core = normalizeWords(option.text).filter(word => !NON_VISUAL_MODIFIER_WORDS.has(word));
+  // NON_VISUAL_MODIFIER_WORDS and PURE_FILLER_WORDS excluded here too (not just from the
+  // dominant-subject list below): these are pure manner/time adverbs ("today", "freely") or pure
+  // filler adjectives/quantity words ("daily", "small", "amounts" -- see PURE_FILLER_WORDS above)
+  // that no real photo is ever tagged with, so leaving them in `core` only shrinks coreCoverage for
+  // every candidate regardless of how on-subject it is -- e.g. "savings doubled today" previously
+  // required matching "today" (an impossible word for coreCoverage) alongside "savings", capping a
+  // perfect savings photo's coreCoverage at 2/3 instead of a genuinely achievable 1/1; the same gap
+  // left a genuinely on-subject cash/payment photo for "Get paid daily, small amounts" unable to
+  // ever clear the relevance-score gate, since "daily"/"small"/"amounts" can never be matched by
+  // any real candidate. Concrete nouns are NEVER removed here -- only words with zero possible
+  // visual representation.
+  const core = normalizeWords(option.text).filter(word => !NON_VISUAL_MODIFIER_WORDS.has(word) && !PURE_FILLER_WORDS.has(word));
   const coreMatched = core.filter(concept => textTokens.has(concept) || textStems.has(stem(concept)) || (VISUAL_EXPANSIONS[concept] || []).some(alias => textTokens.has(alias)));
   const relevance = concepts.length ? matched.length / concepts.length : 0;
   const coreCoverage = core.length ? coreMatched.length / core.length : 0;
