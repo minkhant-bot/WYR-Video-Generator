@@ -9,7 +9,7 @@ import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, DurationVerificationError, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
-import { createImageSelection, downloadSelectedCandidates, ImageSelectionExhaustedError } from './image-picker.js';
+import { createImageSelection, downloadSelectedCandidates, formatUnfilledSlotDiagnostics, ImageSelectionExhaustedError } from './image-picker.js';
 import { selectContentPlan } from './content-source.js';
 import { commitPlanUsage, releaseReservation } from './question-pool.js';
 
@@ -51,6 +51,18 @@ const sanitizeErrorForClient = message => {
   if (!flattened) return 'The job failed unexpectedly.';
   return flattened.length > MAX_CLIENT_ERROR_MESSAGE_LENGTH ? `${flattened.slice(0, MAX_CLIENT_ERROR_MESSAGE_LENGTH)}…` : flattened;
 };
+// IMAGE_SELECTION_EXHAUSTED's message carries its own bounded per-slot diagnostics report (see
+// image-picker.js's formatUnfilledSlotDiagnostics) -- deliberately multi-line and longer than the
+// generic single-line cap above, so a Railway-log reader can actually see which slots failed and
+// why instead of just a one-line summary. Still bounded (formatUnfilledSlotDiagnostics caps itself
+// at 6000 chars), and only line breaks/repeated blank lines are normalized here -- no content is
+// dropped that formatUnfilledSlotDiagnostics didn't already truncate.
+const MAX_DIAGNOSTIC_ERROR_MESSAGE_LENGTH = 6500;
+const sanitizeDiagnosticErrorForClient = message => {
+  const normalized = String(message ?? '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (!normalized) return 'The job failed unexpectedly.';
+  return normalized.length > MAX_DIAGNOSTIC_ERROR_MESSAGE_LENGTH ? `${normalized.slice(0, MAX_DIAGNOSTIC_ERROR_MESSAGE_LENGTH)}…` : normalized;
+};
 
 // Shared by every production job-runner catch block below: releases any DB reservation, cleans up
 // disposable temp artifacts, classifies the failure into a high-level UI error code, logs full
@@ -68,7 +80,8 @@ const handleJobFailure = async ({ job, store, error, poolReserved = false }) => 
   // here too, not just at startup.
   const safeMessage = redactConnectionSecrets(error.message); const safeStack = redactConnectionSecrets(error.stack);
   log('job.failed', { jobId: job.id, stage, errorCode, message: safeMessage, stack: safeStack });
-  store.update(job.id, { status: 'failed', stage: 'failed', error: sanitizeErrorForClient(safeMessage), errorCode });
+  const clientMessage = errorCode === 'IMAGE_SELECTION_EXHAUSTED' ? sanitizeDiagnosticErrorForClient(safeMessage) : sanitizeErrorForClient(safeMessage);
+  store.update(job.id, { status: 'failed', stage: 'failed', error: clientMessage, errorCode });
 };
 
 const relativeMetadata = (items, workspace) => items.map(item => ({ ...item, localPath: path.relative(workspace, item.localPath) }));
@@ -228,7 +241,10 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         // reproducing it.
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
         log('image.selection_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics });
-        throw new ImageSelectionExhaustedError(`Automatic image selection could not fill all ${selection.total} image slots after bounded subject-preserving fallback search; selected ${selection.selectedCount}/${selection.total}.`, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });
+        const summary = `Automatic image selection could not fill all ${selection.total} image slots after bounded subject-preserving fallback search; selected ${selection.selectedCount}/${selection.total}.`;
+        const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
+        const message = diagnosticsReport ? `${summary}\n\n${diagnosticsReport}` : summary;
+        throw new ImageSelectionExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });
       }
       await runJobPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
       const result = store.get(job.id);

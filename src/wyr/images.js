@@ -37,6 +37,14 @@ const VISUAL_EXPANSIONS = Object.freeze({
   teleport: ['teleportation', 'portal', 'gateway'], invisible: ['invisibility', 'transparent', 'disappearing'], invisibility: ['invisible', 'transparent', 'disappearing'],
   time: ['clock', 'temporal', 'vortex'], stop: ['stopped', 'frozen', 'freeze'], travel: ['traveler', 'journey'], dragon: ['fantasy', 'creature'], befriend: ['friendly', 'interacting'], portal: ['fantasy', 'doorway', 'gateway'], door: ['doorway', 'portal'],
   strangers: ['people', 'person', 'human'], bank: ['money', 'financial', 'wealth'], balance: ['account', 'money', 'wealth'],
+  // "rainforest" is an unambiguous biome noun (unlike a proper-noun geographic qualifier such as
+  // "Amazon", which is left untouched here since it also names an unrelated company and is rarely
+  // used as an image-provider tag even for genuine Amazon-rainforest photos) -- real stock-photo alt
+  // text/tags for a rainforest scene routinely say "jungle" or "tropical" instead of the literal
+  // word "rainforest" itself. This is what let a real treehouse-in-jungle/tropical-forest photo
+  // clear the dominant-subject gate for "Live in a treehouse in the Amazon rainforest forever"
+  // (reproduced from the live Railway IMAGE_SELECTION_EXHAUSTED diagnostics -- see images.test.js).
+  rainforest: ['jungle', 'tropical'],
   // Abstract financial/change verbs -- a real photo can never literally BE "doubled" or "grows",
   // but it can genuinely show growth/savings/shopping imagery, so these are matchable via a
   // concrete synonym (exactly like "double"/"bank"/"balance" above) instead of ever being counted
@@ -162,7 +170,12 @@ const visualIntentGroups = option => {
   else if (has('portal') && has('door')) groups.push(['door', 'doorway', 'gate', 'entrance'], ['world', 'portal', 'dimension', 'realm', 'landscape']);
   else if (has('jet')) groups.push(['jet', 'airplane', 'aircraft', 'plane'], ['sky', 'clouds', 'flight', 'flying']);
   else if (has('yacht')) groups.push(['yacht', 'boat', 'ship', 'vessel'], ['ocean', 'sea', 'water', 'sailing']);
-  else if (has('treehouse')) groups.push(['treehouse', 'treehouse', 'house'], ['forest', 'trees', 'canopy', 'village']);
+  // 'tree' (singular) and 'jungle'/'rainforest'/'tropical' added to the forest-setting bucket: real
+  // provider alt text for a genuine treehouse photo routinely says "built in a large tree" (singular,
+  // no stem-matching applied in this gate) or names the specific forest type ("rainforest", "jungle",
+  // "tropical") instead of the bare word "forest" -- see images.test.js's treehouse false-rejection
+  // case, reproduced from the live Railway IMAGE_SELECTION_EXHAUSTED diagnostics.
+  else if (has('treehouse')) groups.push(['treehouse', 'treehouse', 'house'], ['forest', 'trees', 'tree', 'canopy', 'village', 'jungle', 'rainforest', 'tropical']);
   else if (has('mars')) groups.push(['mars', 'planet', 'space', 'astronaut'], ['red', 'landscape', 'surface', 'planet']);
   else if (has('ocean') || has('whale') || has('trench')) groups.push(['ocean', 'sea', 'underwater', 'whale', 'submarine'], ['deep', 'trench', 'marine', 'water', 'dive']);
   else if (has('unicorn')) groups.push(['unicorn', 'horse', 'creature'], ['wish', 'magic', 'fantasy', 'person', 'people']);

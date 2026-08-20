@@ -443,6 +443,7 @@ export const buildSlotDiagnostics = (state, reasonOverride = null) => {
     option: state.slot,
     optionText: state.optionText,
     dominantSubject: dominantSubjectWordsFor(state.optionText).join(' '),
+    providersAttempted: [...(state.providersAttempted || [])],
     queriesAttempted: [...(state.queries || [])],
     gapFillTiers: state.gapFillTiers || [],
     candidatesInspected: diagnostics.candidatesInspected,
@@ -457,6 +458,40 @@ export const buildSlotDiagnostics = (state, reasonOverride = null) => {
       ? null
       : (state.error || 'No candidate cleared the relevance/quality gates within the bounded search budget.')),
   };
+};
+
+// Renders buildSlotDiagnostics' per-slot report into the concise, human-readable block that
+// pipeline.js attaches to a failed job's error/log output -- everything a Railway-log triage needs
+// (scene/option/subject/queries/provider+rejection counts/final reason) with nothing secret in it:
+// every field here originates from option text, search queries, or plain counters, never a URL,
+// key, or connection string. Bounded so a pathological number of unfilled slots (or a runaway query
+// list) can never blow up the job's stored error message.
+const MAX_DIAGNOSTICS_REPORT_LENGTH = 6000;
+const MAX_QUERIES_LISTED = 20;
+export const formatUnfilledSlotDiagnostics = unfilledDiagnostics => {
+  if (!Array.isArray(unfilledDiagnostics) || !unfilledDiagnostics.length) return '';
+  const blocks = unfilledDiagnostics.map((diag, index) => {
+    const queries = diag.queriesAttempted || [];
+    const queriesShown = queries.slice(0, MAX_QUERIES_LISTED).map(logSafe).join(', ');
+    const queriesSuffix = queries.length > MAX_QUERIES_LISTED ? `, … (+${queries.length - MAX_QUERIES_LISTED} more)` : '';
+    return [
+      `[${index + 1}] Scene ${diag.scene}, Option ${diag.option} -- "${logSafe(diag.optionText)}"`,
+      `    Dominant subject: ${logSafe(diag.dominantSubject) || '(none)'}`,
+      `    Providers attempted: ${(diag.providersAttempted || []).join(', ') || '(none configured)'}`,
+      `    Queries attempted (${queries.length}): ${queriesShown}${queriesSuffix}`,
+      `    Candidates inspected: ${diag.candidatesInspected}`,
+      `    Semantic/relevance rejects: ${diag.semanticRelevanceRejected}`,
+      `    Hard rejects: ${diag.hardRejected}`,
+      `    Duplicates: ${diag.duplicatesRejected}`,
+      `    Download failures: ${diag.downloadsFailed}`,
+      `    Framing rejects: ${diag.framingRejected}`,
+      `    Final reason: ${logSafe(diag.finalReason) || '(unknown)'}`,
+    ].join('\n');
+  });
+  const report = `Missing slots (${unfilledDiagnostics.length}):\n\n${blocks.join('\n\n')}`;
+  return report.length > MAX_DIAGNOSTICS_REPORT_LENGTH
+    ? `${report.slice(0, MAX_DIAGNOSTICS_REPORT_LENGTH)}\n… (truncated)`
+    : report;
 };
 
 // Tier 5's Groq client (see fillUnfilledSlot) -- built once from config, exactly like
@@ -492,6 +527,7 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         error: null,
         providerRequestCount: 0,
         diagnostics: emptyDiagnostics(),
+        providersAttempted: providers.map(provider => provider.name),
       };
 
       // Tier 1: strict, fixed query list -- unchanged behavior/gates from before this fix.
@@ -705,7 +741,9 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
     }
     if (!result) {
       const reason = `${item.key}: every image candidate (${rank} tried) failed download or validation. Last error: ${lastError?.message || 'no candidates were available'}`;
-      throw new ImageSelectionExhaustedError(reason, { ...buildSlotDiagnostics(state, reason), candidatesTried: rank });
+      const diagnostics = buildSlotDiagnostics(state, reason);
+      const message = `${reason}\n\n${formatUnfilledSlotDiagnostics([diagnostics])}`;
+      throw new ImageSelectionExhaustedError(message, { ...diagnostics, candidatesTried: rank });
     }
     return result;
   });

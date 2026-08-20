@@ -9,6 +9,23 @@ const CONCEPT_FILLER = new Set([...GENERIC_WORDS, 'always', 'never', 'every', 'f
 const TOKEN_ALIASES = Object.freeze({ automobiles: 'car', automobile: 'car', cars: 'car', vehicle: 'car', vehicles: 'car', cash: 'money', dollars: 'money', dollar: 'money', riches: 'money', wealthy: 'wealth', aeroplane: 'plane', airplane: 'plane', aircraft: 'plane', jets: 'jet', islands: 'island', homes: 'home', houses: 'home', mansion: 'home', mansions: 'home', invisible: 'invisibility', strength: 'strength', strong: 'strength', flying: 'fly', flies: 'fly', teleports: 'teleport', teleporting: 'teleport', lightning: 'lightning', oceans: 'ocean', seas: 'ocean', sea: 'ocean', underwater: 'underwater', languages: 'language', years: 'year', months: 'month', travelling: 'travel', traveling: 'travel', travelled: 'travel', traveled: 'travel' });
 const BORING_PAIRS = new Set(['cats|dogs', 'city|countryside', 'coffee|tea', 'summer|winter']);
 const BLOCKED_CONTENT = /\b(politic(?:s|al)?|election|president|partisan|sexual|nude|porn|hate(?:ful)?|slur|murder|suicide|weapon|gun|knife|overdose|choking challenge)\b/i;
+// Options describing an invisible ABSTRACT STATE CHANGE to a non-physical financial obligation (a
+// debt/loan/balance/fee being erased, forgiven, cancelled, or wiped away) have no reliable
+// stock-photo stand-in: a camera can show money, bills, or a bank vault, but never the erasure ACT
+// itself, and the best an image search can return is generic, ambiguous "relief"/"paperwork"
+// imagery that isn't specific to the concept. This is the demonstrated root cause behind a real
+// production IMAGE_SELECTION_EXHAUSTED failure ("Have all your debt erased today"). Deliberately
+// narrow: does NOT cover the growth/spend/save/earn family (double/grow/spend/save/earn all DO have
+// a genuine, commonly-tagged literal photo -- a growth chart, a piggy bank, a shopping bag -- and
+// already clear image selection via images.js's VISUAL_EXPANSIONS aliases; that is proven working
+// behavior and must not be touched). Only the removal/erasure family, which has no equivalent
+// literal photographic stand-in, is blocked here.
+const ABSTRACT_FINANCIAL_OBLIGATION_PATTERN = /\b(debts?|balances?|loans?|interest|fees?|fines?|mortgages?|bills?)\b/i;
+const ABSTRACT_ERASURE_VERB_PATTERN = /\b(erased|erase|erases|forgiven|forgive|forgives|forgave|cancell?ed|cancels?|wiped|wipes?|vanish(?:ed|es)?|disappear(?:ed|s)?)\b/i;
+export const isNonPhotographableAbstractOption = text => {
+  const value = String(text ?? '');
+  return ABSTRACT_FINANCIAL_OBLIGATION_PATTERN.test(value) && ABSTRACT_ERASURE_VERB_PATTERN.test(value);
+};
 
 const cleanText = value => String(value ?? '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9$ ]/g, ' ').replace(/\s+/g, ' ').trim();
 const stem = token => {
@@ -99,6 +116,7 @@ export const assessQuestionQuality = question => {
     if (String(option?.text || '').length > 55) reasons.push(`option ${label} exceeds 55 characters`);
     const queryWords = queryWordCount(option?.searchQuery);
     if (queryWords < 2 || queryWords > 6) reasons.push(`option ${label} searchQuery must contain 2–6 concrete words`);
+    if (isNonPhotographableAbstractOption(option?.text)) reasons.push(`option ${label} describes an abstract, non-photographable state change (e.g. a debt/balance/loan erased or forgiven) with no concrete visual subject`);
   }
   const boring = [compactOption(question.optionA.text), compactOption(question.optionB.text)].sort().join('|');
   if (BORING_PAIRS.has(boring)) reasons.push('generic low-stakes dilemma is blocked');

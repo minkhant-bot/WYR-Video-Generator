@@ -116,10 +116,24 @@ export const computeSubjectAwareCrop = async ({ localPath, sourceWidth, sourceHe
   const targetLength = axis === 'vertical' ? targetHeight : targetWidth;
   const windowLength = Math.max(1, Math.round(analysisLength * (targetLength / coverLength)));
   const chosen = chooseCropOffset({ profile, axis, windowLength });
-  const safety = assessCropSafety({ excessFraction, retainedFraction: chosen.retainedFraction });
+  let winner = chosen;
+  let safety = assessCropSafety({ excessFraction, retainedFraction: chosen.retainedFraction });
+  // Safe-alternative-crop recovery: the top bias (vertical axis only) trades some raw retained
+  // energy for a better chance of keeping a head/face in frame, so it's possible for the SAME
+  // image's plain maximum-energy window (topBiasStrength=0 -- mathematically >= the biased choice's
+  // retainedFraction, since the biased search is strictly more constrained) to clear the retained-
+  // energy safety floor when the top-biased choice doesn't. Tried only when the biased choice fails,
+  // reuses the exact same edge-energy profile and the exact same safety gate (never a blind center
+  // guess, never a weakened floor) -- if even the unbiased maximum still fails, no crop position
+  // could ever satisfy the floor for this image, and the candidate is correctly rejected below.
+  if (!safety.safe && axis === 'vertical') {
+    const unbiased = chooseCropOffset({ profile, axis, windowLength, topBiasStrength: 0 });
+    const unbiasedSafety = assessCropSafety({ excessFraction, retainedFraction: unbiased.retainedFraction });
+    if (unbiasedSafety.safe) { winner = unbiased; safety = unbiasedSafety; }
+  }
   const maxOffsetPixels = coverLength - targetLength;
-  const offsetPixels = Math.round(chosen.offsetFraction * maxOffsetPixels);
+  const offsetPixels = Math.round(winner.offsetFraction * maxOffsetPixels);
   const x = axis === 'horizontal' ? offsetPixels : centeredX;
   const y = axis === 'vertical' ? offsetPixels : centeredY;
-  return { x, y, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: safety.safe, reason: safety.reason, retainedFraction: chosen.retainedFraction, excessFraction };
+  return { x, y, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: safety.safe, reason: safety.reason, retainedFraction: winner.retainedFraction, excessFraction };
 };

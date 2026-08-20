@@ -1,6 +1,7 @@
 import { withClient, withTransaction } from './db.js';
 import { computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
+import { isNonPhotographableAbstractOption } from './content-engine.js';
 import { log } from './utils.js';
 
 export class ContentPoolExhaustedError extends Error {
@@ -92,12 +93,20 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
 // returns null for this case) when a diverse set WAS found but couldn't be brought under the
 // duration budget using only this candidate window -- that failure must never trigger a Groq call.
 export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
-  const { rows: candidates } = await client.query(
+  const { rows: rawCandidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready'
      ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
      LIMIT $1 FOR UPDATE SKIP LOCKED`,
     [candidateWindowSize],
   );
+  // Runtime defense-in-depth: assessQuestionQuality/computeInsertionFields already reject this
+  // content at insertion time for anything inserted from now on (see content-engine.js's
+  // isNonPhotographableAbstractOption), but a row inserted before that check existed could still be
+  // sitting in the pool with status='ready'. Excluding it from the candidate window here means
+  // selectDiversePlan/repairPlanForDuration below simply never see it -- the existing "choose
+  // another ready question from this window" machinery does the rest, with zero new reservation
+  // state and zero new DB round-trip.
+  const candidates = rawCandidates.filter(row => !isNonPhotographableAbstractOption(row.option_a_text) && !isNonPhotographableAbstractOption(row.option_b_text));
   const blockedMotifs = await recentMotifsFromDb(client);
   const result = selectDiversePlan(candidates, { count, blockedMotifs });
   if (!result) return null;
