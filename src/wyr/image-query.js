@@ -18,6 +18,12 @@ const CORE_SUBJECT_STRIP_WORDS = new Set([
   'take', 'takes', 'taking', 'win', 'wins', 'winning', 'through', 'without', 'into', 'onto', 'about',
   'around', 'across', 'over', 'under', 'out', 'off', 'up', 'down', 'near', 'someday', 'somewhere',
   'everywhere', 'anyway', 'price', 'prices', 'priced', 'limit', 'limits', 'limited', 'unlimited', 'cost', 'costs',
+  // "free" (as in "at no cost" -- "free fuel", "free flights") is the same pricing-modifier class as
+  // price/cost/limit above: it describes an economic condition, not anything a photo could show, and
+  // is an extremely common incidental word in provider tags/titles ("free stock photo") that let a
+  // completely unrelated candidate (e.g. a laptop/desk image for "Free fuel for life") satisfy 50%
+  // dominant-subject coverage without ever matching the real subject.
+  'free',
   // English determiners/quantifiers ("all your debt", "any amount", "some money") are a small,
   // CLOSED grammatical class -- unlike abstract verbs (see NON_VISUAL_MODIFIER_WORDS and Tier 5's
   // Groq-based semantic fallback in image-picker.js, which handle the genuinely open-ended,

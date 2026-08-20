@@ -34,7 +34,14 @@ export class PexelsImageProvider extends ImageProvider {
 const STOP_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'in', 'on', 'at', 'with', 'for', 'your', 'you', 'become', 'be', 'own', 'have', 'anywhere', 'through', 'instantly', 'take', 'takes', 'taking', 'win', 'wins', 'winning', 'everywhere', 'every', 'price', 'prices', 'priced', 'limit', 'limits', 'limited', 'unlimited', 'cost', 'costs']);
 const VISUAL_EXPANSIONS = Object.freeze({
   minds: ['telepathy', 'brain', 'thoughts'], mind: ['telepathy', 'brain', 'thoughts'], read: ['reading'], future: ['fortune', 'crystal', 'vision'],
-  teleport: ['teleportation', 'portal', 'gateway'], invisible: ['invisibility', 'transparent', 'disappearing'], invisibility: ['invisible', 'transparent', 'disappearing'],
+  // "disappearing" removed as an invisibility alias/evidence word (below and in visualIntentGroups):
+  // it's a common, loosely-associated word in generic dramatic/fantasy "transformation" art (see the
+  // "fantasy portrait woman disappearing ghostly transformation art" candidate that wrongly passed
+  // for "Turn invisible instantly") that doesn't actually depict transparency/invisibility. "invisible"
+  // /"invisibility"/"transparent" remain -- if no candidate genuinely shows one of those, the slot
+  // correctly falls through to the existing question-replacement flow instead of accepting a vague
+  // fantasy-art match.
+  teleport: ['teleportation', 'portal', 'gateway'], invisible: ['invisibility', 'transparent'], invisibility: ['invisible', 'transparent'],
   time: ['clock', 'temporal', 'vortex'], stop: ['stopped', 'frozen', 'freeze'], travel: ['traveler', 'journey'], dragon: ['fantasy', 'creature'], befriend: ['friendly', 'interacting'], portal: ['fantasy', 'doorway', 'gateway'], door: ['doorway', 'portal'],
   strangers: ['people', 'person', 'human'], bank: ['money', 'financial', 'wealth'], balance: ['account', 'money', 'wealth'],
   // "rainforest" is an unambiguous biome noun (unlike a proper-noun geographic qualifier such as
@@ -73,6 +80,12 @@ const VISUAL_EXPANSIONS = Object.freeze({
   // is the option's ONLY meaningful subject (e.g. "Get lost in a new city", after PURE_FILLER_WORDS
   // removes "lost"/"new"), where the literal word alone was too narrow a requirement.
   city: ['urban', 'street', 'downtown'],
+  // "flight(s)" and "flying" don't share a stem ("flight" vs "fly"), so a genuine airplane photo
+  // tagged "airplane flying" or "passenger plane" would otherwise never match the literal word
+  // "flight(s)" required by the option text -- paired with the new flight/flights visualIntentGroups
+  // entry above (requiring actual airplane/aircraft/airport evidence), this lets a real airplane
+  // photo pass while a paraglider/hang-glider "flight" still fails that stricter intent check.
+  flight: ['airplane', 'plane', 'flying'], flights: ['airplane', 'plane', 'flying'],
 });
 // The single most literal, search-friendly synonym for a word (falls back to the word itself when
 // there's no mapping, so a concrete noun like "savings" or "treehouse" passes through unchanged).
@@ -135,6 +148,14 @@ const MISLEADING_CONTEXT_PATTERN = /\b(camera|lens|olympus|t-?shirt|merchandise|
 const INAPPROPRIATE_PATTERN = /\b(nude|nudity|nsfw|porn|erotic|fetish|lingerie|bikini|sexualized|sexy)\b/i;
 const SOURCE_QUALITY_PATTERN = /\b(meme(?:generator)?|quote(?:s)?|infographic|diagram|chart|screenshot|template|mockup|product(?:[ -]?listing)?|ui|user[ -]?interface|advertisement|advertising|poster|presentation|slide)\b/i;
 const HARD_FORMAT_PATTERN = /\b(article|news|blog|thumbnail|video|youtube|watch|screenshot|website|browser|app|user interface|dashboard|infographic|poster|banner|ad|advertisement|promotional?|promo|quote card|quote poster|meme|template|job listing|careers?|marketplace|auction|product listing|product page|shop|listing|play button|stream)\b/gi;
+// Flat/schematic non-photographic art -- WEAK_VISUAL_PATTERN below only ever nudges the SCORE down
+// for these, never actually blocks acceptance (reviewUsable/accepted don't consult
+// pexelsQualityPassed), which let an "illustration graphic" candidate for "Read minds instantly"
+// pass with zero rejection reasons. Deliberately narrow: catches flat/vector/hand-drawn/schematic
+// art styles only -- "digital art"/"concept art"/"3d render"/"artwork"/"fantasy art" are left alone,
+// since those remain the only kind of imagery that can ever exist for genuinely fantasy-coded
+// subjects (dragon, unicorn, teleportation portal) that this pipeline already relies on finding.
+const ILLUSTRATION_ART_PATTERN = /\b(illustration|illustrated|clip[ -]?art|cartoon|line art|line drawing|vector art|vector graphic)\b/i;
 const HARD_DOMAIN_PATTERN = /(^|\.)(etsy|scale\.jobs|jobs|careers|marketplace|auction|auctions|01net|cbs8)(\.|$)|(^|\.)(auctions\.)?yahoo\.co\.jp$/i;
 const HARD_LAYOUT_PATTERN = /\b(card layout|text graphic|text-heavy|text heavy|graphic design|social post|press release|promo image|article image)\b/i;
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|line icon|silhouette icon|button icon|symbol icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
@@ -174,12 +195,18 @@ const visualIntentGroups = option => {
   else if (has('double') && (has('bank') || has('balance'))) groups.push(['money', 'cash', 'wealth', 'bank', 'account', 'balance']);
   else if (has('future')) groups.push(['person', 'people', 'human', 'man', 'woman', 'teller', 'seer'], ['future', 'vision', 'crystal', 'scrying', 'prophecy']);
   else if (has('teleport')) groups.push(['person', 'people', 'figure', 'human', 'man', 'woman', 'silhouette'], ['portal', 'gateway', 'teleport', 'teleportation']);
-  else if (has('invisible') || has('invisibility')) groups.push(['person', 'people', 'human', 'man', 'woman', 'clothes', 'body'], ['invisible', 'invisibility', 'disappearing', 'transparent', 'empty']);
+  else if (has('invisible') || has('invisibility')) groups.push(['person', 'people', 'human', 'man', 'woman', 'clothes', 'body'], ['invisible', 'invisibility', 'transparent']);
   else if (has('stop') && has('time')) groups.push(['time', 'clock', 'city', 'people', 'person'], ['frozen', 'freeze', 'stopped', 'suspended', 'shattered']);
   else if (has('travel') && has('time')) groups.push(['person', 'people', 'traveler', 'man', 'woman', 'figure', 'machine'], ['time', 'temporal', 'portal', 'vortex']);
   else if (has('dragon')) groups.push(['person', 'people', 'human', 'girl', 'boy', 'man', 'woman', 'princess', 'knight'], ['dragon', 'dragons']);
   else if (has('portal') && has('door')) groups.push(['door', 'doorway', 'gate', 'entrance'], ['world', 'portal', 'dimension', 'realm', 'landscape']);
   else if (has('jet')) groups.push(['jet', 'airplane', 'aircraft', 'plane'], ['sky', 'clouds', 'flight', 'flying']);
+  // "flight(s)" alone (unlike "jet" above) has no dedicated evidence requirement, so any candidate
+  // merely tagged "flight"/"flying" -- including paragliding, hang-gliding, skydiving, or birds --
+  // could satisfy the option's dominant-subject coverage without ever showing an airplane. Requires
+  // literal airplane/aircraft/airport evidence, the same distinction images.js's own module comment
+  // asks for ("airplane flight vs paragliding").
+  else if (has('flight') || has('flights')) groups.push(['airplane', 'plane', 'aircraft', 'jet', 'airport', 'runway']);
   else if (has('yacht')) groups.push(['yacht', 'boat', 'ship', 'vessel'], ['ocean', 'sea', 'water', 'sailing']);
   // 'tree' (singular) and 'jungle'/'rainforest'/'tropical' added to the forest-setting bucket: real
   // provider alt text for a genuine treehouse photo routinely says "built in a large tree" (singular,
@@ -238,6 +265,8 @@ export const assessImageCandidate = (candidate, option) => {
   const hardFormatMatches = [...hardFormatEvidence.matchAll(HARD_FORMAT_PATTERN)].map(match => match[0].toLowerCase());
   const hardLayoutMatch = hardFormatEvidence.match(HARD_LAYOUT_PATTERN)?.[0]?.toLowerCase();
   if (hardFormatMatches.length || hardLayoutMatch) hardRejectionReasons.push(`hard-rejected: candidate metadata indicates ${[...new Set([...hardFormatMatches, hardLayoutMatch].filter(Boolean))].join(', ')} / text-heavy or promotional format`);
+  const illustrationMatch = hardFormatEvidence.match(ILLUSTRATION_ART_PATTERN)?.[0]?.toLowerCase();
+  if (illustrationMatch) hardRejectionReasons.push(`hard-rejected: candidate is flat/vector/hand-drawn art (${illustrationMatch}), not a real photograph`);
   if (HARD_DOMAIN_PATTERN.test(sourceDomain)) hardRejectionReasons.push(`hard-rejected: high-risk source domain ${sourceDomain}`);
   if (WATERMARK_PATTERN.test(hardFormatEvidence) || WATERMARK_HOST_PATTERN.test(sourceDomain)) hardRejectionReasons.push('hard-rejected: obvious watermark or stock-preview source');
   rejectionReasons.push(...hardRejectionReasons);
@@ -287,6 +316,15 @@ export const assessImageCandidate = (candidate, option) => {
   const relevanceScore = Math.round((coreCoverage * 60 + relevance * 20 + cropFit * 10 + resolution * 8 + Math.max(0, 2 - Number(candidate.position || 0) * 0.08)) * 10) / 10;
   const optionWords = normalizeWords(option.text); const bankGrowthRequired = optionWords.includes('double') && (optionWords.includes('bank') || optionWords.includes('balance'));
   const bankGrowthDepicted = !bankGrowthRequired || containsAny(allTokens, ['big', 'double', 'doubled', 'doubling', 'multiply', 'multiplying', 'increase', 'increasing', 'growth', 'growing', 'overflowing', 'surrounded', 'endless', 'abundance', 'raining', 'falling', 'pile', 'stacks']);
+  // Semantic-opposite guard: "spend" and "save" are opposite actions, but a neutral shared object
+  // noun (e.g. "coin") can satisfy the generic 50% dominant-subject coverage either way, letting a
+  // piggy-bank/savings photo pass for a SPENDING option. Only fires when the option explicitly asks
+  // for spending AND the candidate shows save-specific evidence with no spend-specific evidence --
+  // a candidate showing neither, or showing genuine spending evidence, is unaffected.
+  const spendRequired = ['spend', 'spends', 'spending', 'spent'].some(word => optionWords.includes(word));
+  const spendSaveConflict = spendRequired
+    && containsAny(allTokens, ['piggybank', 'piggy', 'savings', 'saving', 'jar'])
+    && !containsAny(allTokens, ['shopping', 'spending', 'purchase', 'purchasing', 'paying', 'buy', 'buying', 'receipt', 'checkout', 'cart']);
   const conceptClarity = clampScore(coreCoverage * 40 + intentCoverage * 60 - (bankGrowthDepicted ? 0 : 18) - (weakVisual ? 20 : 0));
   const specificity = clampScore(intentCoverage * 65 + Math.min(25, matched.length * 6) + coreCoverage * 10 - (weakVisual ? 32 : 0) - (corporateWeak ? 14 : 0) - (bankGrowthDepicted ? 0 : 28));
   const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 34 : 0) - (corporateWeak ? 18 : 0));
@@ -296,6 +334,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
   if (dominantSubjectWords.length && dominantCoverage < 0.5) rejectionReasons.push(`candidate does not show the option's dominant subject (${dominantSubjectWords.join(' ')}); matched only ${dominantMatched.join(', ') || 'none'}`);
+  if (spendSaveConflict) rejectionReasons.push("candidate depicts saving/piggy-bank imagery, the opposite of the option's spending concept");
   const accepted = rejectionReasons.length === 0;
   const pexelsQualityReasons = [];
   if (conceptClarity < 70) pexelsQualityReasons.push(`concept clarity ${conceptClarity.toFixed(1)} is below 70.0`);
