@@ -3,15 +3,16 @@ import path from 'node:path';
 import { writeJsonAtomic, log, redactConnectionSecrets } from './utils.js';
 import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
-import { ContentHistoryStore, generateProductionPlan } from './content-engine.js';
+import { ContentHistoryStore, generateProductionPlan, isFantasyQuestion, questionMotifs } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, DurationVerificationError, renderVideo, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers } from './audio.js';
 import { createFixturePlan, createFixtureAssets } from './fixtures.js';
-import { createImageSelection, downloadSelectedCandidates, formatUnfilledSlotDiagnostics, ImageSelectionExhaustedError } from './image-picker.js';
+import { buildSlotDiagnostics, createImageSelection, downloadSelectedCandidates, formatUnfilledSlotDiagnostics } from './image-picker.js';
+import { rowToQuestion } from './pool-selection.js';
 import { selectContentPlan } from './content-source.js';
-import { commitPlanUsage, releaseReservation } from './question-pool.js';
+import { commitPlanUsage, releaseQuestionReservation, releaseReservation, reserveReplacementQuestion } from './question-pool.js';
 
 // Disposable per-job temp artifacts (raw downloaded images, TTS mp3s, rendered scene segments) --
 // always scoped to path.join(job.workspace, ...), never anything outside a job's own directory.
@@ -207,6 +208,61 @@ export const prepareImageSelection = async ({ job, store, config }) => {
 // still doesn't fit PRODUCTION_DURATION_CEILING_SECONDS; ordinary per-scene variance is absorbed by
 // buildSceneTimeline/assertWithinProductionDurationCeiling and never gets here at all.
 const MAX_DURATION_RETRY_ATTEMPTS = 2;
+
+// Thrown only after the bounded per-question replacement loop below (replaceUnfillableQuestions)
+// still couldn't assemble a complete plan -- distinct from ContentPoolExhaustedError's
+// CONTENT_POOL_EMPTY (thrown by content-source.js when the pool doesn't even have enough READY
+// rows to start a selection at all): this means enough rows existed, but too many of them
+// individually failed image selection for the bounded replacement budget to resolve.
+export class QuestionReplacementExhaustedError extends Error {
+  constructor(message, details = {}) { super(message); this.code = 'CONTENT_POOL_EXHAUSTED'; Object.assign(this, details); }
+}
+
+// Bounded per-question recovery for image-selection exhaustion: a question that can't obtain both
+// valid, relevant option images (after createImageSelection's own full Tier 1-5 fallback search --
+// see the comment that used to sit at the old immediate-throw call site below) is rejected from the
+// plan and swapped for another already-READY question from the pool, rather than either failing the
+// whole job immediately or ever accepting an unrelated filler image. A replacement question's images
+// still go through the EXACT same createImageSelection pipeline as every other question -- no
+// relevance/quality gate is bypassed or weakened for it. Bounded to MAX_QUESTION_REPLACEMENT_ATTEMPTS
+// total swaps across the whole job (not per-question), so a pool that's pathologically full of
+// unfillable questions can never loop forever; if the budget runs out, or the pool has no more
+// candidates to offer, the caller fails clearly with CONTENT_POOL_EXHAUSTED instead of looping.
+const MAX_QUESTION_REPLACEMENT_ATTEMPTS = 3;
+const unfilledQuestionIndexes = selection => new Set((selection.unfilledDiagnostics || []).map(diagnostic => diagnostic.scene - 1));
+const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages }) => {
+  let currentPlan = plan; let currentSelection = selection;
+  const rejectedPoolIds = new Set();
+  let attempts = 0;
+  while (currentSelection.selectedCount !== currentSelection.total && attempts < MAX_QUESTION_REPLACEMENT_ATTEMPTS) {
+    const badIndex = [...unfilledQuestionIndexes(currentSelection)][0];
+    const badQuestion = currentPlan.questions[badIndex];
+    attempts += 1;
+    log('content.question_replacement_attempt', { jobId: job.id, questionIndex: badIndex, rejectedPoolId: badQuestion.poolId, attempt: attempts, maxAttempts: MAX_QUESTION_REPLACEMENT_ATTEMPTS });
+    // Release THIS question only -- never consumed as 'used', and never re-offered to this same
+    // job again (rejectedPoolIds, folded into excludeIds below). The other already-reserved
+    // questions in this job are left completely untouched.
+    rejectedPoolIds.add(badQuestion.poolId);
+    await releaseQuestionReservation({ jobId: job.id, poolId: badQuestion.poolId });
+    const excludeIds = [...new Set([...currentPlan.questions.map(question => question.poolId), ...rejectedPoolIds])];
+    const otherQuestions = currentPlan.questions.filter((_, index) => index !== badIndex);
+    const inPlanMotifs = new Set(otherQuestions.flatMap(question => questionMotifs(question)));
+    const fantasyCapReached = otherQuestions.some(question => isFantasyQuestion(question));
+    const replacementRow = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached });
+    if (!replacementRow) { log('content.question_replacement_unavailable', { jobId: job.id, questionIndex: badIndex, attempt: attempts }); break; }
+    const replacementQuestion = rowToQuestion(replacementRow, badIndex);
+    const nextQuestions = currentPlan.questions.map((question, index) => (index === badIndex ? replacementQuestion : question));
+    const nextPlan = addIllustrativePercentages({ ...currentPlan, questions: nextQuestions });
+    const miniSelection = await selectImages({ plan: { questions: [nextPlan.questions[badIndex]] }, config });
+    const nextSlots = { ...currentSelection.slots, ...miniSelection.slots };
+    const selectedCount = Object.values(nextSlots).filter(slot => slot.selectedId).length;
+    const unfilledDiagnostics = Object.values(nextSlots).filter(slot => !slot.selectedId).map(slot => buildSlotDiagnostics(slot));
+    currentPlan = nextPlan;
+    currentSelection = { ...currentSelection, slots: nextSlots, selectedCount, unfilledDiagnostics };
+    log('content.question_replaced', { jobId: job.id, questionIndex: badIndex, newPoolId: replacementRow.id, selectedCount, total: currentSelection.total, attempt: attempts });
+  }
+  return { plan: currentPlan, selection: currentSelection };
+};
 // Normal production entry point: selects config.questionCount diverse, pre-validated questions
 // straight from the PostgreSQL pool (see content-source.js) -- no live Groq call in the common
 // case -- automatically searches/scores/selects all of that plan's images, two per question (same
@@ -225,26 +281,31 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
     assertProviderConfig(config);
     for (let attempt = 1; attempt <= MAX_DURATION_RETRY_ATTEMPTS; attempt += 1) {
       update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
-      const plan = await selectPlan({ job, config });
+      let plan = await selectPlan({ job, config });
       poolReserved = true;
       writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
-      const selection = await selectImages({ plan, config });
+      let selection = await selectImages({ plan, config });
       if (selection.selectedCount !== selection.total) {
         // selectImages (createImageSelection) already ran its own bounded Tiers 2-5 gap-fill for
         // every slot that came out of its strict Tier-1 pass unfilled -- see image-picker.js's
         // fillUnfilledSlot, including Tier 5's Groq-based semantic-to-visual-concept translation
         // for options whose literal wording is not photographable at all (e.g. "erased", "grows")
-        // -- so reaching here means those tiers were genuinely exhausted, not that they were never
-        // attempted. unfilledDiagnostics (when the real createImageSelection is in use, not a test
-        // double) carries a full per-slot report so this failure is diagnosable without
-        // reproducing it.
+        // -- so reaching here means those tiers were genuinely exhausted for whichever question(s)
+        // still have an unfilled slot, not that they were never attempted. A question that can't
+        // obtain both valid images is rejected and replaced with another READY question (see
+        // replaceUnfillableQuestions above) rather than failing the whole job or ever accepting an
+        // unrelated filler image.
+        const result = await replaceUnfillableQuestions({ job, config, plan, selection, selectImages });
+        plan = result.plan; selection = result.selection;
+      }
+      if (selection.selectedCount !== selection.total) {
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
-        log('image.selection_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics });
-        const summary = `Automatic image selection could not fill all ${selection.total} image slots after bounded subject-preserving fallback search; selected ${selection.selectedCount}/${selection.total}.`;
+        log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics });
+        const summary = `CONTENT_POOL_EXHAUSTED: Could not assemble ${config.questionCount} questions with ${selection.total} valid relevant images.`;
         const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
         const message = diagnosticsReport ? `${summary}\n\n${diagnosticsReport}` : summary;
-        throw new ImageSelectionExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });
+        throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });
       }
       await runJobPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
       const result = store.get(job.id);

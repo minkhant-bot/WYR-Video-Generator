@@ -144,6 +144,53 @@ export const releaseReservation = async jobId => {
   return rowCount;
 };
 
+// Targeted, single-row counterpart to releaseReservation above -- releases exactly ONE reserved
+// question back to 'ready' instead of every row reserved by this job. Used only by pipeline.js's
+// bounded per-question image-selection-exhaustion replacement (see runAutomaticPipeline): when a
+// question can't obtain both valid option images after the existing bounded image-search fallback,
+// that ONE question is released (never consumed as 'used') so it stays available for a future job,
+// while the OTHER already-reserved questions in this job are left untouched.
+export const releaseQuestionReservation = async ({ jobId, poolId }) => {
+  const { rowCount } = await withClient(client => client.query(
+    "UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE id = $1 AND reserved_by_job = $2 AND status = 'reserved'",
+    [poolId, jobId],
+  ));
+  log('pool.question_released', { jobId, poolId, released: rowCount > 0 });
+  return rowCount;
+};
+
+// Reserves exactly ONE more READY question for a job already mid-flight -- the replacement
+// counterpart to selectAndReservePlan's all-at-once batch reservation, used only when a question
+// already in the plan turned out to be image-unfillable (see releaseQuestionReservation above and
+// pipeline.js's runAutomaticPipeline). Same FOR UPDATE SKIP LOCKED concurrency safety as
+// selectAndReservePlan: two jobs racing for a replacement can never double-reserve the same row.
+// Re-enforces the same HARD diversity rules selectDiversePlan treats as non-negotiable (motif
+// dedup within this plan, fantasy cap) -- never the content-family cap, which selectDiversePlan
+// itself already treats as soft/relaxable when the candidate window is thin. Returns null (never
+// throws) when no valid replacement exists in the current window, so the caller can stop and fail
+// clearly instead of looping forever.
+export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, candidateWindowSize = 80 }) => withTransaction(async client => {
+  const { rows: candidates } = await client.query(
+    `SELECT * FROM wyr_questions WHERE status = 'ready' AND NOT (id = ANY($1::bigint[]))
+     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
+     LIMIT $2 FOR UPDATE SKIP LOCKED`,
+    [excludeIds, candidateWindowSize],
+  );
+  const candidate = candidates.find(row => {
+    if (row.motif_key_a && inPlanMotifs.has(row.motif_key_a)) return false;
+    if (row.motif_key_b && inPlanMotifs.has(row.motif_key_b)) return false;
+    if (row.is_fantasy && fantasyCapReached) return false;
+    return true;
+  });
+  if (!candidate) return null;
+  await client.query(
+    "UPDATE wyr_questions SET status = 'reserved', reserved_by_job = $1, reserved_at = now(), updated_at = now() WHERE id = $2",
+    [jobId, candidate.id],
+  );
+  log('pool.replacement_reserved', { jobId, replacedWithQuestionId: candidate.id });
+  return candidate;
+});
+
 // The job store (jobs.js) is an in-memory Map with no reload-from-disk on startup, so a process
 // restart (Railway redeploy, crash, OOM) while a job is mid-flight orphans its reservation forever
 // -- releaseReservation above only ever runs from inside THIS process's own handleJobFailure/commit

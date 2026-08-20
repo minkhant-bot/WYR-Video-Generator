@@ -136,7 +136,7 @@ export const arrangeForHook = rows => {
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 
-const rowToQuestion = (row, index) => ({
+export const rowToQuestion = (row, index) => ({
   index, category: row.category,
   optionA: { text: row.option_a_text, searchQuery: row.option_a_search_query },
   optionB: { text: row.option_b_text, searchQuery: row.option_b_search_query },
