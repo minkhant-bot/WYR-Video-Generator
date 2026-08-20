@@ -122,25 +122,30 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   await run(ffmpegPath, ['-y', ...stillInputs, '-filter_complex', filter, '-map', '[out]', '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, '-t', String(duration), output], `render segment ${index + 1}`);
   return output;
 };
-// Renders one reusable black filler clip encoded with the exact same profile/level/pixel-format as
-// the scene segments (see renderSegment) so the concat demuxer's `-c copy` step below can splice it
-// in without a re-encode or a stream mismatch. Video-only (no `-an` needed -- lavfi color has no
-// audio stream); the mixed audio track stays silent here on its own because no voice/SFX/countdown
-// event is ever scheduled inside a gap window (see audio.js's buildSceneTimeline gapAfter).
-const buildBlankGapSegment = async ({ renderDir, seconds, ffmpegThreads }) => {
+// Renders the inter-scene gap by freezing the outgoing scene's own last rendered frame for the gap
+// duration, instead of cutting to solid black -- encoded with the exact same profile/level/pixel-
+// format as the scene segments (see renderSegment) so the concat demuxer's `-c copy` step below can
+// splice it in without a re-encode or a stream mismatch. Video-only (no `-an` needed); the mixed
+// audio track stays silent here on its own because no voice/SFX/countdown event is ever scheduled
+// inside a gap window (see audio.js's buildSceneTimeline gapAfter).
+const buildFreezeGapSegment = async ({ renderDir, sourceSegment, seconds, index, ffmpegThreads }) => {
   const { canvas } = WYR_TEMPLATE; const encode = getAudioSpec().encode;
-  const output = path.join(renderDir, 'gap.mp4');
-  await run(ffmpegPath, ['-y', '-f', 'lavfi', '-i', `color=c=black:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${seconds}`, '-an', '-r', String(canvas.fps), '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, '-t', String(seconds), output], 'render inter-scene blank gap');
+  const frame = path.join(renderDir, `gap-${String(index).padStart(2, '0')}-frame.png`);
+  await run(ffmpegPath, ['-y', '-sseof', '-0.1', '-i', sourceSegment, '-update', '1', '-frames:v', '1', frame], `extract freeze frame for scene ${index + 1}`);
+  const output = path.join(renderDir, `gap-${String(index).padStart(2, '0')}.mp4`);
+  await run(ffmpegPath, ['-y', '-loop', '1', '-i', frame, '-t', String(seconds), '-r', String(canvas.fps), '-an', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, output], `render inter-scene freeze gap for scene ${index + 1}`);
   return output;
 };
-// Interleaves the shared blank-gap clip between consecutive scene segments, driven entirely by each
-// scene's own `gapAfter` (0 on the final scene, per buildSceneTimeline) -- never before the first
-// scene, never trailing the last one. A `timeline` without per-scene `gapAfter` (e.g. the fixture
-// path's plain duration-only calls) falls through unchanged, so fixture rendering keeps its existing
-// back-to-back concatenation.
+// Interleaves the per-scene freeze-gap clip between consecutive scene segments, driven entirely by
+// each scene's own `gapAfter` (0 on the final scene, per buildSceneTimeline) -- never before the
+// first scene, never trailing the last one. A `timeline` without per-scene `gapAfter` (e.g. the
+// fixture path's plain duration-only calls) falls through unchanged, so fixture rendering keeps its
+// existing back-to-back concatenation. `gapSegmentPath` may be a plain path (reused for every gap)
+// or a `(index) => path` function (one gap clip per scene) -- renderVideo below uses the latter.
 export const buildConcatSegmentList = ({ segments, timeline, gapSegmentPath }) => {
   if (!timeline?.scenes?.some(scene => scene.gapAfter > 0)) return segments;
-  return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapSegmentPath] : [segment]);
+  const gapPathFor = typeof gapSegmentPath === 'function' ? gapSegmentPath : () => gapSegmentPath;
+  return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapPathFor(index)] : [segment]);
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
   const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, slide: sfx.slide.filename, reveal: sfx.reveal.filename, whoosh: sfx.whoosh.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
@@ -251,9 +256,10 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   assertLockedImageAssets(assets);
   const renderDir = path.join(workspace, 'render');
   const segments = await renderSceneSegments({ plan, assets, duration, timeline, renderDir, sceneConcurrency, ffmpegThreads, onProgress });
-  const needsGapSegment = timeline?.scenes?.some(scene => scene.gapAfter > 0);
-  const gapSegmentPath = needsGapSegment ? await buildBlankGapSegment({ renderDir, seconds: timeline.blankGapSeconds, ffmpegThreads }) : null;
-  const concatSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath });
+  const gapIndices = timeline?.scenes ? timeline.scenes.flatMap((scene, index) => scene.gapAfter > 0 ? [index] : []) : [];
+  const gapSegmentByIndex = {};
+  for (const index of gapIndices) gapSegmentByIndex[index] = await buildFreezeGapSegment({ renderDir, sourceSegment: segments[index], seconds: timeline.blankGapSeconds, index, ffmpegThreads });
+  const concatSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath: index => gapSegmentByIndex[index] });
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${concatSegments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
