@@ -1,4 +1,5 @@
 import { assessQuestionQuality, isFantasyQuestion, optionSimilarity } from './content-engine.js';
+import { coreSubjectWords } from './image-query.js';
 
 const wordCount = text => String(text ?? '').trim().split(/\s+/).filter(Boolean).length;
 const charLength = text => String(text ?? '').length;
@@ -99,13 +100,43 @@ const dilemmaTagsForText = text => {
   return tags;
 };
 
+// Words whose CORE meaning is an abstract cadence/schedule ("once", "quarterly") or an invisible
+// mental/interpersonal state ("feedback", "review", "mindset") rather than anything a camera can
+// show. Deliberately small and conservative -- this only measures words that survive
+// image-query.js's own coreSubjectWords stripping (already used by the real image-search path to
+// find an option's literal subject), so a question is penalized only for what would ALSO reach
+// image search as its "subject", never for incidental phrasing already filtered out upstream.
+const ABSTRACT_CADENCE_WORDS = new Set(['once', 'twice', 'annual', 'annually', 'quarterly', 'biannual', 'monthly', 'weekly', 'daily', 'yearly', 'periodically', 'routinely', 'occasionally', 'frequency', 'schedule', 'scheduled', 'year', 'years', 'month', 'months', 'week', 'weeks']);
+const ABSTRACT_MENTAL_STATE_WORDS = new Set(['feedback', 'review', 'evaluation', 'appraisal', 'opinion', 'impression', 'mindset', 'mood', 'confidence', 'motivation', 'anxiety', 'stress', 'happiness', 'satisfaction']);
+// Conservative per-option visualizability penalty: how much of the option's OWN literal subject
+// (coreSubjectWords, the same words image search treats as the thing to depict) is abstract
+// cadence/mental-state vocabulary versus a genuine concrete noun. A single abstract word next to a
+// real concrete anchor ("a vacation every year") is barely penalized; an option that collapses
+// almost entirely into abstract/cadence words with nothing concrete left ("feedback once year") is
+// penalized the most. Never a hard rejection -- this only lowers RANK (see computeDilemmaStrengthScore
+// below), so a weak-visual question stays in the pool and simply sorts below stronger, concrete ones.
+const visualizabilityPenaltyForOption = text => {
+  const subjectWords = coreSubjectWords(text);
+  if (!subjectWords.length) return 20;
+  const abstractCount = subjectWords.filter(word => ABSTRACT_CADENCE_WORDS.has(word) || ABSTRACT_MENTAL_STATE_WORDS.has(word)).length;
+  if (abstractCount === 0) return 0;
+  const concreteRatio = 1 - abstractCount / subjectWords.length;
+  if (subjectWords.length <= 3 && concreteRatio <= 0.34) return 20; // collapses almost entirely into abstract/cadence words
+  if (concreteRatio <= 0.5) return 10;
+  return 4;
+};
+export const computeVisualizabilityPenalty = (optionAText, optionBText) => visualizabilityPenaltyForOption(optionAText) + visualizabilityPenaltyForOption(optionBText);
+
 // WYR strength bonus for an already-accepted question: rewards options that each carry a
 // recognizable psychological stake, and rewards it MORE when option A and option B land on
 // DIFFERENT axes -- a real values tradeoff (e.g. freedom vs security, comfort vs ambition) reads as
 // a harder, more identity-relevant decision than two options that are really "the same kind of
 // thing" twice (e.g. yacht vs jet, both just status/luxury). Capped and additive so it nudges,
 // rather than dominates, the existing hook_score it's combined with in pool-selection.js/
-// question-pool.js.
+// question-pool.js. Also subtracts computeVisualizabilityPenalty (see above) so a question whose
+// meaning is inherently hard to represent with a single real-world photograph -- abstract
+// schedules/frequencies, invisible mental states -- ranks below an equally "strong" but genuinely
+// photographable dilemma, without ever being rewritten, deleted, or hard-rejected.
 export const computeDilemmaStrengthScore = (optionAText, optionBText) => {
   const tagsA = dilemmaTagsForText(optionAText);
   const tagsB = dilemmaTagsForText(optionBText);
@@ -114,7 +145,8 @@ export const computeDilemmaStrengthScore = (optionAText, optionBText) => {
   const hasTagUniqueToA = [...tagsA].some(tag => !tagsB.has(tag));
   const hasTagUniqueToB = [...tagsB].some(tag => !tagsA.has(tag));
   const tradeoffBonus = hasTagUniqueToA && hasTagUniqueToB ? 20 : 0;
-  return presenceBonus + tradeoffBonus;
+  const visualizabilityPenalty = computeVisualizabilityPenalty(optionAText, optionBText);
+  return Math.max(0, presenceBonus + tradeoffBonus - visualizabilityPenalty);
 };
 
 // Coarse emotional-tone bucket for a question, reusing the SAME lexicon as computeDilemmaStrengthScore

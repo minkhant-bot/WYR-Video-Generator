@@ -128,7 +128,7 @@ const logSelectedImageDiagnostics = (assets, jobId) => {
   console.info(`WYR_IMAGE_JOB_SUMMARY | jobId=${plainLogValue(jobId)} | selected=${assets.length} | DuckDuckGo=${selectedCounts.DuckDuckGo} | Pexels=${selectedCounts.Pexels} | rejected=${rejected}`);
 };
 
-export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null, poolReserved = false }) => {
+export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null, preparedAssets = null, poolReserved = false }) => {
   const update = changes => store.update(job.id, changes);
   try {
     assertProviderConfig(config); log('job.started', { jobId: job.id, contentProvider: 'groq', model: config.groqModel, imageProvider: 'DuckDuckGo Images', imageFallbackProvider: 'Pexels', webImageFallback: config.webImageFallbackEnabled ? 'DuckDuckGo Images' : 'disabled', providerOrder: IMAGE_SELECTION_DEFAULTS.providerOrder, imageRequestTimeoutMs: config.timeoutMs, imageSearchRetries: config.imageSearchRetries, imageCandidateLimit: IMAGE_SELECTION_DEFAULTS.maxRankedCandidates, imageQualityThreshold: IMAGE_SELECTION_DEFAULTS.pexelsQualityThreshold, imageMinimumResolution: `${IMAGE_SELECTION_DEFAULTS.minimumWidth}x${IMAGE_SELECTION_DEFAULTS.minimumHeight}`, imageRecoveryQueryRounds: config.imageRecoveryQueryRounds, imageRecoveryMaxRequests: config.imageRecoveryMaxRequests, imageRecoveryMaxMs: config.imageRecoveryMaxMs, voice: config.edgeVoice, pexelsConcurrency: config.pexelsConcurrency, ttsConcurrency: config.ttsConcurrency, sceneRenderConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads });
@@ -138,13 +138,25 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     const generated = preparedPlan ? null : await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
     const plan = preparedPlan || addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
 
-    update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
     const imageSelectionStarted = Date.now();
-    const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
-    const webImageProvider = config.webImageFallbackEnabled ? new DuckDuckGoImageProvider({ timeoutMs: Math.min(config.timeoutMs, 12_000) }) : null;
-    const selectedAssets = selectionState
-      ? await downloadSelectedCandidates({ selection: selectionState, assetsDir: path.join(job.workspace, 'assets'), config })
-      : await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, visualQueryProvider: provider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, recovery: { alternateQueryRounds: config.imageRecoveryQueryRounds, maxProviderRequests: config.imageRecoveryMaxRequests, maxWallClockMs: config.imageRecoveryMaxMs }, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    // preparedAssets is set only by runAutomaticPipeline, which already ran selection AND download
+    // itself (with per-question replacement on exhaustion -- see downloadImagesWithReplacement) --
+    // skip both here (including the searching_images/downloading_assets progress updates, already
+    // reported by the caller) rather than downloading a second time. The manual-review caller
+    // (wyr-server.js) still passes selectionState (no pool reservation, replacement not
+    // applicable), and prepareImageSelection's own debug path still passes neither, exactly as
+    // before this change.
+    let selectedAssets;
+    if (preparedAssets) {
+      selectedAssets = preparedAssets;
+    } else {
+      update({ status: 'searching_images', stage: 'searching_images', progress: 16 });
+      const imageProvider = new PexelsImageProvider({ apiKey: config.pexelsApiKey, timeoutMs: config.timeoutMs });
+      const webImageProvider = config.webImageFallbackEnabled ? new DuckDuckGoImageProvider({ timeoutMs: Math.min(config.timeoutMs, 12_000) }) : null;
+      selectedAssets = selectionState
+        ? await downloadSelectedCandidates({ selection: selectionState, assetsDir: path.join(job.workspace, 'assets'), config })
+        : await findAndDownloadImages({ plan, provider: imageProvider, webProvider: webImageProvider, visualQueryProvider: provider, assetsDir: path.join(job.workspace, 'assets'), maxRetries: config.imageSearchRetries, concurrency: config.pexelsConcurrency, recovery: { alternateQueryRounds: config.imageRecoveryQueryRounds, maxProviderRequests: config.imageRecoveryMaxRequests, maxWallClockMs: config.imageRecoveryMaxMs }, onProgress: (done, total) => update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 18 + Math.round(done / total * 28) }) });
+    }
     const imageSelectionMs = Date.now() - imageSelectionStarted;
     if (selectedAssets.length !== plan.questions.length * 2) throw new Error(`Expected ${plan.questions.length * 2} selected images before locking; received ${selectedAssets.length}.`);
     const assets = lockSelectedImageAssets({ assets: selectedAssets, workspace: job.workspace });
@@ -230,10 +242,11 @@ export class QuestionReplacementExhaustedError extends Error {
 // never loop forever; if the budget runs out, or the pool has no more candidates to offer, the
 // caller fails clearly with CONTENT_POOL_EXHAUSTED instead of looping.
 const unfilledQuestionIndexes = selection => new Set((selection.unfilledDiagnostics || []).map(diagnostic => diagnostic.scene - 1));
-const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages }) => {
+// rejectedPoolIds/attempts are optional so the SAME job-wide budget/never-reoffer set can be
+// threaded in from a later stage (see downloadImagesWithReplacement below, which re-enters this loop
+// after a DOWNLOAD-stage -- not just a selection-stage -- exhaustion) without ever resetting either.
+const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages, rejectedPoolIds = new Set(), attempts = 0 }) => {
   let currentPlan = plan; let currentSelection = selection;
-  const rejectedPoolIds = new Set();
-  let attempts = 0;
   let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
   const maxAttempts = config.questionReplacementMaxAttempts;
   while (currentSelection.selectedCount !== currentSelection.total && attempts < maxAttempts) {
@@ -264,7 +277,54 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     currentSelection = { ...currentSelection, slots: nextSlots, selectedCount, unfilledDiagnostics };
     log('content.question_replaced', { jobId: job.id, questionIndex: badIndex, newPoolId: replacementRow.id, selectedCount, total: currentSelection.total, attempt: attempts });
   }
-  return { plan: currentPlan, selection: currentSelection, attempts, wordingRejectedCount };
+  return { plan: currentPlan, selection: currentSelection, attempts, wordingRejectedCount, rejectedPoolIds };
+};
+
+// Final image-acquisition stage for the automatic path: downloads/validates every already-selected
+// candidate (image-picker.js's downloadSelectedCandidates -- the EXACT same relevance/quality/
+// framing gates as selection; nothing here weakens or bypasses them). This is a SEPARATE stage from
+// selection above, and previously its own IMAGE_SELECTION_EXHAUSTED (thrown per-slot once that
+// slot's own candidate pool -- even widened -- fails download/validation for every ranked
+// candidate; see image-picker.js) escaped straight to the client instead of ever reaching
+// replaceUnfillableQuestions, because runPipeline called it internally, after
+// replaceUnfillableQuestions had already finished. A slot that exhausts HERE is now treated exactly
+// like an unfilled SELECTION slot: that one question is rejected and swapped via
+// replaceUnfillableQuestions (sharing the SAME job-wide attempts budget and rejected-question set),
+// then downloading is retried against the resulting fully-selected plan. IMAGE_SELECTION_EXHAUSTED
+// is therefore never surfaced while replacement attempts remain; only a genuinely exhausted
+// replacement budget (or a pool with nothing left to offer) falls through to the caller's existing
+// CONTENT_POOL_EXHAUSTED path -- see runAutomaticPipeline below, which applies the identical
+// `selectedCount !== total` check to this stage's result as it already does for selection.
+const downloadImagesWithReplacement = async ({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts, wordingRejectedCount }) => {
+  let currentPlan = plan; let currentSelection = selection; let currentAttempts = attempts; let currentWordingRejectedCount = wordingRejectedCount;
+  for (;;) {
+    try {
+      const assets = await downloadSelectedCandidates({ selection: currentSelection, assetsDir: path.join(job.workspace, 'assets'), config });
+      return { assets, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount };
+    } catch (error) {
+      const badIndex = Number(error?.scene) - 1;
+      if (error?.code !== 'IMAGE_SELECTION_EXHAUSTED' || !Number.isInteger(badIndex) || !currentPlan.questions[badIndex]) throw error;
+      log('content.image_download_exhausted', { jobId: job.id, questionIndex: badIndex, slot: error.option, attempt: currentAttempts + 1, maxAttempts: config.questionReplacementMaxAttempts });
+      // Reset just this question's two slots back to unfilled so replaceUnfillableQuestions' own
+      // loop -- which already knows how to keep swapping if a REPLACEMENT also fails selection --
+      // picks it up exactly like any other unfilled slot, sharing the same attempts/rejectedPoolIds.
+      const badSlotKeys = Object.keys(currentSelection.slots).filter(key => currentSelection.slots[key].questionIndex === badIndex);
+      const resetSlots = { ...currentSelection.slots };
+      for (const key of badSlotKeys) resetSlots[key] = { ...resetSlots[key], selectedId: null };
+      const resetSelection = { ...currentSelection, slots: resetSlots, selectedCount: Object.values(resetSlots).filter(slot => slot.selectedId).length };
+      const wordingBaseBefore = currentPlan.contentQuality?.wordingRejectedCount || 0;
+      const replaced = await replaceUnfillableQuestions({ job, config, plan: currentPlan, selection: resetSelection, selectImages, rejectedPoolIds, attempts: currentAttempts });
+      currentAttempts = replaced.attempts;
+      currentWordingRejectedCount += replaced.wordingRejectedCount - wordingBaseBefore;
+      currentPlan = replaced.plan; currentSelection = replaced.selection;
+      if (currentSelection.selectedCount !== currentSelection.total) {
+        return { assets: null, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount };
+      }
+      // Selection is fully filled again (either the original bad question's own replacement, or a
+      // chain of replacements if a replacement itself also failed selection) -- loop back and retry
+      // downloadSelectedCandidates against the complete, now-valid selection.
+    }
+  }
 };
 // Normal production entry point: selects config.questionCount diverse, pre-validated questions
 // straight from the PostgreSQL pool (see content-source.js) -- no live Groq call in the common
@@ -291,6 +351,7 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       let selection = await selectImages({ plan, config });
       let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
       let imageReplacementAttempts = 0;
+      let rejectedPoolIds = new Set();
       if (selection.selectedCount !== selection.total) {
         // selectImages (createImageSelection) already ran its own bounded Tiers 2-5 gap-fill for
         // every slot that came out of its strict Tier-1 pass unfilled -- see image-picker.js's
@@ -302,23 +363,34 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         // replaceUnfillableQuestions above) rather than failing the whole job or ever accepting an
         // unrelated filler image.
         const result = await replaceUnfillableQuestions({ job, config, plan, selection, selectImages });
-        plan = result.plan; selection = result.selection; imageReplacementAttempts = result.attempts; wordingRejectedCount = result.wordingRejectedCount;
+        plan = result.plan; selection = result.selection; imageReplacementAttempts = result.attempts; wordingRejectedCount = result.wordingRejectedCount; rejectedPoolIds = result.rejectedPoolIds;
       }
-      if (selection.selectedCount !== selection.total) {
+      // Concise, secret-free counters only -- never raw error messages/stacks from elsewhere in the
+      // job (those could carry a redacted-but-still-sensitive DB error; see
+      // redactConnectionSecrets/handleJobFailure) and never anything from config/credentials.
+      const throwContentPoolExhausted = () => {
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
         const unfilledQuestionCount = unfilledQuestionIndexes(selection).size;
         const validQuestionsAssembled = plan.questions.length - unfilledQuestionCount;
         log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics, wordingRejectedCount, imageReplacementAttempts });
         const summary = `CONTENT_POOL_EXHAUSTED: Could not assemble ${config.questionCount} quality-valid questions with ${selection.total} relevant usable images.`;
-        // Concise, secret-free counters only -- never raw error messages/stacks from elsewhere in
-        // the job (those could carry a redacted-but-still-sensitive DB error; see
-        // redactConnectionSecrets/handleJobFailure) and never anything from config/credentials.
         const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, replacement attempts used: ${imageReplacementAttempts}/${config.questionReplacementMaxAttempts}, valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}`;
         const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
         const message = [summary, diagnostics, diagnosticsReport].filter(Boolean).join('\n\n');
         throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics, wordingRejectedCount, imageRejectedCount: imageReplacementAttempts, replacementAttemptsUsed: imageReplacementAttempts, validQuestionsAssembled, validImagesAssembled: selection.selectedCount });
-      }
-      await runJobPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
+      };
+      if (selection.selectedCount !== selection.total) throwContentPoolExhausted();
+      // Final image acquisition (download + validate the already-selected candidates). Any
+      // slot-level IMAGE_SELECTION_EXHAUSTED here is handled the SAME way as a selection-stage
+      // exhaustion above -- swap the question via replaceUnfillableQuestions and retry -- so it
+      // never reaches the client while replacement attempts remain (see
+      // downloadImagesWithReplacement). Only a genuinely exhausted replacement budget falls through
+      // to the identical CONTENT_POOL_EXHAUSTED path used above.
+      update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 30 });
+      const downloadResult = await downloadImagesWithReplacement({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts: imageReplacementAttempts, wordingRejectedCount });
+      plan = downloadResult.plan; selection = downloadResult.selection; imageReplacementAttempts = downloadResult.attempts; wordingRejectedCount = downloadResult.wordingRejectedCount;
+      if (selection.selectedCount !== selection.total) throwContentPoolExhausted();
+      await runJobPipeline({ job, store, config, preparedPlan: plan, preparedAssets: downloadResult.assets, poolReserved });
       const result = store.get(job.id);
       if (result?.status !== 'failed' || result?.errorCode !== 'DURATION_BUDGET_EXCEEDED' || attempt === MAX_DURATION_RETRY_ATTEMPTS) return;
       // The complete scene timeline didn't fit the safe ceiling even with every scene at its real
