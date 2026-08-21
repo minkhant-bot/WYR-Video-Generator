@@ -20,6 +20,15 @@ const positiveInteger = (name, fallback) => {
   return value;
 };
 
+// Unlike positiveInteger above (which fails startup on a malformed value), this silently falls back
+// to `fallback` on anything missing or invalid -- used only for tuning knobs where a bad env value
+// should never be able to crash the whole server, just leave the setting at its safe default.
+const positiveIntegerOrDefault = (name, fallback) => {
+  if (process.env[name] === undefined) return fallback;
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value >= 1 ? value : fallback;
+};
+
 const boolean = (name, fallback) => {
   const value = process.env[name];
   if (value === undefined) return fallback;
@@ -45,6 +54,10 @@ export const getConfig = () => {
     groqRateLimitRetries: integer('WYR_GROQ_RATE_LIMIT_RETRIES', 1, 0, 3),
     groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 30_000, 1_000, 60_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
+    // Bounded per-question image-selection-exhaustion replacement budget (see pipeline.js's
+    // replaceUnfillableQuestions) -- total swaps across a whole job, not per-question, so a pool
+    // that's pathologically full of unfillable questions still can never loop forever.
+    questionReplacementMaxAttempts: positiveIntegerOrDefault('WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS', 12),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),

@@ -224,22 +224,23 @@ export class QuestionReplacementExhaustedError extends Error {
 // plan and swapped for another already-READY question from the pool, rather than either failing the
 // whole job immediately or ever accepting an unrelated filler image. A replacement question's images
 // still go through the EXACT same createImageSelection pipeline as every other question -- no
-// relevance/quality gate is bypassed or weakened for it. Bounded to MAX_QUESTION_REPLACEMENT_ATTEMPTS
-// total swaps across the whole job (not per-question), so a pool that's pathologically full of
-// unfillable questions can never loop forever; if the budget runs out, or the pool has no more
-// candidates to offer, the caller fails clearly with CONTENT_POOL_EXHAUSTED instead of looping.
-const MAX_QUESTION_REPLACEMENT_ATTEMPTS = 3;
+// relevance/quality gate is bypassed or weakened for it. Bounded to config.questionReplacementMaxAttempts
+// (env WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS, default 12 -- see config.js) total swaps across the
+// whole job (not per-question), so a pool that's pathologically full of unfillable questions can
+// never loop forever; if the budget runs out, or the pool has no more candidates to offer, the
+// caller fails clearly with CONTENT_POOL_EXHAUSTED instead of looping.
 const unfilledQuestionIndexes = selection => new Set((selection.unfilledDiagnostics || []).map(diagnostic => diagnostic.scene - 1));
 const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages }) => {
   let currentPlan = plan; let currentSelection = selection;
   const rejectedPoolIds = new Set();
   let attempts = 0;
   let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
-  while (currentSelection.selectedCount !== currentSelection.total && attempts < MAX_QUESTION_REPLACEMENT_ATTEMPTS) {
+  const maxAttempts = config.questionReplacementMaxAttempts;
+  while (currentSelection.selectedCount !== currentSelection.total && attempts < maxAttempts) {
     const badIndex = [...unfilledQuestionIndexes(currentSelection)][0];
     const badQuestion = currentPlan.questions[badIndex];
     attempts += 1;
-    log('content.question_replacement_attempt', { jobId: job.id, questionIndex: badIndex, rejectedPoolId: badQuestion.poolId, attempt: attempts, maxAttempts: MAX_QUESTION_REPLACEMENT_ATTEMPTS });
+    log('content.question_replacement_attempt', { jobId: job.id, questionIndex: badIndex, rejectedPoolId: badQuestion.poolId, attempt: attempts, maxAttempts });
     // Release THIS question only -- never consumed as 'used', and never re-offered to this same
     // job again (rejectedPoolIds, folded into excludeIds below). The other already-reserved
     // questions in this job are left completely untouched.
@@ -312,7 +313,7 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         // Concise, secret-free counters only -- never raw error messages/stacks from elsewhere in
         // the job (those could carry a redacted-but-still-sensitive DB error; see
         // redactConnectionSecrets/handleJobFailure) and never anything from config/credentials.
-        const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, replacement attempts used: ${imageReplacementAttempts}/${MAX_QUESTION_REPLACEMENT_ATTEMPTS}, valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}`;
+        const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, replacement attempts used: ${imageReplacementAttempts}/${config.questionReplacementMaxAttempts}, valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}`;
         const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
         const message = [summary, diagnostics, diagnosticsReport].filter(Boolean).join('\n\n');
         throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics, wordingRejectedCount, imageRejectedCount: imageReplacementAttempts, replacementAttemptsUsed: imageReplacementAttempts, validQuestionsAssembled, validImagesAssembled: selection.selectedCount });
