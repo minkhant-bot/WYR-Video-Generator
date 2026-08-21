@@ -161,6 +161,28 @@ poolSeedButton.onclick = async () => {
 
 const poolImportFileInput = document.querySelector('#pool-import-file');
 const poolImportStatusEl = document.querySelector('#pool-import-status');
+const poolImportRejectedEl = document.querySelector('#pool-import-rejected');
+const poolImportRejectedListEl = document.querySelector('#pool-import-rejected-list');
+
+// Renders the bounded rejectedDetails list the import endpoint returns (see pack-import.js) --
+// always via textContent, never innerHTML, since optionA/optionB/category/rejectionReason are
+// attacker-controllable JSON pack content, not trusted markup.
+const renderRejectedDetails = rejectedDetails => {
+  poolImportRejectedListEl.textContent = '';
+  if (!Array.isArray(rejectedDetails) || rejectedDetails.length === 0) { poolImportRejectedEl.hidden = true; return; }
+  for (const item of rejectedDetails) {
+    const li = document.createElement('li');
+    const typeSpan = document.createElement('span');
+    typeSpan.className = 'rejected-type';
+    typeSpan.textContent = item.rejectionType || 'other';
+    li.appendChild(typeSpan);
+    const optionA = item.optionA ?? '(missing)'; const optionB = item.optionB ?? '(missing)';
+    const category = item.category ? ` [${item.category}]` : '';
+    li.appendChild(document.createTextNode(`"${optionA}" vs "${optionB}"${category} — ${item.rejectionReason || 'no reason recorded'}`));
+    poolImportRejectedListEl.appendChild(li);
+  }
+  poolImportRejectedEl.hidden = false;
+};
 
 // Mobile file pickers (Android/iOS) trigger `change` as soon as a file is chosen, so importing
 // starts immediately on selection rather than requiring a separate "upload" tap.
@@ -179,9 +201,11 @@ poolImportFileInput.onchange = async () => {
     });
     poolTotalEl.textContent = data.total ?? '–';
     poolImportStatusEl.textContent = `Inserted: ${data.inserted} | Skipped duplicates: ${data.skipped} | Rejected: ${data.rejected} | Pool total: ${data.total}`;
+    renderRejectedDetails(data.rejectedDetails);
     await refreshPoolStatus(); // authoritative ready/total + refill status refresh
   } catch (error) {
     poolImportStatusEl.textContent = '';
+    renderRejectedDetails([]);
     showPoolError(error.message);
   } finally {
     poolImportFileInput.disabled = false;

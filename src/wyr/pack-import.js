@@ -1,5 +1,6 @@
 import { CONTENT_CATEGORIES } from './content.js';
-import { insertQuestions, getPoolStats } from './question-pool.js';
+import { insertQuestions, getPoolStats, logRejectionDiagnostics } from './question-pool.js';
+import { classifyRejectionReasons } from './pool-selection.js';
 import { coreSubjectQuery } from './image-query.js';
 
 export class PackFormatError extends Error {
@@ -39,6 +40,14 @@ const deriveSearchQuery = (text, category) => {
 };
 
 const isNonEmptyString = value => typeof value === 'string' && value.trim().length > 0;
+// Diagnostics-only, best-effort text extraction from a raw (possibly malformed) pack entry -- raw
+// itself might not even be an object, and raw.optionA/optionB might not be strings (that is exactly
+// what normalizeImportedQuestion below is checking), so this never assumes the shape it failed to have.
+const safeRejectedOptionText = value => (typeof value === 'string' ? value.slice(0, 300) : null);
+// Bounds how many rejected-question detail rows a single import response carries -- large enough to
+// be genuinely useful in the "Rejected details" UI panel, small enough that an oversized pack (up to
+// MAX_QUESTIONS_PER_PACK below) can never balloon the response.
+export const MAX_REJECTED_DETAILS = 50;
 
 // Validates one raw pack entry and, if valid, maps it to the internal {category, optionA:
 // {text, searchQuery}, optionB: {text, searchQuery}} shape insertQuestions() expects -- the exact
@@ -81,8 +90,18 @@ export const importQuestionPack = async payload => {
   for (const raw of rawQuestions) {
     const result = normalizeImportedQuestion(raw);
     if (result.accepted) validQuestions.push(result.question);
-    else preRejected.push({ reasons: result.reasons });
+    else preRejected.push({
+      reasons: result.reasons,
+      optionA: safeRejectedOptionText(raw?.optionA), optionB: safeRejectedOptionText(raw?.optionB),
+      category: typeof raw?.category === 'string' ? raw.category : null,
+      rejectionType: 'invalid_format', rejectionReason: classifyRejectionReasons(result.reasons).rejectionReason,
+    });
   }
+  // Format-invalid entries never reach insertQuestions() (they never became a well-formed question),
+  // so its own 'pool.insert_batch.rejection_summary'/'.rejection_sample' logging below never sees
+  // them -- log this subset here so Railway still gets full visibility into WHY a JSON import
+  // batch was rejected, not just the duplicate/quality-gate portion.
+  logRejectionDiagnostics('pool.insert_batch', preRejected);
 
   const { inserted, rejected: dbRejected } = validQuestions.length
     ? await insertQuestions(validQuestions, { sourceProvider: 'import' })
@@ -91,10 +110,15 @@ export const importQuestionPack = async payload => {
   const skipped = dbRejected.filter(item => item.reasons.some(reason => reason.includes('duplicate')));
   const trueRejected = dbRejected.filter(item => !item.reasons.some(reason => reason.includes('duplicate')));
   const stats = await getPoolStats();
+  const rejectedDetails = [...preRejected, ...trueRejected].slice(0, MAX_REJECTED_DETAILS).map(item => ({
+    optionA: item.optionA, optionB: item.optionB, category: item.category,
+    rejectionType: item.rejectionType, rejectionReason: item.rejectionReason,
+  }));
   return {
     inserted: inserted.length,
     skipped: skipped.length,
     rejected: preRejected.length + trueRejected.length,
     total: stats.total,
+    rejectedDetails,
   };
 };

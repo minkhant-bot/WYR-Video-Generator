@@ -43,6 +43,28 @@ export const computeInsertionFields = question => {
   };
 };
 
+// Diagnostics-only classifier: buckets an already-computed reasons list (from computeInsertionFields
+// above, the dedupe-conflict message, or a raw DB error) into one coarse rejectionType for logging/UI
+// -- see question-pool.js's insertQuestions and pack-import.js. Purely descriptive: it NEVER decides
+// whether a question is rejected (assessQuestionQuality/the DB unique constraint already made that
+// call), only which bucket to report it under, so this can never change any validation outcome.
+// Checked in priority order because one question can fail multiple reasons at once (e.g. both a
+// too-long option A and a blocked-content pair) -- duplicate and structural blocks are the most
+// specific/actionable signal when present, so they win over the more general wording/visual buckets.
+const REJECTION_TYPE_RULES = [
+  { type: 'duplicate', test: reason => /duplicate/i.test(reason) },
+  { type: 'structural_validation', test: reason => /searchquery must contain|not clearly distinguishable|low-stakes dilemma|excluded subject matter/i.test(reason) },
+  { type: 'visual_feasibility', test: reason => /photographable|visualsubject/i.test(reason) },
+  { type: 'wording_quality', test: reason => /awkward fragment|run-on|instantly readable words|exceeds 55 characters/i.test(reason) },
+];
+const MAX_REJECTION_REASON_LENGTH = 300;
+export const classifyRejectionReasons = (reasons = []) => {
+  const list = (reasons && reasons.length ? reasons : ['no reason recorded']).map(reason => String(reason ?? ''));
+  const rule = REJECTION_TYPE_RULES.find(candidate => list.some(reason => candidate.test(reason)));
+  const rejectionReason = list.join('; ').slice(0, MAX_REJECTION_REASON_LENGTH);
+  return { rejectionType: rule ? rule.type : 'other', rejectionReason };
+};
+
 // Diversity selection over a candidate window of "ready" rows, already ordered least-recently-used
 // first by the caller's SQL. Hard rules (fantasy cap, motif cooldown/duplication) are never
 // relaxed; the content-family cap is relaxed only if the window can't otherwise fill `count`, so a

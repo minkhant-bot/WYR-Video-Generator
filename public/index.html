@@ -48,6 +48,10 @@
       <label for="pool-import-file" class="pool-import-label">Import JSON Questions</label>
       <input id="pool-import-file" type="file" accept="application/json,.json">
       <p id="pool-import-status" class="pool-status"></p>
+      <details id="pool-import-rejected" class="pool-rejected-details" hidden>
+        <summary>Rejected details</summary>
+        <ul id="pool-import-rejected-list"></ul>
+      </details>
     </div>
     <p id="pool-error" class="error" hidden></p>
   </section>

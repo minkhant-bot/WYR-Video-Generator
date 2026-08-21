@@ -129,10 +129,11 @@ test('a pack exceeding the maximum question count is rejected clearly instead of
   await assert.rejects(() => importQuestionPack(canonicalPack(tooMany)), PackFormatError);
 }));
 
-test('the import result is a safe numeric-only summary with no secrets, connection strings, or raw question content', () => withFakeDb(async () => {
+test('the import result is a safe summary (numeric counts plus a bounded rejectedDetails list) with no secrets or connection strings', () => withFakeDb(async () => {
   const result = await importQuestionPack(canonicalPack(validQuestions()));
-  assert.deepEqual(Object.keys(result).sort(), ['inserted', 'rejected', 'skipped', 'total']);
-  for (const key of Object.keys(result)) assert.equal(typeof result[key], 'number');
+  assert.deepEqual(Object.keys(result).sort(), ['inserted', 'rejected', 'rejectedDetails', 'skipped', 'total']);
+  for (const key of ['inserted', 'skipped', 'rejected', 'total']) assert.equal(typeof result[key], 'number');
+  assert.deepEqual(result.rejectedDetails, []); // nothing was rejected in this pack
   const serialized = JSON.stringify(result);
   assert.equal(/postgres(ql)?:\/\//i.test(serialized), false);
   assert.equal(/gsk_|bearer/i.test(serialized), false);

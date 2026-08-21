@@ -1,8 +1,28 @@
 import { withClient, withTransaction } from './db.js';
-import { computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
+import { classifyRejectionReasons, computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
-import { log } from './utils.js';
+import { log, redactConnectionSecrets } from './utils.js';
+
+// Diagnostics only -- max rows actually printed to Railway logs per insert_batch call, so a batch
+// rejecting in the hundreds (see rejection_summary counts, which are never truncated) still produces
+// a bounded log line rather than one entry per rejected question.
+const REJECTION_LOG_SAMPLE_SIZE = 10;
+// Shared by every insertQuestions() caller (startup seed, refill, JSON import) so "pool.insert_batch"
+// always carries the same diagnostics shape, regardless of source. Never logs raw error objects or
+// connection details -- only the already-redacted reason strings classifyRejectionReasons bucketed,
+// plus the option text/category the question itself supplied.
+export const logRejectionDiagnostics = (event, rejected) => {
+  if (!rejected.length) return;
+  const summary = {};
+  for (const item of rejected) summary[item.rejectionType] = (summary[item.rejectionType] || 0) + 1;
+  log(`${event}.rejection_summary`, summary);
+  const sample = rejected.slice(0, REJECTION_LOG_SAMPLE_SIZE).map(item => ({
+    optionA: item.optionA, optionB: item.optionB, category: item.category,
+    rejectionType: item.rejectionType, rejectionReason: item.rejectionReason,
+  }));
+  log(`${event}.rejection_sample`, { sampleSize: sample.length, totalRejected: rejected.length, sample });
+};
 
 export class ContentPoolExhaustedError extends Error {
   constructor(message, details = {}) { super(message); this.code = 'CONTENT_POOL_EMPTY'; Object.assign(this, details); }
@@ -38,11 +58,19 @@ export const getPoolStats = async () => withClient(async client => {
 // collision (already in the pool, worded differently or not) is treated as a rejection too, via
 // the DB-level UNIQUE constraint -- the source of truth for "already have this" is the table
 // itself, not an in-memory snapshot that could go stale between refill batches.
+// A rejected-question diagnostics record never carries anything beyond what the caller itself
+// supplied (option text, category) plus a classified reason -- never a raw DB error object, a
+// connection string, or any credential/token.
+const rejectionRecord = (raw, reasons) => ({
+  question: raw, reasons,
+  optionA: raw?.optionA?.text ?? null, optionB: raw?.optionB?.text ?? null, category: raw?.category ?? null,
+  ...classifyRejectionReasons(reasons),
+});
 export const insertQuestions = async (rawQuestions, { sourceProvider = 'groq' } = {}) => withTransaction(async client => {
   const inserted = []; const rejected = [];
   for (const raw of rawQuestions) {
     const fields = computeInsertionFields(raw);
-    if (!fields.accepted) { rejected.push({ question: raw, reasons: fields.reasons }); continue; }
+    if (!fields.accepted) { rejected.push(rejectionRecord(raw, fields.reasons)); continue; }
     try {
       const { rows } = await client.query(
         `INSERT INTO wyr_questions
@@ -59,10 +87,11 @@ export const insertQuestions = async (rawQuestions, { sourceProvider = 'groq' } 
           fields.dedupeKey, fields.isFantasy, fields.hookScore, fields.qualityScore, fields.visualScore, sourceProvider],
       );
       if (rows.length) inserted.push(rows[0].id);
-      else rejected.push({ question: raw, reasons: ['duplicate of a question already in the pool'] });
-    } catch (error) { rejected.push({ question: raw, reasons: [error.message] }); }
+      else rejected.push(rejectionRecord(raw, ['duplicate of a question already in the pool']));
+    } catch (error) { rejected.push(rejectionRecord(raw, [redactConnectionSecrets(error.message)])); }
   }
   log('pool.insert_batch', { attempted: rawQuestions.length, inserted: inserted.length, rejected: rejected.length });
+  logRejectionDiagnostics('pool.insert_batch', rejected);
   return { inserted, rejected };
 });
 
