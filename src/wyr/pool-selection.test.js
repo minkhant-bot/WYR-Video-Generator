@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { arrangeForHook, buildPlanFromPoolRows, computeInsertionFields, contentFamilyForCategory, repairPlanForDuration, selectDiversePlan } from './pool-selection.js';
+import { arrangeForHook, buildPlanFromPoolRows, computeDilemmaRankScore, computeInsertionFields, contentFamilyForCategory, rankCandidatesByStrength, repairPlanForDuration, selectDiversePlan } from './pool-selection.js';
 import { estimateSceneDurationFromText, DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 
 let nextId = 1;
@@ -184,6 +184,46 @@ test('a weak hook is never selected over a stronger hook for scene 1', () => {
   ];
   const arranged = arrangeForHook(weakFirst);
   assert.equal(arranged[0].id, weakFirst[1].id);
+});
+
+test('rankCandidatesByStrength ranks a stronger WYR dilemma above a clearly weak one within the same LRU tier', () => {
+  const weak = row({ category: 'travel', a: 'One suitcase of belongings', b: 'A house full of memories', hookScore: 50 });
+  const strong = row({ category: 'lifestyle', a: 'Earn more but lose your weekends', b: 'Earn less and keep every weekend', hookScore: 50 });
+  const ranked = rankCandidatesByStrength([weak, strong]);
+  assert.equal(ranked[0].id, strong.id, 'the stronger real tradeoff should rank first when hook_score and LRU tier are tied');
+  assert.deepEqual(ranked.map(r => r.id).sort(), [weak.id, strong.id].sort(), 'ranking must never drop or duplicate a candidate');
+});
+
+test('rankCandidatesByStrength never mutates option text/search query fields', () => {
+  const original = row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', hookScore: 40 });
+  const snapshot = { ...original };
+  rankCandidatesByStrength([original]);
+  assert.deepEqual(original, snapshot, 'ranking must be read-only with respect to every row it is given');
+});
+
+test('rankCandidatesByStrength never lets a stronger-but-staler row jump ahead of a fresher (never-used) row -- LRU tier always wins first', () => {
+  const staleStrong = row({ category: 'lifestyle', a: 'Earn more but lose your weekends', b: 'Earn less and keep every weekend', hookScore: 90, lastUsedAt: '2020-01-01T00:00:00.000Z' });
+  const freshWeak = row({ category: 'travel', a: 'Visit Rome', b: 'Visit Cairo', hookScore: 10, lastUsedAt: null });
+  const ranked = rankCandidatesByStrength([staleStrong, freshWeak]);
+  assert.equal(ranked[0].id, freshWeak.id, 'a never-used row must still be offered before an already-used-more-recently row, regardless of strength');
+});
+
+test('rankCandidatesByStrength interleaves distinct tone buckets within a tier instead of clustering one tone at the top', () => {
+  const luxuryA = row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', hookScore: 60 });
+  const luxuryB = row({ category: 'luxury', a: 'Live in a mansion', b: 'Live in a penthouse', hookScore: 55 });
+  const funny = row({ category: 'funny hypothetical', a: 'Smell like garbage forever', b: 'Look ridiculous every day', hookScore: 20 });
+  const ranked = rankCandidatesByStrength([luxuryA, luxuryB, funny]);
+  // funny (tone: funny_absurd) has the lowest hook_score/strength of the three, so a pure
+  // strength-only sort would place it last -- interleaving-by-tone should pull it up to position 2
+  // (immediately after the single strongest row) rather than leaving both luxury rows clustered
+  // ahead of the only non-luxury tone present.
+  assert.equal(ranked[0].id, luxuryA.id);
+  assert.equal(ranked[1].id, funny.id, 'the only funny/absurd-tone row should be interleaved in right after the top row, not pushed to the back');
+});
+
+test('computeDilemmaRankScore combines the stored hook_score with the local strength bonus, and is exported for reuse', () => {
+  const r = row({ category: 'lifestyle', a: 'Earn more but lose your weekends', b: 'Earn less and keep every weekend', hookScore: 50 });
+  assert.ok(computeDilemmaRankScore(r) > Number(r.hook_score), 'a question with a recognizable tradeoff should score above its raw hook_score alone');
 });
 
 // Fixed production policy: every generated video uses exactly 6 questions/scenes. Six

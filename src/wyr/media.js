@@ -82,7 +82,13 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const bWinner = Number(question.optionB.percentage) > Number(question.optionA.percentage);
   const incomingDuration = index === 0 ? timing.initialEntranceDuration : timing.transitionSlideDuration;
   const slideDistance = (canvas.width + layout.imageWidth) / 2;
-  const incomingProgress = `clip(t/${incomingDuration},0,1)`;
+  // Ease-out (decelerate into place) instead of a constant-speed linear slide -- a purely cosmetic
+  // change to the shape of the existing entrance ramp (still starts at 0, still reaches exactly 1 at
+  // t=incomingDuration, still clipped/held at 1 afterward), so every already-settled frame this
+  // motion feeds into (image position, OR-circle position, percentage motion) is pixel-identical to
+  // before once the brief entrance window has passed. Restrained on purpose: no overshoot/bounce.
+  const rawIncomingProgress = `clip(t/${incomingDuration},0,1)`;
+  const incomingProgress = `(1-(1-${rawIncomingProgress})*(1-${rawIncomingProgress}))`;
   const outgoingProgress = `clip((t-${contentEnd})/${timing.transitionSlideDuration},0,1)`;
   const topMotion = `-${slideDistance}*(1-${incomingProgress})+${slideDistance}*${outgoingProgress}`;
   const bottomMotion = `${slideDistance}*(1-${incomingProgress})-${slideDistance}*${outgoingProgress}`;
@@ -90,12 +96,27 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const optionAlphaA = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
   const optionAlphaB = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
   const percentAlpha = activeAlpha({ start: revealTime, fadeIn: timing.percentageRevealDuration, end: contentEnd + timing.transitionSlideDuration, fadeOut: timing.transitionSlideDuration });
+  // Restrained "pop-in" emphasis: fontsize (a drawtext option ffmpeg re-evaluates every frame, same
+  // expression mechanism as the x/y motion above) ramps from slightly undersized up to the fitted
+  // size across the same short entrance window the image/box already uses, then holds exactly at
+  // baseSize -- so every already-tested static-frame read of rendered text size is unaffected once
+  // the brief entrance has passed. text_h/text_w-based centering (below) already reads the CURRENT
+  // frame's rendered size each frame, so no other formula needs to change for this to stay centered.
+  const popFontSize = (baseSize, start, popDuration, startScale) => `'round(${baseSize}*(${startScale}+${1 - startScale}*clip((t-${start})/${popDuration},0,1)))'`;
+  const optionFontSizeA = popFontSize(aFit.fontSize, optionEntranceStart, incomingDuration, 0.88);
+  const optionFontSizeB = popFontSize(bFit.fontSize, optionEntranceStart, incomingDuration, 0.88);
+  // Reveal "payoff": percentages pop in slightly OVERSIZED (118%) and settle to their normal size
+  // within a fifth of a second -- a quick "result hit" rather than the number simply appearing at
+  // rest. Purely a fontsize ramp layered onto the existing percentAlpha fade-in/out and motion; no
+  // new SFX, no change to revealTime/countdown sync, no added pause after the reveal.
+  const percentPopDuration = 0.22;
+  const percentFontSize = popFontSize(typography.percentageSize, revealTime, percentPopDuration, 1.18);
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0x19D8EE:x=${x}-4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0xF45A78:x=${x}+4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
     `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:borderw=7:bordercolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
-  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${typography.percentageSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
+  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${percentFontSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
   const filter = [
     ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a', crop: a.framing }),
     ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b', crop: b.framing }),
@@ -105,8 +126,8 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
     `color=c=black@0:s=${layout.orSize}x${layout.orSize}:r=${canvas.fps}:d=${duration},format=rgba,geq=r=0:g=0:b=0:a='if(lte((X-${layout.orSize / 2})*(X-${layout.orSize / 2})+(Y-${layout.orSize / 2})*(Y-${layout.orSize / 2}),${layout.orSize / 2}*${layout.orSize / 2}),255,0)'[orcircle]`,
     `[tmpb][orcircle]overlay=x=(W-w)/2:y=${canvas.height / 2}-${layout.orSize / 2}[withor]`,
     `[withor]${[
-      ...textLayer({ textFile: aText, fontSize: aFit.fontSize, x: `'${layout.textX}+${topMotion}'`, y: layout.topTextY, alphaExpression: optionAlphaA }),
-      ...textLayer({ textFile: bText, fontSize: bFit.fontSize, x: `'${layout.textX}+${bottomMotion}'`, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
+      ...textLayer({ textFile: aText, fontSize: optionFontSizeA, x: `'${layout.textX}+${topMotion}'`, y: layout.topTextY, alphaExpression: optionAlphaA }),
+      ...textLayer({ textFile: bText, fontSize: optionFontSizeB, x: `'${layout.textX}+${bottomMotion}'`, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
       percentLayer({ textFile: aPercentText, winner: aWinner, y: layout.topPercentageY, motion: topMotion }),
       percentLayer({ textFile: bPercentText, winner: bWinner, y: layout.bottomPercentageY, motion: bottomMotion }),
       `drawtext=fontfile=${font}:text='OR':fontsize=${typography.orSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2-5`,

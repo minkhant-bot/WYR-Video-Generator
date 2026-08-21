@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHookScore, computeQualityScore, computeVisualScore } from './scoring.js';
+import { computeDilemmaStrengthScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
 
 const question = (a, b, aq = 'red sports car', bq = 'private jet runway') => ({
   category: 'luxury',
@@ -55,4 +55,33 @@ test('sharply contrasting options score higher on hook than accepted-but-fairly-
 test('computeHookScore never returns a negative number', () => {
   const q = { category: 'superpowers', optionA: { text: 'Read every single stranger nearby mind', searchQuery: 'telepathy mind reading glow' }, optionB: { text: 'Turn completely invisible near every other person nearby', searchQuery: 'invisible person disappearing slowly' } };
   assert.ok(computeHookScore(q) >= 0);
+});
+
+test('computeDilemmaStrengthScore scores a real values tradeoff above two low-stakes near-equivalent choices', () => {
+  const strong = computeDilemmaStrengthScore('Earn more but lose your weekends', 'Earn less and keep every weekend');
+  const weak = computeDilemmaStrengthScore('One suitcase of belongings', 'A house full of memories');
+  assert.ok(strong > weak, `expected a real freedom-vs-money tradeoff to score above a mundane low-stakes pair, got strong=${strong} weak=${weak}`);
+});
+
+test('computeDilemmaStrengthScore rewards options landing on DIFFERENT axes over two options on the SAME axis', () => {
+  const crossAxis = computeDilemmaStrengthScore('Own a yacht', 'Keep every weekend off'); // status_luxury vs time
+  const sameAxis = computeDilemmaStrengthScore('Own a yacht', 'Own a private jet'); // status_luxury vs status_luxury
+  assert.ok(crossAxis > sameAxis, `expected a cross-axis tradeoff to score above two same-axis luxury options, got crossAxis=${crossAxis} sameAxis=${sameAxis}`);
+});
+
+test('computeDilemmaStrengthScore is never negative and returns 0 for a pair with no recognizable stake', () => {
+  assert.equal(computeDilemmaStrengthScore('Visit Rome', 'Visit Cairo'), 0);
+  assert.ok(computeDilemmaStrengthScore('', '') >= 0);
+});
+
+test('deriveToneBucket classifies a fantasy/superpower question as fantasy_surprising regardless of category flag vs lexicon hit', () => {
+  assert.equal(deriveToneBucket('Read minds', 'Turn invisible', true), 'fantasy_surprising');
+  assert.equal(deriveToneBucket('Fly everywhere', 'Teleport anywhere', false), 'fantasy_surprising');
+});
+
+test('deriveToneBucket classifies humor/absurd, high-consequence, and relatable/social pairs distinctly, and falls back to lifestyle_tradeoff otherwise', () => {
+  assert.equal(deriveToneBucket('Smell like garbage forever', 'Look ridiculous every day', false), 'funny_absurd');
+  assert.equal(deriveToneBucket('Lose your best friend forever', 'Move away permanently', false), 'high_consequence');
+  assert.equal(deriveToneBucket('Spend more time with family', 'Spend more time with friends', false), 'relatable_social');
+  assert.equal(deriveToneBucket('Visit Rome', 'Visit Cairo', false), 'lifestyle_tradeoff');
 });

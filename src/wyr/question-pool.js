@@ -1,5 +1,5 @@
 import { withClient, withTransaction } from './db.js';
-import { classifyRejectionReasons, computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
+import { classifyRejectionReasons, computeInsertionFields, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { log, redactConnectionSecrets } from './utils.js';
@@ -149,8 +149,12 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   // for THIS job -- never reserved, never sent to image search, never counted toward the final plan,
   // never marked 'used' -- exactly like the visual-feasibility filter above; selectDiversePlan below
   // never even sees it, so it naturally reaches for the next best 'ready' candidate instead.
-  const candidates = visuallyFeasible.filter(row => hasNaturalWording(row.option_a_text) && hasNaturalWording(row.option_b_text));
-  const wordingRejectedCount = visuallyFeasible.length - candidates.length;
+  const naturalWording = visuallyFeasible.filter(row => hasNaturalWording(row.option_a_text) && hasNaturalWording(row.option_b_text));
+  const wordingRejectedCount = visuallyFeasible.length - naturalWording.length;
+  // Prefer stronger eligible dilemmas first (see pool-selection.js's rankCandidatesByStrength):
+  // re-sorts WITHIN each LRU tier only, so a genuinely staler row never loses its fair-rotation
+  // priority to a fresher-but-weaker one -- weaker questions stay in the window, just later in it.
+  const candidates = rankCandidatesByStrength(naturalWording);
   const blockedMotifs = await recentMotifsFromDb(client);
   const result = selectDiversePlan(candidates, { count, blockedMotifs });
   if (!result) return null;
@@ -217,12 +221,15 @@ export const releaseQuestionReservation = async ({ jobId, poolId }) => {
 // current window, so the caller can stop and fail clearly instead of looping forever;
 // wordingRejectedCount is always reported so the caller can fold it into job-level diagnostics.
 export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, candidateWindowSize = 80 }) => withTransaction(async client => {
-  const { rows: candidates } = await client.query(
+  const { rows: rawCandidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready' AND NOT (id = ANY($1::bigint[]))
      ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
      LIMIT $2 FOR UPDATE SKIP LOCKED`,
     [excludeIds, candidateWindowSize],
   );
+  // Same strength-first re-rank as selectAndReservePlan above -- a replacement should prefer a
+  // stronger eligible dilemma too, not just whichever ready row happens to sort first on hook_score.
+  const candidates = rankCandidatesByStrength(rawCandidates);
   let wordingRejectedCount = 0;
   const candidate = candidates.find(row => {
     if (row.motif_key_a && inPlanMotifs.has(row.motif_key_a)) return false;

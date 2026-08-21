@@ -30,21 +30,36 @@ export const createFakeDb = () => {
       return { rows: [{ count: state.videos.size }] };
     }
     if (text.startsWith('INSERT INTO wyr_questions')) {
-      const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionBText, optionBSearchQuery, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider] = params;
+      // Column order must mirror question-pool.js's real INSERT exactly (17 columns, including the
+      // option_a_visual_subject/option_b_visual_subject pair added by migration 003) -- a stale,
+      // shorter destructure here silently shifts every param after option_a_search_query by two
+      // positions (e.g. hook_score would actually receive dedupe_key's string value), corrupting
+      // hook_score/is_fantasy/quality_score/visual_score/source_provider for every fake-db test
+      // without ever throwing, since JS destructuring past the real param list just yields extra
+      // undefineds rather than an error.
+      const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionAVisualSubject, optionBText, optionBSearchQuery, optionBVisualSubject, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider] = params;
       const existing = [...state.questions.values()].find(row => row.dedupe_key === dedupeKey);
       if (existing) return { rows: [] };
       const id = nextId++;
       state.questions.set(id, {
         id, category, content_family: contentFamily, motif_key: motifKey, motif_key_a: motifKeyA, motif_key_b: motifKeyB,
-        option_a_text: optionAText, option_a_search_query: optionASearchQuery, option_b_text: optionBText, option_b_search_query: optionBSearchQuery,
+        option_a_text: optionAText, option_a_search_query: optionASearchQuery, option_a_visual_subject: optionAVisualSubject,
+        option_b_text: optionBText, option_b_search_query: optionBSearchQuery, option_b_visual_subject: optionBVisualSubject,
         dedupe_key: dedupeKey, is_fantasy: isFantasy, hook_score: hookScore, quality_score: qualityScore, visual_score: visualScore,
         source_provider: sourceProvider, status: 'ready', used_count: 0, last_used_at: null, reserved_by_job: null, reserved_at: null,
       });
       return { rows: [{ id }] };
     }
     if (text.startsWith('SELECT * FROM wyr_questions')) {
-      const [limit] = params;
-      const ready = [...state.questions.values()].filter(row => row.status === 'ready')
+      // Two real callers share this prefix: selectAndReservePlan's plain candidate window (params =
+      // [limit]) and reserveReplacementQuestion's exclusion-aware window (params = [excludeIds,
+      // limit], SQL text includes "NOT (id = ANY(...)"). Reading params[0] as `limit` unconditionally
+      // would treat excludeIds itself as the limit for the second shape.
+      const excludesIds = text.includes('NOT (id = ANY(');
+      const [excludeIds, limitAfterExclude] = excludesIds ? params : [[], params[0]];
+      const limit = excludesIds ? limitAfterExclude : params[0];
+      const excluded = new Set(excludeIds);
+      const ready = [...state.questions.values()].filter(row => row.status === 'ready' && !excluded.has(row.id))
         .sort((left, right) => (left.last_used_at ? 1 : 0) - (right.last_used_at ? 1 : 0) || left.used_count - right.used_count || right.hook_score - left.hook_score || left.id - right.id);
       return { rows: ready.slice(0, limit) };
     }
@@ -58,7 +73,11 @@ export const createFakeDb = () => {
       return { rows };
     }
     if (text.startsWith("UPDATE wyr_questions SET status = 'reserved'")) {
-      const [jobId, ids] = params;
+      // Two real callers share this prefix: selectAndReservePlan's batch reservation (id = ANY($2::
+      // bigint[]), an array) and reserveReplacementQuestion's single-row reservation (id = $2, a
+      // scalar) -- normalize to an array either way instead of assuming the batch shape.
+      const [jobId, idsOrId] = params;
+      const ids = Array.isArray(idsOrId) ? idsOrId : [idsOrId];
       for (const id of ids) { const row = state.questions.get(id); if (row) { row.status = 'reserved'; row.reserved_by_job = jobId; row.reserved_at = new Date(); } }
       return { rows: [], rowCount: ids.length };
     }

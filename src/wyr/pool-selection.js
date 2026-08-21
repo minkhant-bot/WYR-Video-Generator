@@ -3,7 +3,7 @@
 // the result back) so the actual diversity/hook/fantasy rules are unit-testable without a
 // database, and reused identically by both insertion (refill) and selection (video generation).
 import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, questionMotifs } from './content-engine.js';
-import { computeHookScore, computeOpeningPsychologyScore, computeQualityScore, computeVisualScore } from './scoring.js';
+import { computeDilemmaStrengthScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
 
@@ -63,6 +63,66 @@ export const classifyRejectionReasons = (reasons = []) => {
   const rule = REJECTION_TYPE_RULES.find(candidate => list.some(reason => candidate.test(reason)));
   const rejectionReason = list.join('; ').slice(0, MAX_REJECTION_REASON_LENGTH);
   return { rejectionType: rule ? rule.type : 'other', rejectionReason };
+};
+
+// Re-ranks an already LRU-ordered candidate window (question-pool.js's SQL: last_used_at ASC NULLS
+// FIRST, used_count ASC, hook_score DESC, id ASC) so that among rows tied on LRU freshness -- true
+// for essentially every 'ready' row, since last_used_at/used_count are only ever set once a row
+// moves to 'used' (see question-pool.js) -- the stronger WYR dilemma leads. This is what makes
+// "reserve stronger eligible questions first" (see scoring.js's computeDilemmaStrengthScore) apply
+// to the WHOLE candidate window a job draws from, not just to picking Scene 1 out of an
+// already-selected set (arrangeForHook below does that separate, later step). Never reorders across
+// an LRU tier -- a genuinely staler row never loses its rotation priority to a fresher-but-weaker
+// one, so the existing consume-once/fair-rotation guarantee is unchanged; only same-tier ties are
+// broken by strength instead of the raw hook_score DESC/id ASC the SQL already used as its own
+// tiebreak. Weaker questions are never removed or reordered out of the window -- they simply sort
+// later, exactly as selectDiversePlan already expects from its input.
+const lastUsedAtMillis = row => (row.last_used_at ? new Date(row.last_used_at).getTime() : -Infinity);
+const lruTierKey = row => `${lastUsedAtMillis(row)}|${Number(row.used_count || 0)}`;
+
+// Round-robins an already strength-sorted group of same-LRU-tier rows across their tone buckets
+// (scoring.js's deriveToneBucket) instead of leaving them clustered by tone -- e.g. [luxury, luxury,
+// funny, luxury, consequence] becomes [luxury, funny, consequence, luxury, luxury]. Each bucket
+// keeps its own internal strength order; nothing is dropped, added, or ever blocked -- this only
+// changes WHICH of several equally-eligible rows selectDiversePlan's existing greedy walk happens to
+// consider earliest, so a video reaching for the top of the window naturally tends to land a mix of
+// tones (funny/absurd, high-consequence, relatable/social, fantasy, ordinary lifestyle tradeoffs)
+// instead of six near-identical-mood questions in a row, WHERE the current ready inventory offers
+// that variety. A window with only one tone present behaves identically to a plain sort (nothing to
+// interleave against).
+const interleaveByTone = rows => {
+  const buckets = new Map();
+  for (const row of rows) {
+    const tone = deriveToneBucket(row.option_a_text, row.option_b_text, Boolean(row.is_fantasy));
+    if (!buckets.has(tone)) buckets.set(tone, []);
+    buckets.get(tone).push(row);
+  }
+  const bucketArrays = [...buckets.values()];
+  const result = [];
+  for (let index = 0; result.length < rows.length; index += 1) {
+    for (const bucket of bucketArrays) if (bucket[index]) result.push(bucket[index]);
+  }
+  return result;
+};
+
+export const rankCandidatesByStrength = rows => {
+  const sorted = [...rows].sort((left, right) => {
+    const lastUsed = lastUsedAtMillis(left) - lastUsedAtMillis(right); if (lastUsed) return lastUsed;
+    const usedCount = Number(left.used_count || 0) - Number(right.used_count || 0); if (usedCount) return usedCount;
+    const strength = computeDilemmaRankScore(right) - computeDilemmaRankScore(left); if (strength) return strength;
+    return Number(left.id) - Number(right.id);
+  });
+  // Tone-interleave WITHIN each LRU tier only (see lruTierKey) -- never lets a rarer tone from a
+  // staler tier jump ahead of a fresher tier's rows, preserving the same fair-rotation guarantee the
+  // LRU/strength sort above already establishes.
+  const tiers = [];
+  for (const row of sorted) {
+    const key = lruTierKey(row);
+    const currentTier = tiers.at(-1);
+    if (!currentTier || currentTier.key !== key) tiers.push({ key, rows: [row] });
+    else currentTier.rows.push(row);
+  }
+  return tiers.flatMap(tier => interleaveByTone(tier.rows));
 };
 
 // Diversity selection over a candidate window of "ready" rows, already ordered least-recently-used
@@ -149,21 +209,22 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
   return { selected: working, swapped, projectedTotalSeconds, fits: projectedTotalSeconds <= targetTotalSeconds };
 };
 
-// Scene 1 opening rank = this row's already-stored hook_score (clarity/visual/concision, computed
-// once at insertion time -- see scoring.js's computeHookScore, never recomputed here) PLUS a fresh,
-// local psychology bonus computed from this row's own final option text (loss aversion,
+// A row's overall "WYR strength" rank = its already-stored hook_score (clarity/visual/concision,
+// computed once at insertion time -- see scoring.js's computeHookScore, never recomputed here) PLUS
+// a fresh, local strength bonus computed from this row's own option text (loss aversion,
 // status/luxury, freedom-vs-security, money-vs-time, comfort-vs-ambition, love-vs-success,
-// fantasy/power curiosity -- see computeOpeningPsychologyScore). Never calls Groq, never touches
-// the stored hook_score, never re-runs on the whole pool -- this only ranks the ALREADY-selected
-// final rows for one job to decide which one leads as Scene 1.
-const computeOpeningRankScore = row => Number(row.hook_score) + computeOpeningPsychologyScore(row.option_a_text, row.option_b_text);
+// humor/absurdity, lasting consequence, fantasy/power curiosity -- see
+// scoring.js's computeDilemmaStrengthScore). Never calls Groq, never touches the stored hook_score.
+// Exported so question-pool.js's selectAndReservePlan can use the SAME formula to prefer stronger
+// eligible questions when reserving from the candidate window, not just to rank Scene 1 below.
+export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text);
 
-// Scene 1 is the highest-priority slot: whichever selected question has the strongest opening rank
+// Scene 1 is the highest-priority slot: whichever selected question has the strongest dilemma rank
 // score leads, and the rest keep their diversity-selection order rather than being fully re-sorted
 // by score (a flat score sort would front-load every strong hook and let pacing collapse afterward).
 export const arrangeForHook = rows => {
   if (rows.length <= 1) return [...rows];
-  const strongest = rows.reduce((best, row) => computeOpeningRankScore(row) > computeOpeningRankScore(best) ? row : best, rows[0]);
+  const strongest = rows.reduce((best, row) => computeDilemmaRankScore(row) > computeDilemmaRankScore(best) ? row : best, rows[0]);
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 

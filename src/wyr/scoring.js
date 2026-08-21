@@ -64,14 +64,16 @@ export const computeHookScore = question => {
   return Math.max(0, Math.round(score));
 };
 
-// Deterministic, local (no Groq) lexicon of psychological tradeoff axes -- used ONLY to pick which
-// of an already-finalized set of questions leads as Scene 1 (see pool-selection.js's
-// arrangeForHook/computeOpeningRankScore). Deliberately keyword/regex-based, same spirit as
-// computeHookScore and content-engine.js's MOTIF_ALIAS_RULES: no fake stats, no manufactured
-// urgency, just recognizing when an option's own wording already carries a real psychological
-// stake (status/luxury, loss aversion, freedom vs security, money vs time, comfort vs ambition,
-// love/social vs success, rare benefit vs sacrifice, fantasy/power curiosity).
-const OPENING_PSYCHOLOGY_LEXICON = Object.freeze([
+// Deterministic, local (no Groq) lexicon of "WYR strength" tradeoff axes -- used both to rank
+// candidate questions when reserving from the Content Pool (question-pool.js's
+// selectAndReservePlan) and to pick which of an already-finalized set leads as Scene 1 (see
+// pool-selection.js's arrangeForHook/computeDilemmaRankScore). Deliberately keyword/regex-based,
+// same spirit as computeHookScore and content-engine.js's MOTIF_ALIAS_RULES: no fake stats, no
+// manufactured urgency, just recognizing when an option's own wording already carries a real
+// psychological stake (status/luxury, loss aversion, freedom vs security, money vs time, comfort vs
+// ambition, love/social vs success, rare benefit vs sacrifice, fantasy/power curiosity, humor/
+// absurdity, lasting consequence).
+const DILEMMA_STRENGTH_LEXICON = Object.freeze([
   { tag: 'status_luxury', test: /\b(yacht|mansion|penthouse|private\s+jet|jet|luxury|designer|five[- ]star|first[- ]class|sports\s*car|celebrity|famous|fame|billion(?:aire)?s?|private\s+island)\b/ },
   { tag: 'wealth', test: /\b(money|rich|wealth\w*|salary|income|paycheck|dollars?|cash|millions?)\b/ },
   { tag: 'freedom', test: /\b(freedom|free\s+time|no\s+boss|remote\s+work|travel\s+the\s+world|quit\s+your\s+job|retire\s+early|your\s+own\s+boss)\b/ },
@@ -82,27 +84,52 @@ const OPENING_PSYCHOLOGY_LEXICON = Object.freeze([
   { tag: 'love_social', test: /\b(love|family|friends?|partner|relationship|soulmate|marry|marriage)\b/ },
   { tag: 'loss', test: /\b(lose|losing|give\s+up|never\s+again|can.?t\s+go\s+back|risk\s+losing|only\s+once)\b/ },
   { tag: 'power_fantasy', test: /\b(superpower\w*|read\b.{0,15}\bminds?\b|invisib\w*|flying|fly\b|time\s+travel|teleport\w*|telepath\w*|mind[- ]reading)\b/ },
+  // Humor/absurdity -- a real WYR-comment-bait signal distinct from the "serious tradeoff" axes
+  // above: options that are gross, embarrassing, or silly tend to draw disagreement/reactions even
+  // when the stakes are low.
+  { tag: 'humor_absurd', test: /\b(smell\w*|gross|disgusting|embarrass\w*|awkward|ridiculous|silly|weird|farts?|burp\w*|naked|clown|toilet)\b/ },
+  // Lasting consequence -- distinct from "loss" (which is about giving something up): a choice that
+  // is explicitly permanent/irreversible/lifelong reads as higher-stakes than one that isn't.
+  { tag: 'consequence', test: /\b(permanent(?:ly)?|forever|rest\s+of\s+your\s+life|irreversibl\w*|can\s+never|never\s+again)\b/ },
 ]);
-const openingTagsForText = text => {
+const dilemmaTagsForText = text => {
   const normalized = String(text ?? '').toLowerCase();
   const tags = new Set();
-  for (const entry of OPENING_PSYCHOLOGY_LEXICON) if (entry.test.test(normalized)) tags.add(entry.tag);
+  for (const entry of DILEMMA_STRENGTH_LEXICON) if (entry.test.test(normalized)) tags.add(entry.tag);
   return tags;
 };
 
-// Scene-1 opening bonus for an already-accepted question: rewards options that each carry a
+// WYR strength bonus for an already-accepted question: rewards options that each carry a
 // recognizable psychological stake, and rewards it MORE when option A and option B land on
 // DIFFERENT axes -- a real values tradeoff (e.g. freedom vs security, comfort vs ambition) reads as
 // a harder, more identity-relevant decision than two options that are really "the same kind of
 // thing" twice (e.g. yacht vs jet, both just status/luxury). Capped and additive so it nudges,
-// rather than dominates, the existing hook_score it's combined with in pool-selection.js.
-export const computeOpeningPsychologyScore = (optionAText, optionBText) => {
-  const tagsA = openingTagsForText(optionAText);
-  const tagsB = openingTagsForText(optionBText);
+// rather than dominates, the existing hook_score it's combined with in pool-selection.js/
+// question-pool.js.
+export const computeDilemmaStrengthScore = (optionAText, optionBText) => {
+  const tagsA = dilemmaTagsForText(optionAText);
+  const tagsB = dilemmaTagsForText(optionBText);
   const allTags = new Set([...tagsA, ...tagsB]);
   const presenceBonus = Math.min(allTags.size, 4) * 10;
   const hasTagUniqueToA = [...tagsA].some(tag => !tagsB.has(tag));
   const hasTagUniqueToB = [...tagsB].some(tag => !tagsA.has(tag));
   const tradeoffBonus = hasTagUniqueToA && hasTagUniqueToB ? 20 : 0;
   return presenceBonus + tradeoffBonus;
+};
+
+// Coarse emotional-tone bucket for a question, reusing the SAME lexicon as computeDilemmaStrengthScore
+// (no separate tagging system to maintain) -- used only to encourage tone VARIETY across one video's
+// selected set (see pool-selection.js's rankCandidatesByStrength), never to reject or fabricate
+// questions. Five buckets, checked in priority order (most specific/surprising first) since a
+// question can trip more than one lexicon tag at once: a fantasy/superpower dilemma reads as
+// "surprising" regardless of any other tag it happens to also match; a gross/embarrassing one reads
+// as "funny" even if it also mentions e.g. money; "lifestyle_tradeoff" is the common default for the
+// large majority of ordinary WYR pairs that don't trip any of the more specific buckets.
+export const deriveToneBucket = (optionAText, optionBText, isFantasy = false) => {
+  const tags = new Set([...dilemmaTagsForText(optionAText), ...dilemmaTagsForText(optionBText)]);
+  if (isFantasy || tags.has('power_fantasy')) return 'fantasy_surprising';
+  if (tags.has('humor_absurd')) return 'funny_absurd';
+  if (tags.has('consequence') || tags.has('loss')) return 'high_consequence';
+  if (tags.has('love_social')) return 'relatable_social';
+  return 'lifestyle_tradeoff';
 };

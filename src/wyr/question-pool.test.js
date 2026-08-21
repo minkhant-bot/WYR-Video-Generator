@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
-import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, releaseStaleReservations, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
+import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, releaseStaleReservations, reserveReplacementQuestion, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -290,4 +290,23 @@ test('commitPlanUsage is idempotent: calling it twice for the same completed job
   assert.equal(afterSecond.ready, 8); assert.equal(afterSecond.total, 16);
   assert.equal(fake.state.videoQuestions.length, 8, 'no duplicate video/question links should be created');
   for (const [id, count] of usedCountsAfterFirst) assert.equal(fake.state.questions.get(id).used_count, count, `question ${id} used_count must not double-increment on a repeated commit`);
+}));
+
+test('reserveReplacementQuestion reserves exactly one ready question, excludes already-in-plan ids and motifs, and prefers a stronger eligible dilemma among ties', () => withFakeDb(async () => {
+  await insertQuestions([
+    question('travel', 'Own a small suitcase', 'Own a large suitcase'), // deliberately weak/low-stakes
+    question('lifestyle', 'Keep every weekend off', 'Earn a much bigger salary', 'weekend off calendar', 'salary money stack'), // real tradeoff
+  ]);
+  const excludeIds = [];
+  const result = await reserveReplacementQuestion({ jobId: 'job-replace-1', excludeIds, inPlanMotifs: new Set() });
+  assert.ok(result.candidate, 'expected a replacement candidate to be found');
+  assert.equal(result.candidate.option_a_text, 'Keep every weekend off', 'the stronger eligible dilemma should be preferred as the replacement');
+  assert.equal(await countReady(), 1, 'exactly one question must move out of ready');
+}));
+
+test('reserveReplacementQuestion excludes ids already in the plan and returns null when nothing eligible remains', () => withFakeDb(async () => {
+  const inserted = await insertQuestions([question('travel', 'Visit Rome', 'Visit Cairo')]);
+  const result = await reserveReplacementQuestion({ jobId: 'job-replace-2', excludeIds: inserted.inserted, inPlanMotifs: new Set() });
+  assert.equal(result.candidate, null);
+  assert.equal(await countReady(), 1, 'an excluded/no-match outcome must never reserve anything');
 }));

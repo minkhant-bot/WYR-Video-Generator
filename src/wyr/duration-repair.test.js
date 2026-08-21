@@ -5,7 +5,7 @@ import { insertQuestions, selectAndReservePlan, selectPlanForJob, countReady, Du
 import { selectContentPlan } from './content-source.js';
 import { estimateSceneDurationFromText, DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { createFakeDb } from './test-fake-db.js';
-import { computeOpeningPsychologyScore } from './scoring.js';
+import { computeDilemmaRankScore } from './pool-selection.js';
 
 const withFakeDb = async operation => {
   const fake = createFakeDb();
@@ -94,11 +94,11 @@ test('Scene 1 is the strongest hook among the POST-repair 8, not whichever quest
   assert.equal(plan.questions.length, 8);
 
   // Recover the real, DB-stored hook_score for every question actually in the final plan (i.e.
-  // the post-repair set) and confirm Scene 1 (index 0) is the one with the highest OPENING RANK
-  // SCORE among THOSE 8 -- hook_score (clarity/visual/concision) plus the local psychology bonus
-  // (see scoring.js's computeOpeningPsychologyScore, mirroring pool-selection.js's
-  // computeOpeningRankScore) -- not merely the highest raw hook_score, and not merely the highest
-  // among the original pre-repair 8, which duration repair may have partly swapped out.
+  // the post-repair set) and confirm Scene 1 (index 0) is the one with the highest DILEMMA RANK
+  // SCORE among THOSE 8 -- hook_score (clarity/visual/concision) plus the local strength bonus (see
+  // pool-selection.js's computeDilemmaRankScore) -- not merely the highest raw hook_score, and not
+  // merely the highest among the original pre-repair 8, which duration repair may have partly
+  // swapped out.
   const byText = new Map([...fake.state.questions.values()].map(row => [row.option_a_text, row]));
   const finalRows = plan.questions.map(q => byText.get(q.optionA.text));
   assert.ok(finalRows.every(Boolean), 'every plan question must be traceable back to a real pool row');
@@ -108,10 +108,9 @@ test('Scene 1 is the strongest hook among the POST-repair 8, not whichever quest
   const shortTexts = new Set(SHORT_QUESTIONS.map(q => q.optionA.text));
   assert.ok(finalRows.some(row => shortTexts.has(row.option_a_text)), 'expected duration repair to have swapped in at least one short question');
 
-  const openingRankScore = row => Number(row.hook_score) + computeOpeningPsychologyScore(row.option_a_text, row.option_b_text);
-  const highestOpeningRankScore = Math.max(...finalRows.map(openingRankScore));
+  const highestDilemmaRankScore = Math.max(...finalRows.map(computeDilemmaRankScore));
   const scene1Row = byText.get(plan.questions[0].optionA.text);
-  assert.equal(openingRankScore(scene1Row), highestOpeningRankScore, 'Scene 1 must carry the highest opening rank score (hook clarity + psychology signals) among the final, post-repair 8 questions');
+  assert.equal(computeDilemmaRankScore(scene1Row), highestDilemmaRankScore, 'Scene 1 must carry the highest dilemma rank score (hook clarity + strength signals) among the final, post-repair 8 questions');
 }));
 
 test('when no valid local substitute exists at all, selectAndReservePlan throws DurationBudgetExceededError (not CONTENT_POOL_EMPTY) and reserves nothing', () => withFakeDb(async fake => {
