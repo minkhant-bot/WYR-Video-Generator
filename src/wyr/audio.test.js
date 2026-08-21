@@ -16,20 +16,20 @@ test('narration reads only both choices, with no prompt prefix or percentages', 
   assert.equal(buildNarration({ optionA: { text: 'Would you rather stay in a luxury hotel' }, optionB: { text: 'Would you rather camp in the wilderness?' } }), 'Stay in a luxury hotel, or camp in the wilderness?');
 });
 test('voice generation writes one measured file per scene', async () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-')); try { const voiceovers = await generateVoiceovers({ plan, audioDir: dir, voice: 'en-US-AriaNeural', rate: '+0%', timeoutMs: 1000, ttsFactory: () => ({ call: async () => ({ data: Buffer.alloc(1200, 1), subtitles: [] }) }), measureDuration: async () => 4.25 }); assert.equal(voiceovers.length, 1); assert.equal(voiceovers[0].duration, 4.25); assert.ok(fs.statSync(voiceovers[0].localPath).size > 0); } finally { fs.rmSync(dir, { recursive: true, force: true }); } });
-test('narration wording is never altered, truncated, or regenerated no matter how long the real measured duration is, and the configured rate is always used as-is', async () => {
+test('narration wording is never altered, truncated, or regenerated no matter how long the real measured duration is, and only scene 1 gets the small opening rate bump', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-wording-'));
   try {
     const spokenTexts = [];
     const voiceovers = await generateVoiceovers({
       plan, audioDir: dir, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
-      ttsFactory: options => { assert.equal(options.rate, '-10%', 'the configured rate must be used verbatim -- no automatic compression'); return { call: async narration => { spokenTexts.push(narration); return { data: Buffer.alloc(1200, 1), subtitles: [] }; } }; },
+      ttsFactory: options => { assert.equal(options.rate, '-4%', 'scene 1 (the opening) must use the base rate plus the small deterministic opening bump'); return { call: async narration => { spokenTexts.push(narration); return { data: Buffer.alloc(1200, 1), subtitles: [] }; } }; },
       measureDuration: async () => 12.7, // deliberately long; must not trigger any rewording/speedup
     });
     const expectedNarration = buildNarration(plan.questions[0]);
     assert.deepEqual(spokenTexts, [expectedNarration], 'the exact text sent to TTS must be unchanged regardless of duration');
     assert.equal(voiceovers[0].narration, expectedNarration);
     assert.equal(voiceovers[0].duration, 12.7);
-    assert.equal(voiceovers[0].rate, '-10%');
+    assert.equal(voiceovers[0].rate, '-4%');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 test('voice generation enforces concurrency, uses independent clients, and preserves narration order', async () => {
@@ -117,7 +117,7 @@ test('different scenes are allowed different durations -- a long-narration scene
   assert.equal(durations.indexOf(Math.max(...durations)), 3);
 });
 
-test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), 6.5); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
+test('timeline never truncates narration and begins countdown 0.10s after measured speech ends', () => { const timeline = buildSceneTimeline({ voiceovers: [{ duration: 6.2 }], baseDuration: 7, voicePaddingSeconds: 1.5 }); const scene = timeline.scenes[0]; assert.ok(scene.duration >= 7.7); assert.ok(scene.voiceStart + scene.voiceDuration < scene.duration); assert.equal(Number(scene.narrationEnd.toFixed(6)), Number((scene.voiceStart + 6.2).toFixed(6))); assert.equal(Number(scene.countdownGap.toFixed(6)), 0.1); assert.equal(Number((scene.countdownStart - scene.narrationEnd).toFixed(6)), 0.1); assert.ok(scene.revealTime >= scene.voiceStart + scene.voiceDuration); });
 test('buildSceneTimeline never hard-fails an individual scene for being long -- there is no per-scene duration cap anymore', () => {
   // A single pathologically long 20s narration must NOT throw in isolation; whether the resulting
   // WHOLE-VIDEO total is safe is a separate, global decision made by pipeline.js.

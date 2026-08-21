@@ -3,7 +3,7 @@
 // the result back) so the actual diversity/hook/fantasy rules are unit-testable without a
 // database, and reused identically by both insertion (refill) and selection (video generation).
 import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, questionMotifs } from './content-engine.js';
-import { computeHookScore, computeQualityScore, computeVisualScore } from './scoring.js';
+import { computeHookScore, computeOpeningPsychologyScore, computeQualityScore, computeVisualScore } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
 
@@ -149,12 +149,21 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
   return { selected: working, swapped, projectedTotalSeconds, fits: projectedTotalSeconds <= targetTotalSeconds };
 };
 
-// Scene 1 is the highest-priority slot: whichever selected question has the strongest hook score
-// leads, and the rest keep their diversity-selection order rather than being fully re-sorted by
-// score (a flat score sort would front-load every strong hook and let pacing collapse afterward).
+// Scene 1 opening rank = this row's already-stored hook_score (clarity/visual/concision, computed
+// once at insertion time -- see scoring.js's computeHookScore, never recomputed here) PLUS a fresh,
+// local psychology bonus computed from this row's own final option text (loss aversion,
+// status/luxury, freedom-vs-security, money-vs-time, comfort-vs-ambition, love-vs-success,
+// fantasy/power curiosity -- see computeOpeningPsychologyScore). Never calls Groq, never touches
+// the stored hook_score, never re-runs on the whole pool -- this only ranks the ALREADY-selected
+// final rows for one job to decide which one leads as Scene 1.
+const computeOpeningRankScore = row => Number(row.hook_score) + computeOpeningPsychologyScore(row.option_a_text, row.option_b_text);
+
+// Scene 1 is the highest-priority slot: whichever selected question has the strongest opening rank
+// score leads, and the rest keep their diversity-selection order rather than being fully re-sorted
+// by score (a flat score sort would front-load every strong hook and let pacing collapse afterward).
 export const arrangeForHook = rows => {
   if (rows.length <= 1) return [...rows];
-  const strongest = rows.reduce((best, row) => Number(row.hook_score) > Number(best.hook_score) ? row : best, rows[0]);
+  const strongest = rows.reduce((best, row) => computeOpeningRankScore(row) > computeOpeningRankScore(best) ? row : best, rows[0]);
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 

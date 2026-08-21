@@ -26,6 +26,21 @@ const narrationPart = (text, lowercaseFirst = false) => {
 };
 export const buildNarration = question => `${narrationPart(question.optionA.text)}, or ${narrationPart(question.optionB.text, true)}?`;
 
+// Scene 1 gets a small, opening-only delivery nudge -- WHY: real platform analytics show retention
+// dropping hardest right at the open (Shorts: ~38% stayed, drop concentrated near the start), and
+// the same flat base rate that reads fine by scene 2-6 can feel a beat too deliberate exactly where
+// a viewer decides whether to keep watching. Scenes 2-6 keep the existing, already-approved base
+// rate untouched -- only the very first narration line gets synthesized slightly faster/tighter.
+// Kept small on purpose (still normally intelligible, never "unnaturally fast") and additive to
+// whatever base rate is configured, so a future base-rate retune still carries through unchanged.
+export const OPENING_TTS_RATE_BUMP_PERCENT = 6;
+export const bumpTtsRate = (rate, deltaPercent) => {
+  const match = /^([+-]?\d+(?:\.\d+)?)%$/.exec(String(rate ?? '').trim());
+  if (!match) return rate; // unrecognized rate format -- leave untouched rather than guess
+  const bumped = Number(match[1]) + deltaPercent;
+  return `${bumped >= 0 ? '+' : ''}${bumped}%`;
+};
+
 export const measureAudioDuration = async audioPath => {
   const output = await run(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath], 'measure narration duration', true);
   const duration = Number(output.trim());
@@ -52,6 +67,7 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
     // byte-size check) is exactly as much a TTS failure as an empty response and must be retried
     // the same way -- and `localPath` (the file the rest of the pipeline reads) is only ever
     // replaced once a candidate is FULLY verified.
+    const sceneRate = index === 0 ? bumpTtsRate(rate, OPENING_TTS_RATE_BUMP_PERCENT) : rate;
     const synthesizeAndMeasure = rateValue => retry(async attempt => {
       const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
       let result;
@@ -69,17 +85,24 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
 
     let duration;
     try {
-      duration = await synthesizeAndMeasure(rate);
+      duration = await synthesizeAndMeasure(sceneRate);
     } catch (error) {
       fs.rmSync(localPath, { force: true });
       throw new TtsGenerationError(`Narration for scene ${index + 1} could not be generated after bounded retries: ${error.message}`, { sceneIndex: index, cause: error });
     }
     completed += 1; onProgress?.(completed, plan.questions.length);
-    return { questionIndex: index, narration, filename, localPath, duration, voice, rate };
+    return { questionIndex: index, narration, filename, localPath, duration, voice, rate: sceneRate };
   });
 };
 
 const frameCeil = seconds => Math.ceil(seconds * WYR_TEMPLATE.canvas.fps) / WYR_TEMPLATE.canvas.fps;
+// Scene 1's narration starts almost immediately; every other scene keeps the existing, already-
+// approved 0.3s pre-narration pause. WHY: analytics show retention dropping hardest right at the
+// open, and images/option text are already visible essentially at t=0 (see media.js's
+// optionEntranceStart/initialEntranceDuration, unchanged) -- the only remaining "dead air" before
+// Option A is heard was this fixed pause, so only the opening scene's pause shrinks.
+const STANDARD_VOICE_START_SECONDS = 0.3;
+const OPENING_VOICE_START_SECONDS = 0.08;
 // tickCount/tickSpacingSeconds/revealGapAfterLastTickSeconds/finalSceneHoldSeconds all default from
 // config/audio-spec.json (via getAudioSpec()) rather than being hardcoded -- pass explicit values
 // only to override for a test or a one-off re-measurement.
@@ -98,7 +121,7 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
   let cursor = 0;
   const scenes = voiceovers.map((voiceover, index) => {
     const isLastScene = index === voiceovers.length - 1;
-    const voiceStart = 0.3;
+    const voiceStart = index === 0 ? OPENING_VOICE_START_SECONDS : STANDARD_VOICE_START_SECONDS;
     const narrationEnd = voiceStart + voiceover.duration;
     const countdownStart = narrationEnd + WYR_TEMPLATE.timing.countdownPauseAfterVoice;
     const countdownGap = countdownStart - narrationEnd;
