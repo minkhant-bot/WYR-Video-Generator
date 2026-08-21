@@ -22,24 +22,19 @@ const BLOCKED_CONTENT = /\b(politic(?:s|al)?|election|president|partisan|sexual|
 // literal photographic stand-in, is blocked here.
 const ABSTRACT_FINANCIAL_OBLIGATION_PATTERN = /\b(debts?|balances?|loans?|interest|fees?|fines?|mortgages?|bills?)\b/i;
 const ABSTRACT_ERASURE_VERB_PATTERN = /\b(erased|erase|erases|forgiven|forgive|forgives|forgave|cancell?ed|cancels?|wiped|wipes?|vanish(?:ed|es)?|disappear(?:ed|s)?)\b/i;
-// Four further categories of option text with no concrete, photographable real-world subject --
-// same "mechanical, testable heuristic" style as the rest of this file, added after live production
-// selected options like "Arrive knowing nothing", "Chew everything fifty times", and "Swallow
-// everything in seconds": none of these are financial (the pattern above doesn't cover them), but
-// none has a real-world visual subject a stock photo search could ever reliably represent either.
-// A camera can photograph a mansion, a dog, a beach -- it cannot photograph "everything", "knowing",
-// "fifty times", or "seconds".
-const VAGUE_REFERENCE_PATTERN = /\b(everything|nothing|anything|something|everyone|anyone|someone|nobody|everybody|anybody|somebody)\b/i;
-const MENTAL_STATE_PATTERN = /\b(knowing|knows?|knew|known|understand(?:s|ing)?|understood|realiz(?:e|es|ing|ed)|believ(?:e|es|ing|ed)|rememb(?:er|ers|ering|ered)|forg(?:et|ets|etting|ot|otten)|thinks?|thinking|thought|wonder(?:s|ing|ed)?)\b/i;
-const ARBITRARY_COUNT_PATTERN = /\b(\d+|once|twice|thrice|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\s+times\b/i;
-const TIMING_UNIT_PATTERN = /\b(seconds?|minutes?|hours?)\b/i;
+// NOTE: this used to also block a vague-pronoun-reference pattern (everything/nothing/anything/...),
+// an arbitrary-count pattern ("N times"), a timing-unit pattern (seconds/minutes/hours), and a
+// knowledge/mental-state-verb pattern (know/think/remember/forget/...). Real production import data
+// showed those four were rejecting the large majority of normal, usable questions (a 300-question
+// batch produced 0 insertions) -- ordinary options routinely and legitimately contain "today",
+// "forever", "instantly", "times", a plural pronoun, or a verb like "know"/"forget" (even
+// hand-curated seed-questions.js entries like "Know how you will die" and "Forget names every day"
+// were being rejected by the mental-state pattern), so all four were far too broad for what they
+// were meant to catch and have been removed. Only the financial-erasure combination below (still
+// narrow and low-frequency) remains.
 export const isNonPhotographableAbstractOption = text => {
   const value = String(text ?? '');
   if (ABSTRACT_FINANCIAL_OBLIGATION_PATTERN.test(value) && ABSTRACT_ERASURE_VERB_PATTERN.test(value)) return true;
-  if (VAGUE_REFERENCE_PATTERN.test(value)) return true;
-  if (MENTAL_STATE_PATTERN.test(value)) return true;
-  if (ARBITRARY_COUNT_PATTERN.test(value)) return true;
-  if (TIMING_UNIT_PATTERN.test(value)) return true;
   return false;
 };
 
@@ -47,16 +42,22 @@ export const isNonPhotographableAbstractOption = text => {
 // screens for a missing PHOTOGRAPHABLE SUBJECT, not for readable English). Catches sentence
 // fragments and run-on constructions a normal viewer would not instantly parse, mechanically and
 // structurally (same regex/pattern style as the rest of this file) rather than via a per-phrase
-// example list, so it generalizes past the specific bad options that motivated it (e.g. "Comfortable
-// for eighty years", "Spend freely grows"). Deliberately conservative: verified against every
-// seed-questions.js entry with zero false positives, since a strict gate here would incorrectly
-// starve the ready pool of normal, simple options.
-const FRAGMENT_BOUNDARY_WORDS = new Set(['a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'and', 'or', 'but', 'so', 'than', 'that', 'this', 'these', 'those', 'as', 'by', 'from', 'your', 'my', 'is', 'are', 'be', 'being', 'been', 'it']);
+// example list. Deliberately narrow and permissive -- verified against every seed-questions.js
+// entry with zero false positives, AND tuned down after real production import data showed the
+// original, broader trailing-word set was rejecting normal options too aggressively (a 300-question
+// batch produced 0 insertions). Hard-rejects only high-confidence breakage: a phrase visibly missing
+// its object (trailing "...for the"), a phrase that starts mid-sentence, a run-on splice of two
+// clauses, or a narrated past-tense headline -- never merely "unusual", "abstract", or "fantasy".
+const FRAGMENT_BOUNDARY_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'but', 'of', 'to', 'from', 'with', 'for']);
 const LEADING_FRAGMENT_WORDS = new Set(['and', 'or', 'but', 'so', 'because', 'although', 'while', 'of', 'to', 'than', 'then', 'yet']);
 const ADVERB_RUNON_EXCEPTIONS = new Set(['always', 'sometimes', 'outdoors', 'indoors', 'upstairs', 'downstairs', 'across', 'towards', 'yes', 'unless', 'less']);
 // Adjective suffixes chosen to avoid colliding with common verbs (deliberately excludes -ive/-ent/
 // -ant, which also end common verbs like "live", "arrive", "prevent", "want").
 const BARE_ADJECTIVE_OPENER = /^[a-z]+(?:able|ible|ful|ous)$/;
+// A bare deictic time-adverb trailing a past-tense verb reads as a narrated, already-happened
+// headline ("Savings doubled today"), not an actionable/choosable phrase -- distinct from "instantly"
+// or "forever", which read fine as the tail of an active option ("Turn invisible instantly").
+const TRAILING_NARRATED_PAST_ADVERBS = new Set(['today', 'yesterday', 'tonight', 'overnight', 'already', 'suddenly', 'recently', 'previously']);
 export const hasNaturalWording = text => {
   const value = String(text ?? '').trim();
   if (!value) return false;
@@ -70,6 +71,8 @@ export const hasNaturalWording = text => {
     const secondLast = words[words.length - 2];
     // Two clauses glued together with no conjunction, e.g. "Spend freely grows": [verb] [adverb] [verb].
     if (/ly$/.test(secondLast) && /(?:s|ed)$/.test(last) && last.length > 3 && !ADVERB_RUNON_EXCEPTIONS.has(last)) return false;
+    // A narrated past-tense statement, e.g. "Savings doubled today": [subject] [verb-ed] [today].
+    if (/ed$/.test(secondLast) && TRAILING_NARRATED_PAST_ADVERBS.has(last)) return false;
   }
   // A bare predicate adjective describing a duration instead of a concrete action/thing, e.g.
   // "Comfortable for eighty years" -- natural options open with a verb or a concrete noun phrase.
@@ -89,10 +92,9 @@ export const deriveVisualSubject = option => {
   if (provided) return provided;
   return String(option?.searchQuery ?? '').trim();
 };
-// The visual-feasibility gate: a resolved visualSubject must be non-empty and must not be made up
-// entirely of the same non-photographable categories isNonPhotographableAbstractOption already
-// screens display text for (vague reference, mental state, arbitrary count, timing, abstract
-// financial erasure) -- general categories, not a per-phrase dictionary, applied to whichever text
+// The visual-feasibility gate: a resolved visualSubject must be non-empty and must not match the
+// same narrow non-photographable category isNonPhotographableAbstractOption already screens display
+// text for (abstract financial erasure) -- applied to whichever text
 // (author-provided or derived) is actually going to reach image search.
 export const isVisualSubjectFeasible = visualSubject => {
   const value = String(visualSubject ?? '').trim();
