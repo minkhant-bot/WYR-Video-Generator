@@ -1,7 +1,7 @@
 import { withClient, withTransaction } from './db.js';
 import { computeInsertionFields, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
-import { isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
+import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { log } from './utils.js';
 
 export class ContentPoolExhaustedError extends Error {
@@ -110,10 +110,18 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   // if that still isn't feasible, the row is excluded here so selectDiversePlan/repairPlanForDuration
   // below simply never see it, and the existing "choose another ready question from this window"
   // machinery does the rest, with zero new reservation state and zero new DB round-trip.
-  const candidates = rawCandidates.filter(row =>
+  const visuallyFeasible = rawCandidates.filter(row =>
     !isNonPhotographableAbstractOption(row.option_a_text) && !isNonPhotographableAbstractOption(row.option_b_text)
     && isVisualSubjectFeasible(row.option_a_visual_subject || row.option_a_search_query)
     && isVisualSubjectFeasible(row.option_b_visual_subject || row.option_b_search_query));
+  // Second, independent re-validation pass: a 'ready' row may predate the general wording-quality
+  // gate (hasNaturalWording, added to assessQuestionQuality -- see content-engine.js) that now runs
+  // at insertion time. Re-checking here means an awkward/fragment-like legacy row is simply skipped
+  // for THIS job -- never reserved, never sent to image search, never counted toward the final plan,
+  // never marked 'used' -- exactly like the visual-feasibility filter above; selectDiversePlan below
+  // never even sees it, so it naturally reaches for the next best 'ready' candidate instead.
+  const candidates = visuallyFeasible.filter(row => hasNaturalWording(row.option_a_text) && hasNaturalWording(row.option_b_text));
+  const wordingRejectedCount = visuallyFeasible.length - candidates.length;
   const blockedMotifs = await recentMotifsFromDb(client);
   const result = selectDiversePlan(candidates, { count, blockedMotifs });
   if (!result) return null;
@@ -132,14 +140,16 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   );
   const distinctFamilies = new Set(selected.map(row => row.content_family)).size;
   const fantasyCount = selected.filter(row => row.is_fantasy).length;
-  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds });
-  return { selected, distinctFamilies, fantasyCount };
+  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds, wordingRejectedCount });
+  return { selected, distinctFamilies, fantasyCount, wordingRejectedCount };
 });
 
 export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
   const reservation = await selectAndReservePlan({ jobId, count, candidateWindowSize, baseDuration, targetTotalSeconds });
   if (!reservation) return null;
-  return buildPlanFromPoolRows(reservation.selected);
+  const plan = buildPlanFromPoolRows(reservation.selected);
+  plan.contentQuality.wordingRejectedCount = reservation.wordingRejectedCount;
+  return plan;
 };
 
 export const releaseReservation = async jobId => {
@@ -173,9 +183,10 @@ export const releaseQuestionReservation = async ({ jobId, poolId }) => {
 // selectAndReservePlan: two jobs racing for a replacement can never double-reserve the same row.
 // Re-enforces the same HARD diversity rules selectDiversePlan treats as non-negotiable (motif
 // dedup within this plan, fantasy cap) -- never the content-family cap, which selectDiversePlan
-// itself already treats as soft/relaxable when the candidate window is thin. Returns null (never
-// throws) when no valid replacement exists in the current window, so the caller can stop and fail
-// clearly instead of looping forever.
+// itself already treats as soft/relaxable when the candidate window is thin. Returns
+// { candidate: null, wordingRejectedCount } (never throws) when no valid replacement exists in the
+// current window, so the caller can stop and fail clearly instead of looping forever;
+// wordingRejectedCount is always reported so the caller can fold it into job-level diagnostics.
 export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, candidateWindowSize = 80 }) => withTransaction(async client => {
   const { rows: candidates } = await client.query(
     `SELECT * FROM wyr_questions WHERE status = 'ready' AND NOT (id = ANY($1::bigint[]))
@@ -183,6 +194,7 @@ export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPla
      LIMIT $2 FOR UPDATE SKIP LOCKED`,
     [excludeIds, candidateWindowSize],
   );
+  let wordingRejectedCount = 0;
   const candidate = candidates.find(row => {
     if (row.motif_key_a && inPlanMotifs.has(row.motif_key_a)) return false;
     if (row.motif_key_b && inPlanMotifs.has(row.motif_key_b)) return false;
@@ -192,15 +204,18 @@ export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPla
     if (isNonPhotographableAbstractOption(row.option_a_text) || isNonPhotographableAbstractOption(row.option_b_text)) return false;
     if (!isVisualSubjectFeasible(row.option_a_visual_subject || row.option_a_search_query)) return false;
     if (!isVisualSubjectFeasible(row.option_b_visual_subject || row.option_b_search_query)) return false;
+    // Same wording-quality re-validation as selectAndReservePlan above -- a replacement candidate
+    // gets no weaker a gate than the original plan did.
+    if (!hasNaturalWording(row.option_a_text) || !hasNaturalWording(row.option_b_text)) { wordingRejectedCount += 1; return false; }
     return true;
   });
-  if (!candidate) return null;
+  if (!candidate) return { candidate: null, wordingRejectedCount };
   await client.query(
     "UPDATE wyr_questions SET status = 'reserved', reserved_by_job = $1, reserved_at = now(), updated_at = now() WHERE id = $2",
     [jobId, candidate.id],
   );
-  log('pool.replacement_reserved', { jobId, replacedWithQuestionId: candidate.id });
-  return candidate;
+  log('pool.replacement_reserved', { jobId, replacedWithQuestionId: candidate.id, wordingRejectedCount });
+  return { candidate, wordingRejectedCount };
 });
 
 // The job store (jobs.js) is an in-memory Map with no reload-from-disk on startup, so a process

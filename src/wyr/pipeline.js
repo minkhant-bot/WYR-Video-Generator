@@ -234,6 +234,7 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
   let currentPlan = plan; let currentSelection = selection;
   const rejectedPoolIds = new Set();
   let attempts = 0;
+  let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
   while (currentSelection.selectedCount !== currentSelection.total && attempts < MAX_QUESTION_REPLACEMENT_ATTEMPTS) {
     const badIndex = [...unfilledQuestionIndexes(currentSelection)][0];
     const badQuestion = currentPlan.questions[badIndex];
@@ -248,7 +249,8 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     const otherQuestions = currentPlan.questions.filter((_, index) => index !== badIndex);
     const inPlanMotifs = new Set(otherQuestions.flatMap(question => questionMotifs(question)));
     const fantasyCapReached = otherQuestions.some(question => isFantasyQuestion(question));
-    const replacementRow = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached });
+    const { candidate: replacementRow, wordingRejectedCount: skippedForWording } = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached });
+    wordingRejectedCount += skippedForWording;
     if (!replacementRow) { log('content.question_replacement_unavailable', { jobId: job.id, questionIndex: badIndex, attempt: attempts }); break; }
     const replacementQuestion = rowToQuestion(replacementRow, badIndex);
     const nextQuestions = currentPlan.questions.map((question, index) => (index === badIndex ? replacementQuestion : question));
@@ -261,7 +263,7 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     currentSelection = { ...currentSelection, slots: nextSlots, selectedCount, unfilledDiagnostics };
     log('content.question_replaced', { jobId: job.id, questionIndex: badIndex, newPoolId: replacementRow.id, selectedCount, total: currentSelection.total, attempt: attempts });
   }
-  return { plan: currentPlan, selection: currentSelection };
+  return { plan: currentPlan, selection: currentSelection, attempts, wordingRejectedCount };
 };
 // Normal production entry point: selects config.questionCount diverse, pre-validated questions
 // straight from the PostgreSQL pool (see content-source.js) -- no live Groq call in the common
@@ -286,6 +288,8 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
       let selection = await selectImages({ plan, config });
+      let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
+      let imageReplacementAttempts = 0;
       if (selection.selectedCount !== selection.total) {
         // selectImages (createImageSelection) already ran its own bounded Tiers 2-5 gap-fill for
         // every slot that came out of its strict Tier-1 pass unfilled -- see image-picker.js's
@@ -297,15 +301,21 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         // replaceUnfillableQuestions above) rather than failing the whole job or ever accepting an
         // unrelated filler image.
         const result = await replaceUnfillableQuestions({ job, config, plan, selection, selectImages });
-        plan = result.plan; selection = result.selection;
+        plan = result.plan; selection = result.selection; imageReplacementAttempts = result.attempts; wordingRejectedCount = result.wordingRejectedCount;
       }
       if (selection.selectedCount !== selection.total) {
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
-        log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics });
-        const summary = `CONTENT_POOL_EXHAUSTED: Could not assemble ${config.questionCount} questions with ${selection.total} valid relevant images.`;
+        const unfilledQuestionCount = unfilledQuestionIndexes(selection).size;
+        const validQuestionsAssembled = plan.questions.length - unfilledQuestionCount;
+        log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics, wordingRejectedCount, imageReplacementAttempts });
+        const summary = `CONTENT_POOL_EXHAUSTED: Could not assemble ${config.questionCount} quality-valid questions with ${selection.total} relevant usable images.`;
+        // Concise, secret-free counters only -- never raw error messages/stacks from elsewhere in
+        // the job (those could carry a redacted-but-still-sensitive DB error; see
+        // redactConnectionSecrets/handleJobFailure) and never anything from config/credentials.
+        const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, replacement attempts used: ${imageReplacementAttempts}/${MAX_QUESTION_REPLACEMENT_ATTEMPTS}, valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}`;
         const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
-        const message = diagnosticsReport ? `${summary}\n\n${diagnosticsReport}` : summary;
-        throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics });
+        const message = [summary, diagnostics, diagnosticsReport].filter(Boolean).join('\n\n');
+        throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics, wordingRejectedCount, imageRejectedCount: imageReplacementAttempts, replacementAttemptsUsed: imageReplacementAttempts, validQuestionsAssembled, validImagesAssembled: selection.selectedCount });
       }
       await runJobPipeline({ job, store, config, preparedPlan: plan, selectionState: selection, poolReserved });
       const result = store.get(job.id);

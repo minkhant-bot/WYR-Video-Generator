@@ -43,6 +43,40 @@ export const isNonPhotographableAbstractOption = text => {
   return false;
 };
 
+// General wording-quality gate -- orthogonal to isNonPhotographableAbstractOption above (which
+// screens for a missing PHOTOGRAPHABLE SUBJECT, not for readable English). Catches sentence
+// fragments and run-on constructions a normal viewer would not instantly parse, mechanically and
+// structurally (same regex/pattern style as the rest of this file) rather than via a per-phrase
+// example list, so it generalizes past the specific bad options that motivated it (e.g. "Comfortable
+// for eighty years", "Spend freely grows"). Deliberately conservative: verified against every
+// seed-questions.js entry with zero false positives, since a strict gate here would incorrectly
+// starve the ready pool of normal, simple options.
+const FRAGMENT_BOUNDARY_WORDS = new Set(['a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'and', 'or', 'but', 'so', 'than', 'that', 'this', 'these', 'those', 'as', 'by', 'from', 'your', 'my', 'is', 'are', 'be', 'being', 'been', 'it']);
+const LEADING_FRAGMENT_WORDS = new Set(['and', 'or', 'but', 'so', 'because', 'although', 'while', 'of', 'to', 'than', 'then', 'yet']);
+const ADVERB_RUNON_EXCEPTIONS = new Set(['always', 'sometimes', 'outdoors', 'indoors', 'upstairs', 'downstairs', 'across', 'towards', 'yes', 'unless', 'less']);
+// Adjective suffixes chosen to avoid colliding with common verbs (deliberately excludes -ive/-ent/
+// -ant, which also end common verbs like "live", "arrive", "prevent", "want").
+const BARE_ADJECTIVE_OPENER = /^[a-z]+(?:able|ible|ful|ous)$/;
+export const hasNaturalWording = text => {
+  const value = String(text ?? '').trim();
+  if (!value) return false;
+  const words = value.toLowerCase().replace(/[^a-z0-9'\s]/g, '').split(/\s+/).filter(Boolean);
+  if (!words.length) return false;
+  const first = words[0]; const last = words[words.length - 1];
+  if (FRAGMENT_BOUNDARY_WORDS.has(last)) return false; // ends mid-phrase, e.g. trailing "...for the"
+  if (LEADING_FRAGMENT_WORDS.has(first)) return false; // starts mid-sentence, e.g. "Because you..."
+  if (words.some((word, index) => index > 0 && word === words[index - 1])) return false; // "the the"
+  if (words.length >= 3) {
+    const secondLast = words[words.length - 2];
+    // Two clauses glued together with no conjunction, e.g. "Spend freely grows": [verb] [adverb] [verb].
+    if (/ly$/.test(secondLast) && /(?:s|ed)$/.test(last) && last.length > 3 && !ADVERB_RUNON_EXCEPTIONS.has(last)) return false;
+  }
+  // A bare predicate adjective describing a duration instead of a concrete action/thing, e.g.
+  // "Comfortable for eighty years" -- natural options open with a verb or a concrete noun phrase.
+  if (BARE_ADJECTIVE_OPENER.test(first) && /\b(for|since)\b/.test(value.toLowerCase())) return false;
+  return true;
+};
+
 // The concrete, photographable description of what an option's image should show -- separate from
 // `text` (short punchy display wording) and `searchQuery` (the compressed provider search phrase).
 // Prefers an explicitly authored visualSubject (see content.js's Groq schema); falls back to
@@ -156,6 +190,7 @@ export const assessQuestionQuality = question => {
     const queryWords = queryWordCount(option?.searchQuery);
     if (queryWords < 2 || queryWords > 6) reasons.push(`option ${label} searchQuery must contain 2–6 concrete words`);
     if (isNonPhotographableAbstractOption(option?.text)) reasons.push(`option ${label} has no concrete, photographable real-world subject (abstract state change, vague reference, knowledge/mental state, arbitrary count, or timing concept)`);
+    if (!hasNaturalWording(option?.text)) reasons.push(`option ${label} reads as an awkward fragment or run-on, not simple natural English`);
     const visualSubject = deriveVisualSubject(option);
     if (!visualSubject) reasons.push(`option ${label} has no visualSubject or searchQuery to derive a visual target from`);
     else if (!isVisualSubjectFeasible(visualSubject)) reasons.push(`option ${label} visualSubject "${visualSubject}" has no concrete, photographable subject`);
