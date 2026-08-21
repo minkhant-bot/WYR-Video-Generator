@@ -40,6 +40,44 @@ const deriveSearchQuery = (text, category) => {
 };
 
 const isNonEmptyString = value => typeof value === 'string' && value.trim().length > 0;
+
+// Import-only category normalization. Real production import packs (Railway rejection diagnostics)
+// showed many otherwise-valid questions being rejected as invalid_format purely because the pack's
+// category label was a close naming variant of an existing canonical category (content.js's
+// CONTENT_CATEGORIES), not a genuinely different topic -- e.g. "lifestyle" for "dream lifestyle", or
+// different case ("Money" vs "money"). This NEVER adds a new category or changes what gets stored:
+// every alias here resolves to one of the 20 EXISTING CONTENT_CATEGORIES values, and only that
+// canonical string is ever written to the question. Deliberately narrow -- each entry is either the
+// exact same concept spelled differently, or (work/career -> freedom) the closest existing category
+// for a topic the canonical list has no dedicated bucket for; unrelated categories are never merged.
+const IMPORTED_CATEGORY_ALIASES = Object.freeze({
+  // Explicit aliases seen in real rejected import batches.
+  work: 'freedom', // job/career dilemmas -- closest existing bucket ("escape the 9-to-5", "retire early")
+  lifestyle: 'dream lifestyle', // same concept, missing the "dream" qualifier
+  relationships: 'friendship/social', // same concept, without the "/social" half of the canonical label
+  // Other obvious naming variants of an existing category found by inspecting the canonical list.
+  career: 'freedom',
+  social: 'friendship/social',
+  friendship: 'friendship/social',
+  technology: 'future technology',
+  tech: 'future technology',
+  home: 'dream homes',
+  homes: 'dream homes',
+  housing: 'dream homes',
+  car: 'cars',
+  survival: 'survival-lite',
+  funny: 'funny hypothetical',
+  hypothetical: 'funny hypothetical',
+  wealth: 'money',
+});
+const CANONICAL_CATEGORY_BY_LOWERCASE = new Map(CONTENT_CATEGORIES.map(category => [category.toLowerCase(), category]));
+// raw category -> canonical CONTENT_CATEGORIES value, or null if there is no safe canonical
+// equivalent (in which case the caller rejects it exactly as before, invalid_format, unchanged).
+const resolveCategory = rawCategory => {
+  if (!isNonEmptyString(rawCategory)) return null;
+  const key = rawCategory.trim().toLowerCase();
+  return CANONICAL_CATEGORY_BY_LOWERCASE.get(key) || IMPORTED_CATEGORY_ALIASES[key] || null;
+};
 // Diagnostics-only, best-effort text extraction from a raw (possibly malformed) pack entry -- raw
 // itself might not even be an object, and raw.optionA/optionB might not be strings (that is exactly
 // what normalizeImportedQuestion below is checking), so this never assumes the shape it failed to have.
@@ -56,8 +94,9 @@ export const MAX_REJECTED_DETAILS = 50;
 export const normalizeImportedQuestion = raw => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { accepted: false, reasons: ['entry must be a JSON object'] };
   const reasons = [];
+  const resolvedCategory = resolveCategory(raw.category);
   if (!isNonEmptyString(raw.category)) reasons.push('category must be a non-empty string');
-  else if (!CONTENT_CATEGORIES.includes(raw.category)) reasons.push(`category "${raw.category}" is not a recognized category`);
+  else if (!resolvedCategory) reasons.push(`category "${raw.category}" is not a recognized category`);
   if (!isNonEmptyString(raw.optionA)) reasons.push('optionA must be a non-empty string');
   else if (raw.optionA.length > 300) reasons.push('optionA is too long');
   if (!isNonEmptyString(raw.optionB)) reasons.push('optionB must be a non-empty string');
@@ -67,9 +106,9 @@ export const normalizeImportedQuestion = raw => {
   return {
     accepted: true,
     question: {
-      category: raw.category,
-      optionA: { text: optionAText, searchQuery: deriveSearchQuery(optionAText, raw.category) },
-      optionB: { text: optionBText, searchQuery: deriveSearchQuery(optionBText, raw.category) },
+      category: resolvedCategory,
+      optionA: { text: optionAText, searchQuery: deriveSearchQuery(optionAText, resolvedCategory) },
+      optionB: { text: optionBText, searchQuery: deriveSearchQuery(optionBText, resolvedCategory) },
     },
   };
 };
