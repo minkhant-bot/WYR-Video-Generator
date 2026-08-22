@@ -25,8 +25,13 @@
   <section id="result" class="result panel" hidden>
     <p class="eyebrow">VERIFIED OUTPUT</p>
     <h2 id="result-topic"></h2>
-    <a id="download" class="button" download>Download MP4</a>
     <video id="video" controls playsinline></video>
+    <div id="caption-block" class="caption-block" hidden>
+      <label for="caption-text" class="caption-label">Caption</label>
+      <textarea id="caption-text" class="caption-text" rows="3" readonly></textarea>
+      <button id="copy-caption" class="secondary" type="button">Copy caption</button>
+    </div>
+    <a id="download" class="button" download>Download MP4</a>
   </section>
 
   <section id="pool-panel" class="panel pool-panel">

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { writeJsonAtomic, log, redactConnectionSecrets } from './utils.js';
 import { assertProviderConfig } from './config.js';
 import { GroqContentProvider, addIllustrativePercentages } from './content.js';
-import { ContentHistoryStore, generateProductionPlan, isFantasyQuestion, questionMotifs } from './content-engine.js';
+import { buildShareCaption, ContentHistoryStore, generateProductionPlan, isFantasyQuestion, questionMotifs } from './content-engine.js';
 import { PexelsImageProvider, findAndDownloadImages, createImageReviewArtifacts, IMAGE_SELECTION_DEFAULTS, lockSelectedImageAssets } from './images.js';
 import { DuckDuckGoImageProvider } from './web-images.js';
 import { buildComposition, DurationVerificationError, renderVideo, verifyVideo } from './media.js';
@@ -136,7 +136,7 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
     const generated = preparedPlan ? null : await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
-    const plan = preparedPlan || addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 14 });
+    const plan = preparedPlan || addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 14 });
 
     const imageSelectionStarted = Date.now();
     // preparedAssets is set only by runAutomaticPipeline, which already ran selection AND download
@@ -206,7 +206,7 @@ export const prepareImageSelection = async ({ job, store, config }) => {
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
     const generated = await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
-    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+    const plan = addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 18 });
     update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
     const selection = await createImageSelection({ plan, config });
     update({ status: 'reviewing_images', stage: 'reviewing_images', progress: 35, selection });
@@ -373,7 +373,7 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
       let plan = await selectPlan({ job, config });
       poolReserved = true;
-      writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, progress: 18 });
+      writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 18 });
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
       let selection = await selectImages({ plan, config });
       let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
@@ -453,7 +453,7 @@ export const runFixturePipeline = async ({ job, store, config }) => {
     const plan = createFixturePlan(config.questionCount); const assets = await createFixtureAssets({ assetsDir: path.join(job.workspace, 'assets'), count: config.questionCount });
     if (assets.length !== config.questionCount * 2) throw new Error(`Fixture must contain ${config.questionCount * 2} images; found ${assets.length}.`);
     writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); writeJsonAtomic(path.join(job.workspace, 'assets.json'), assets);
-    update({ topic: plan.topic, progress: 40, status: 'building_timeline', stage: 'building_timeline' });
+    update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 40, status: 'building_timeline', stage: 'building_timeline' });
     buildComposition({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace });
     update({ status: 'rendering', stage: 'rendering', progress: 55 });
     const outputPath = await renderVideo({ plan, assets, duration: config.secondsPerQuestion, workspace: job.workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => update({ progress: 55 + Math.round(done / total * 40) }) });

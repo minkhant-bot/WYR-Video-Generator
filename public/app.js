@@ -4,6 +4,9 @@ const stage = document.querySelector('#stage');
 const percent = document.querySelector('#percent');
 const bar = document.querySelector('#bar');
 const errorBox = document.querySelector('#error');
+const captionBlock = document.querySelector('#caption-block');
+const captionText = document.querySelector('#caption-text');
+const copyCaptionButton = document.querySelector('#copy-caption');
 let job = null;
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -43,7 +46,13 @@ const poll = async () => {
     document.querySelector('#result-topic').textContent = job.topic;
     document.querySelector('#video').src = job.outputUrl;
     document.querySelector('#download').href = job.downloadUrl;
-    document.querySelector('#result').hidden = false;
+    if (job.caption) { captionText.value = job.caption; captionBlock.hidden = false; }
+    else { captionBlock.hidden = true; }
+    const result = document.querySelector('#result');
+    result.hidden = false;
+    // On a phone the result panel lands below the fold (hero + status sit above it) -- without
+    // this the video/caption/download are invisible until the user notices and scrolls manually.
+    result.scrollIntoView({ behavior: 'smooth', block: 'start' });
     // The Content Pool panel's ready/used counts change server-side the moment this job commits
     // its questions -- without this, the panel keeps showing whatever it last fetched (e.g. at
     // page load), silently stale until the user happens to hit "Refresh" themselves.
@@ -60,9 +69,13 @@ const poll = async () => {
 
 startButton.onclick = async () => {
   clearError();
+  document.querySelector('#result').hidden = true;
   try {
     startButton.disabled = true;
     status.hidden = false;
+    // Same reasoning as the result panel below: on a phone the status panel can start out below
+    // the fold, so the progress bar the user just triggered is easy to miss without this.
+    status.scrollIntoView({ behavior: 'smooth', block: 'start' });
     job = await request('/api/jobs', { method: 'POST' });
     renderStatus(job);
     await poll();
@@ -73,6 +86,28 @@ startButton.onclick = async () => {
     // failed job must never leave the user stuck unable to try again.
     startButton.disabled = false;
   }
+};
+
+// navigator.clipboard.writeText requires a secure context (HTTPS or localhost) -- this app is
+// commonly opened from a phone over the LAN by plain http://, where navigator.clipboard is simply
+// undefined. Falls back to select()+execCommand('copy') (works in an insecure context for a
+// focused, selected field) so "Copy caption" still works on that phone/http path, not just when
+// served over https.
+copyCaptionButton.onclick = async () => {
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(captionText.value); copied = true; }
+  } catch { /* fall through to the legacy fallback below */ }
+  if (!copied) {
+    try {
+      captionText.focus(); captionText.select();
+      copied = document.execCommand('copy');
+    } catch { copied = false; }
+  }
+  const originalLabel = copyCaptionButton.textContent;
+  copyCaptionButton.textContent = copied ? 'Copied!' : 'Select the text above to copy';
+  copyCaptionButton.classList.toggle('copied', copied);
+  setTimeout(() => { copyCaptionButton.textContent = originalLabel; copyCaptionButton.classList.remove('copied'); }, 1800);
 };
 
 // Mobile-only Content Pool panel: reads/refills the PostgreSQL question pool via the admin

@@ -26,6 +26,11 @@ progress{width:100%;height:14px;accent-color:#6d8cff}
 .error{border:1px solid #7a3040;background:#35151d;color:#ffb7c4;padding:12px;border-radius:10px;margin:18px 0}
 .result{display:grid;gap:14px;margin-top:24px}
 .result video{width:min(360px,100%);aspect-ratio:9/16;border-radius:12px;background:#000}
+.caption-block{display:grid;gap:8px;width:min(360px,100%)}
+.caption-label{font-size:12px;font-weight:700;color:#b8bfd0}
+.caption-text{width:100%;resize:vertical;border-radius:10px;border:1px solid #30364a;background:#0e1119;color:inherit;padding:11px 12px;font:inherit;font-size:14px;line-height:1.5}
+#copy-caption{width:100%}
+#copy-caption.copied{background:#2f7a4f}
 .pool-panel{margin-top:24px;max-width:420px}
 .pool-stats{display:flex;gap:20px;margin:10px 0}
 .pool-stats div{display:flex;flex-direction:column}

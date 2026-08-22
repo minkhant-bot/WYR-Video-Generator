@@ -267,6 +267,19 @@ export const deriveTopic = questions => {
   return categories.length ? `Would You Rather: ${categories.join(', ')}` : 'Would You Rather';
 };
 
+// Auto-generated social caption, built locally from Scene 1's own option text -- no Groq/LLM call.
+// Scene 1 is whichever question already leads plan.questions (pool-selection.js's arrangeForHook
+// already put the strongest hook_score question there for DB-pool plans; unchanged for a
+// Groq-generated plan, where index 0 is just whatever order generation produced) -- this only
+// formats that question's real text, never re-selects or rewrites it. Every video previously
+// shared the exact same generic caption regardless of content; this makes each video's caption
+// reflect its own actual opening dilemma instead.
+export const buildShareCaption = questions => {
+  const first = questions?.[0];
+  if (!first?.optionA?.text || !first?.optionB?.text) return null;
+  return `${first.optionA.text} or ${first.optionB.text}? 👀\n#wouldyourather #thisorthat #pickone`;
+};
+
 export class ContentGenerationError extends Error {}
 export class ContentRateLimitError extends ContentGenerationError {
   constructor(message, { acceptedCount, requiredCount, retries, waitedMs } = {}) { super(message); this.code = 'groq_rate_limit_exceeded'; this.acceptedCount = acceptedCount; this.requiredCount = requiredCount; this.retries = retries; this.waitedMs = waitedMs; }
