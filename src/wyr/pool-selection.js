@@ -213,11 +213,20 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
 // computed once at insertion time -- see scoring.js's computeHookScore, never recomputed here) PLUS
 // a fresh, local strength bonus computed from this row's own option text (loss aversion,
 // status/luxury, freedom-vs-security, money-vs-time, comfort-vs-ambition, love-vs-success,
-// humor/absurdity, lasting consequence, fantasy/power curiosity -- see
-// scoring.js's computeDilemmaStrengthScore). Never calls Groq, never touches the stored hook_score.
-// Exported so question-pool.js's selectAndReservePlan can use the SAME formula to prefer stronger
-// eligible questions when reserving from the candidate window, not just to rank Scene 1 below.
-export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text);
+// curiosity, identity/self-comparison, humor/absurdity, lasting consequence, fantasy/power curiosity
+// -- see scoring.js's computeDilemmaStrengthScore). Never calls Groq, never touches the stored
+// hook_score. Exported so question-pool.js's selectAndReservePlan can use the SAME formula to
+// prefer stronger eligible questions when reserving from the candidate window, not just to rank
+// Scene 1 below.
+//
+// The live strength bonus is weighted above 1x (DILEMMA_STRENGTH_WEIGHT) because hook_score is a
+// STALE, concision/visual-legibility-only proxy computed once at insertion time -- it has no notion
+// of whether a pair is an actually strong, felt tradeoff versus a merely short, mundane one (e.g.
+// "wear a hat indoors forever" is exactly as concise/legible as a genuinely charged dilemma). Upweighting
+// the live, content-aware score keeps hook_score's readability signal in the mix while stopping it
+// from single-handedly deciding Scene 1 for a dismissible pair.
+const DILEMMA_STRENGTH_WEIGHT = 1.6;
+export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text) * DILEMMA_STRENGTH_WEIGHT;
 
 // Scene 1 is the highest-priority slot: whichever selected question has the strongest dilemma rank
 // score leads, and the rest keep their diversity-selection order rather than being fully re-sorted

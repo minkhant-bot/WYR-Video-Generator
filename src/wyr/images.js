@@ -162,6 +162,50 @@ const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|l
 const GENERIC_TECH_ABSTRACTION_PATTERN = /\b(cloud icon|upload icon|download icon|gear icon|network icon|circuit board|abstract technology|digital network|data flow|binary code|matrix code|generic technology|tech background|futuristic background|abstract background|glowing network|node network|connection lines|abstract data|generic diagram|flowchart|pie chart|bar chart|symbol only|isolated symbol|generic symbol)\b/i;
 const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation)\b/i;
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|fantasy art|concept art|digital art|3d render|artwork|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
+
+// Ranking-only semantic signal (see computeSemanticRankAdjustment below): folded ONLY into
+// finalScore, which never appears in a rejectionReasons check -- accepted/hardRejected keep
+// depending exclusively on relevanceScore/coreCoverage/dominantCoverage/intentCoverage/
+// spendSaveConflict, exactly as before. This never rejects a technically-valid candidate; it only
+// changes which already-valid candidate wins sortPool's ordering (image-picker.js), addressing
+// "technically valid but semantically weak/misleading" picks (a flower/cat/nature photo for an
+// unrelated wardrobe/accessory option, a generic arrow graphic for "rewind time") without touching
+// any acceptance threshold.
+const GENERIC_OFFTOPIC_NATURE_PATTERN = /\b(flower\w*|floral|petal\w*|blossom\w*|bouquet|leaf|leaves|foliage|houseplant|succulent)\b/;
+const GENERIC_ANIMAL_PATTERN = /\b(cat|kitten|kitty|dog|puppy|bird|birds|wildlife|squirrel|butterfly|rabbit|bunny)\b/;
+const GENERIC_ARROW_SYMBOL_PATTERN = /\b(arrow|arrows|directional\s+sign|road\s+sign)\b/;
+const ABSTRACT_METAPHOR_PATTERN = /\b(abstract|conceptual|metaphor\w*|symbolic)\b/;
+const HUMAN_EVIDENCE_PATTERN = /\b(person|people|man|men|woman|women|girl|boy|human|couple|friends|family|group)\b/;
+const GROUP_EVIDENCE_PATTERN = /\b(friends|group|team|together|couple|crowd|people)\b/;
+const PHOTOGRAPHIC_EVIDENCE_PATTERN = /\b(photo|photograph|photography|candid)\b/;
+const NON_PHOTOGRAPHIC_EVIDENCE_PATTERN = /\b(render|rendering|cgi|digital\s+art|3d\s+model|painting|drawing)\b/;
+// Verbs whose CORE meaning is a visible human action -- when the option itself asks for one of
+// these, a candidate that actually shows a person doing it is a stronger, more immediately-
+// recognizable match than an equally "on-keyword" object-only or scenery-only shot.
+const HUMAN_ACTION_VERBS = new Set(['wear', 'wears', 'wearing', 'ride', 'rides', 'riding', 'cycle', 'cycles', 'cycling', 'walk', 'walks', 'walking', 'dance', 'dances', 'dancing', 'hug', 'hugs', 'hugging', 'kiss', 'kisses', 'kissing', 'hold', 'holds', 'holding', 'carry', 'carries', 'carrying', 'drive', 'drives', 'driving', 'swim', 'swims', 'swimming', 'run', 'runs', 'running', 'sing', 'sings', 'singing', 'eat', 'eats', 'eating', 'drink', 'drinks', 'drinking']);
+// Explicit multi-person context: an option naming friends/family/group/together implies the
+// candidate should show more than one person, not a single isolated subject.
+const GROUP_CONTEXT_WORDS = new Set(['friends', 'friend', 'family', 'group', 'team', 'together', 'crowd', 'partner', 'couple']);
+const computeSemanticRankAdjustment = (optionWords, searchableText) => {
+  let adjustment = 0;
+  // Off-topic filler imagery (flowers, generic animals, arrows, abstract/metaphorical art) is only
+  // penalized when the OPTION's own words never actually call for it, so a genuine "explore a
+  // garden"/"pet a cat"/"rewind time" (if ever literally about an arrow) option is unaffected.
+  if (GENERIC_OFFTOPIC_NATURE_PATTERN.test(searchableText) && !optionWords.some(word => GENERIC_OFFTOPIC_NATURE_PATTERN.test(word))) adjustment -= 22;
+  if (GENERIC_ANIMAL_PATTERN.test(searchableText) && !optionWords.some(word => GENERIC_ANIMAL_PATTERN.test(word))) adjustment -= 22;
+  if (GENERIC_ARROW_SYMBOL_PATTERN.test(searchableText) && !optionWords.some(word => GENERIC_ARROW_SYMBOL_PATTERN.test(word))) adjustment -= 18;
+  if (ABSTRACT_METAPHOR_PATTERN.test(searchableText) && !optionWords.some(word => ABSTRACT_METAPHOR_PATTERN.test(word))) adjustment -= 14;
+  // Human action / recognizable-subject and group-context bonuses.
+  if (optionWords.some(word => HUMAN_ACTION_VERBS.has(word)) && HUMAN_EVIDENCE_PATTERN.test(searchableText)) adjustment += 12;
+  if (optionWords.some(word => GROUP_CONTEXT_WORDS.has(word))) adjustment += GROUP_EVIDENCE_PATTERN.test(searchableText) ? 12 : -10;
+  // Mild photographic-realism preference: illustration/fantasy-art is handled elsewhere and never
+  // hard-rejected for fantasy content -- this only nudges a real photo above an otherwise-equal
+  // render/CGI/painting result.
+  if (PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment += 6;
+  else if (NON_PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment -= 6;
+  return adjustment;
+};
+
 export const PEXELS_MINIMUM_QUALITY = 72;
 const MAX_RANKED_CANDIDATES = 8;
 export const IMAGE_SELECTION_DEFAULTS = Object.freeze({ providerOrder: ['DuckDuckGo Images', 'Pexels'], minimumWidth: 750, minimumHeight: 450, pexelsQualityThreshold: PEXELS_MINIMUM_QUALITY, maxRankedCandidates: MAX_RANKED_CANDIDATES, minimumFinalScore: 62, minimumCandidateMargin: 4 });
@@ -330,7 +374,12 @@ export const assessImageCandidate = (candidate, option) => {
   const visualImpact = clampScore(30 + Math.min(36, impactMatches * 9) + cropFit * 16 + resolution * 18 - (weakVisual ? 34 : 0) - (corporateWeak ? 18 : 0));
   const wyrSuitability = clampScore(conceptClarity * 0.42 + specificity * 0.28 + visualImpact * 0.2 + cropFit * 10);
   const qualityScore = clampScore(conceptClarity * 0.34 + specificity * 0.28 + visualImpact * 0.2 + wyrSuitability * 0.18);
-  const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30);
+  // semanticRankAdjustment (see computeSemanticRankAdjustment above) is folded ONLY into finalScore,
+  // the ranking composite sortPool (image-picker.js) sorts by first -- it never appears in
+  // rejectionReasons/accepted, so this cannot loosen or tighten what counts as a valid candidate,
+  // only which already-valid candidate wins ordering.
+  const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText);
+  const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30 + semanticRankAdjustment);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
   if (dominantSubjectWords.length && dominantCoverage < 0.5) rejectionReasons.push(`candidate does not show the option's dominant subject (${dominantSubjectWords.join(' ')}); matched only ${dominantMatched.join(', ') || 'none'}`);

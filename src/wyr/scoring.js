@@ -79,7 +79,12 @@ const DILEMMA_STRENGTH_LEXICON = Object.freeze([
   { tag: 'wealth', test: /\b(money|rich|wealth\w*|salary|income|paycheck|dollars?|cash|millions?)\b/ },
   { tag: 'freedom', test: /\b(freedom|free\s+time|no\s+boss|remote\s+work|travel\s+the\s+world|quit\s+your\s+job|retire\s+early|your\s+own\s+boss)\b/ },
   { tag: 'security', test: /\b(stable\s+job|job\s+security|steady\s+paycheck|safety\s+net|guaranteed|health\s+insurance|savings)\b/ },
-  { tag: 'time', test: /\b(weekends?|vacation|time\s+off|forever|every\s+(?:single\s+)?day)\b/ },
+  // NOTE: bare "forever" was deliberately removed from this axis (and from `consequence` below) --
+  // it's boilerplate WYR phrasing present on a large majority of Content Pool rows regardless of
+  // actual stakes (see seed-questions.js/pack-import fixtures), so keeping it as a free match here
+  // let a merely-concise, low-stakes pair (e.g. "wear a hat indoors forever" vs "wear sunglasses at
+  // night forever") pick up the same tag presence as a genuinely time/consequence-driven dilemma.
+  { tag: 'time', test: /\b(weekends?|vacation|time\s+off|every\s+(?:single\s+)?day)\b/ },
   { tag: 'comfort', test: /\b(comfort\w*|relax\w*|cozy|easy\s+life)\b/ },
   { tag: 'ambition', test: /\b(dream\s+job|career|success\w*|achieve\w*|hustle|ambition\w*|productive|productivity)\b/ },
   { tag: 'love_social', test: /\b(love|family|friends?|partner|relationship|soulmate|marry|marriage)\b/ },
@@ -91,8 +96,27 @@ const DILEMMA_STRENGTH_LEXICON = Object.freeze([
   { tag: 'humor_absurd', test: /\b(smell\w*|gross|disgusting|embarrass\w*|awkward|ridiculous|silly|weird|farts?|burp\w*|naked|clown|toilet)\b/ },
   // Lasting consequence -- distinct from "loss" (which is about giving something up): a choice that
   // is explicitly permanent/irreversible/lifelong reads as higher-stakes than one that isn't.
-  { tag: 'consequence', test: /\b(permanent(?:ly)?|forever|rest\s+of\s+your\s+life|irreversibl\w*|can\s+never|never\s+again)\b/ },
+  { tag: 'consequence', test: /\b(permanent(?:ly)?|rest\s+of\s+your\s+life|irreversibl\w*|can\s+never|never\s+again)\b/ },
+  // Curiosity -- a mystery/reveal/twist hook draws viewers in on its own, independent of whether the
+  // underlying stakes are also high (e.g. money/loss/consequence).
+  { tag: 'curiosity', test: /\b(secret\w*|mystery|mysterious|hidden|unknown|discover\w*|reveal\w*|surpris\w*|unexpected|twist)\b/ },
+  // Identity/self-comparison -- an option framed relative to OTHER people (smarter/richer/more
+  // attractive than everyone, your friends, your family) reads as a harder, more self-relevant
+  // choice than the same trait framed in isolation.
+  { tag: 'identity_comparison', test: /\b(everyone\s+else|than\s+(?:everyone|your\s+(?:friends|family|partner))|smarter\s+than|richer\s+than|more\s+attractive|better[ -]looking|most\s+successful)\b/ },
 ]);
+// Low-stakes wardrobe/grooming/daily-habit nouns and mild-annoyance phrasing -- the concrete root
+// cause behind a merely-concise pair (e.g. "wear a hat indoors" vs "wear sunglasses at night")
+// out-scoring a genuinely strong dilemma on hook_score's length/concision proxies alone (see
+// computeHookScore). These read as easy-to-dismiss, not a real felt tradeoff, so a pair whose ONLY
+// lexicon coverage happens to come via one of these words is capped rather than credited as if it
+// carried the same stake as a genuine luxury/loss/consequence tag.
+const MUNDANE_LIFESTYLE_PATTERN = /\b(hat|cap|beanie|sunglasses|glasses|socks|sandals|slippers|pajamas|jacket|sweater|scarf|umbrella|backpack|earrings|bracelet|haircut|hairstyle|ponytail|indoors|barefoot|wristwatch|toothbrush|shoelaces)\b/;
+const MILD_INCONVENIENCE_PATTERN = /\b(wait\s+in\s+line|stand\s+in\s+line|slow\s+wifi|slow\s+internet|cold\s+coffee|traffic\s+jam|small\s+talk|awkward\s+silence|itchy|squeaky|static\s+cling|lint\s+roller|hiccups?|mosquito\s+bites?|off[- ]key|out\s+of\s+tune)\b/;
+const isMundaneLowStakes = text => {
+  const normalized = String(text ?? '').toLowerCase();
+  return MUNDANE_LIFESTYLE_PATTERN.test(normalized) || MILD_INCONVENIENCE_PATTERN.test(normalized);
+};
 const dilemmaTagsForText = text => {
   const normalized = String(text ?? '').toLowerCase();
   const tags = new Set();
@@ -146,7 +170,12 @@ export const computeDilemmaStrengthScore = (optionAText, optionBText) => {
   const hasTagUniqueToB = [...tagsB].some(tag => !tagsA.has(tag));
   const tradeoffBonus = hasTagUniqueToA && hasTagUniqueToB ? 20 : 0;
   const visualizabilityPenalty = computeVisualizabilityPenalty(optionAText, optionBText);
-  return Math.max(0, presenceBonus + tradeoffBonus - visualizabilityPenalty);
+  // Belt-and-suspenders alongside removing bare "forever" from the lexicon above: if BOTH options
+  // are low-stakes wardrobe/grooming/daily-habit/mild-annoyance choices, cap the score back down
+  // even if one side incidentally also matched a real tag (e.g. via an unrelated filler word), so a
+  // dismissible pair never out-ranks a genuine tradeoff purely on lexicon coincidence.
+  const mundanePenalty = isMundaneLowStakes(optionAText) && isMundaneLowStakes(optionBText) ? 15 : 0;
+  return Math.max(0, presenceBonus + tradeoffBonus - visualizabilityPenalty - mundanePenalty);
 };
 
 // Coarse emotional-tone bucket for a question, reusing the SAME lexicon as computeDilemmaStrengthScore
