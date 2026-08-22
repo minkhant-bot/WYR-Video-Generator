@@ -1,7 +1,7 @@
 export const WYR_TEMPLATE = Object.freeze({
   canvas: Object.freeze({ width: 1080, height: 1920, fps: 30 }),
   timing: Object.freeze({
-    defaultSceneDuration: 7,
+    defaultSceneDuration: 5,
     initialEntranceDuration: 0.4,
     orEntrance: 0,
     orEntranceDuration: 0.01,
@@ -15,7 +15,7 @@ export const WYR_TEMPLATE = Object.freeze({
     // hardcoded here -- the old 3-cue "3, 2, 1" countdown was replaced by a tick-train countdown.
     countdownFadeDuration: 0.06,
     transitionOutStart: 6.18,
-    revealHoldDuration: 1.438,
+    revealHoldDuration: 1.5,
     transitionSfxLead: 0.145,
     transitionOutDuration: 0.5,
     transitionSlideDuration: 0.2,
