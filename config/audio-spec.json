@@ -22,8 +22,8 @@
     "measuredGapRangeSeconds": [0.64, 0.735]
   },
   "transitions": {
-    "blankDurationSeconds": 0.2,
-    "blankDurationSecondsNote": "Overridden after production review found the raw reference measurement below (~0.45s, frame-ceiled to 0.4667s) felt too slow as a freeze-hold gap. 0.2s frame-ceils exactly (6 frames @ 30fps) and keeps the same freeze-frame mechanism (see media.js's buildFreezeGapSegment) -- only the duration changed.",
+    "blankDurationSeconds": 0,
+    "blankDurationSecondsNote": "Set to 0: the freeze-gap segment (media.js's buildFreezeGapSegment) is now redundant rather than removed outright -- scene N+1's entrance is baked directly into scene N's own segment tail as a single overlapping crossover transition (see media.js renderSegment's incoming-overlay block), so by the time scene N's segment ends, scene N+1's content is already fully in place. A freeze-gap hold afterward would just add unwanted extra dead time on top of an already-complete transition. Previously 0.2s; history kept here for context, not as a fallback value.",
     "sceneIntervalSeconds": 8.35,
     "method": "video scaled to 48x86 grayscale at 20fps, raw dump; spatial variance computed per frame; frames with variance below 1.3x the 5th percentile flagged as blank; consecutive blank frames grouped into runs",
     "canonicalReading": "topThirdOnly",

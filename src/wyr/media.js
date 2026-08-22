@@ -62,17 +62,28 @@ export const buildStillImageInputArgs = (localPath, fps = WYR_TEMPLATE.canvas.fp
   if (!Number.isFinite(fps) || fps <= 0) throw new TypeError('Still-image input requires a positive frame rate.');
   return ['-i', localPath];
 };
-const renderSegment = async ({ question, assets, index, duration, timeline, renderDir, ffmpegThreads }) => {
+const renderSegment = async ({ question, nextQuestion = null, assets, index, duration, timeline, renderDir, ffmpegThreads }) => {
   const a = assets.find(asset => asset.questionIndex === index && asset.slot === 'A'); const b = assets.find(asset => asset.questionIndex === index && asset.slot === 'B');
   if (!a || !b) throw new Error(`Missing render assets for question ${index + 1}.`);
+  // Next scene's assets, fetched here (only when a next scene exists) so this segment can render
+  // the incoming half of the crossover transition in its own tail -- see the incoming-overlay block
+  // below. Does not affect anything about scene N+1's OWN eventual segment/assets/text.
+  const na = nextQuestion ? assets.find(asset => asset.questionIndex === index + 1 && asset.slot === 'A') : null;
+  const nb = nextQuestion ? assets.find(asset => asset.questionIndex === index + 1 && asset.slot === 'B') : null;
+  if (nextQuestion && (!na || !nb)) throw new Error(`Missing render assets for question ${index + 2}.`);
   const font = assertFontAvailable();
   const measureText = createTextMeasurer({ renderDir, font, namespace: `q${String(index + 1).padStart(2, '0')}` });
   const [aFit, bFit] = await Promise.all([fitOptionText({ text: question.optionA.text, measureText }), fitOptionText({ text: question.optionB.text, measureText })]);
+  const [naFit, nbFit] = nextQuestion
+    ? await Promise.all([fitOptionText({ text: nextQuestion.optionA.text, measureText }), fitOptionText({ text: nextQuestion.optionB.text, measureText })])
+    : [null, null];
   const prefix = path.join(renderDir, `q${index + 1}`); const aText = `${prefix}-a.txt`; const bText = `${prefix}-b.txt`; const aPercentText = `${prefix}-a-percent.txt`; const bPercentText = `${prefix}-b-percent.txt`;
   fs.writeFileSync(aText, aFit.text); fs.writeFileSync(bText, bFit.text);
   fs.writeFileSync(aPercentText, question.optionA.percentage == null ? '' : `${question.optionA.percentage}%`);
   fs.writeFileSync(bPercentText, question.optionB.percentage == null ? '' : `${question.optionB.percentage}%`);
   writeJsonAtomic(`${prefix}-layout.json`, { optionA: aFit, optionB: bFit, textBox: { width: WYR_TEMPLATE.layout.textWidth, height: WYR_TEMPLATE.layout.textHeight } });
+  let naText = null; let nbText = null;
+  if (nextQuestion) { naText = `${prefix}-next-a.txt`; nbText = `${prefix}-next-b.txt`; fs.writeFileSync(naText, naFit.text); fs.writeFileSync(nbText, nbFit.text); }
   const { canvas, layout, timing, typography } = WYR_TEMPLATE;
   const output = path.join(renderDir, `segment-${String(index).padStart(2, '0')}.mp4`);
   const contentEnd = timeline?.contentEnd ?? Math.min(timing.transitionOutStart, duration - timing.transitionOutDuration);
@@ -80,43 +91,42 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const answerEnd = Math.min(revealTime, contentEnd);
   const aWinner = Number(question.optionA.percentage) >= Number(question.optionB.percentage);
   const bWinner = Number(question.optionB.percentage) > Number(question.optionA.percentage);
-  const incomingDuration = index === 0 ? timing.initialEntranceDuration : timing.transitionSlideDuration;
   const slideDistance = (canvas.width + layout.imageWidth) / 2;
-  // Ease-out (decelerate into place) instead of a constant-speed linear slide -- a purely cosmetic
-  // change to the shape of the existing entrance ramp (still starts at 0, still reaches exactly 1 at
-  // t=incomingDuration, still clipped/held at 1 afterward), so every already-settled frame this
-  // motion feeds into (image position, OR-circle position, percentage motion) is pixel-identical to
-  // before once the brief entrance window has passed. Restrained on purpose: no overshoot/bounce.
-  // Scene 1 (index 0) is the platform's auto-thumbnail frame (frame 0 of the whole render), so it
-  // must never start mid-slide: rawIncomingProgress is pinned to 1 for the entire scene instead of
-  // ramping from 0, meaning topMotion/bottomMotion are already 0 at t=0 -- both images and both
-  // option texts sit in their final on-screen position, full opacity, from the very first frame.
-  // Scene 2+ transitions (transitionSlideDuration) and every timing constant are untouched.
-  const rawIncomingProgress = index === 0 ? '1' : `clip(t/${incomingDuration},0,1)`;
+  // Every scene now starts already fully arrived: its real entrance no longer happens inside its
+  // own segment at all -- it happens inside the PREVIOUS scene's tail (see the incoming-overlay
+  // block below), mirrored against that scene's own outgoing slide so the two visually cross paths
+  // "at the same time" in one ~transitionSlideDuration window instead of a slide-out, a blank hold,
+  // then a separate slide-in. rawIncomingProgress is therefore pinned to 1 unconditionally
+  // (previously index===0 only) -- topMotion/bottomMotion are 0 for a scene's entire duration.
+  const rawIncomingProgress = '1';
   const incomingProgress = `(1-(1-${rawIncomingProgress})*(1-${rawIncomingProgress}))`;
   const outgoingProgress = `clip((t-${contentEnd})/${timing.transitionSlideDuration},0,1)`;
   const topMotion = `-${slideDistance}*(1-${incomingProgress})+${slideDistance}*${outgoingProgress}`;
   const bottomMotion = `${slideDistance}*(1-${incomingProgress})-${slideDistance}*${outgoingProgress}`;
-  const optionEntranceStart = index === 0 ? -0.01 : 0;
+  // Incoming overlay (non-final scenes only): scene N+1's images/text slide INTO the same slots,
+  // reusing outgoingProgress itself (not a new expression) so the two motions can never drift apart
+  // -- this scene's content and the next scene's content cross paths over the exact same window.
+  // Visible from the instant the outgoing slide begins (contentEnd) through the rest of this
+  // segment, so scene N+1's own segment (already fully arrived from ITS frame 0, see above) picks
+  // up in the same end state this segment finishes in -- the hard cut at the concat boundary is
+  // invisible because both sides already agree on it.
+  const nextTopMotion = `-${slideDistance}*(1-${outgoingProgress})`;
+  const nextBottomMotion = `${slideDistance}*(1-${outgoingProgress})`;
+  const nextAlpha = activeAlpha({ start: contentEnd, fadeIn: 0.01, end: duration + 1, fadeOut: 0.01 });
+  const optionEntranceStart = -0.01;
   const optionAlphaA = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
   const optionAlphaB = activeAlpha({ start: optionEntranceStart, fadeIn: 0.01, end: answerEnd, fadeOut: timing.percentageRevealDuration });
   const percentAlpha = activeAlpha({ start: revealTime, fadeIn: timing.percentageRevealDuration, end: contentEnd + timing.transitionSlideDuration, fadeOut: timing.transitionSlideDuration });
-  // Restrained "pop-in" emphasis: fontsize (a drawtext option ffmpeg re-evaluates every frame, same
-  // expression mechanism as the x/y motion above) ramps from slightly undersized up to the fitted
-  // size across the same short entrance window the image/box already uses, then holds exactly at
-  // baseSize -- so every already-tested static-frame read of rendered text size is unaffected once
-  // the brief entrance has passed. text_h/text_w-based centering (below) already reads the CURRENT
-  // frame's rendered size each frame, so no other formula needs to change for this to stay centered.
+  // Option text is now at full fitted size from frame 0 for every scene (no entrance pop-in left to
+  // ramp against, per rawIncomingProgress above) -- a plain number instead of a t-based expression.
+  const optionFontSizeA = aFit.fontSize;
+  const optionFontSizeB = bFit.fontSize;
   const popFontSize = (baseSize, start, popDuration, startScale) => `'round(${baseSize}*(${startScale}+${1 - startScale}*clip((t-${start})/${popDuration},0,1)))'`;
-  // Scene 1 (index 0) is frame 0 of the whole render (see rawIncomingProgress above) -- option text
-  // must be at its full fitted size there too, not mid-pop, so startScale is 1 (no ramp at all) for
-  // index 0 instead of the usual 0.88 undersized start. Scene 2+ keep the existing pop-in unchanged.
-  const optionFontSizeA = popFontSize(aFit.fontSize, optionEntranceStart, incomingDuration, index === 0 ? 1 : 0.88);
-  const optionFontSizeB = popFontSize(bFit.fontSize, optionEntranceStart, incomingDuration, index === 0 ? 1 : 0.88);
   // Reveal "payoff": percentages pop in slightly OVERSIZED (118%) and settle to their normal size
   // within a fifth of a second -- a quick "result hit" rather than the number simply appearing at
   // rest. Purely a fontsize ramp layered onto the existing percentAlpha fade-in/out and motion; no
-  // new SFX, no change to revealTime/countdown sync, no added pause after the reveal.
+  // new SFX, no change to revealTime/countdown sync, no added pause after the reveal. Unrelated to
+  // the entrance changes above -- unchanged.
   const percentPopDuration = 0.22;
   const percentFontSize = popFontSize(typography.percentageSize, revealTime, percentPopDuration, 1.18);
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
@@ -128,21 +138,29 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   const filter = [
     ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a', crop: a.framing }),
     ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b', crop: b.framing }),
+    ...(nextQuestion ? buildFramedImageChain({ input: '2:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'naimg', chainId: 'na', crop: na.framing }) : []),
+    ...(nextQuestion ? buildFramedImageChain({ input: '3:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'nbimg', chainId: 'nb', crop: nb.framing }) : []),
     `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
+    ...(nextQuestion ? [
+      `[tmpb][naimg]overlay=x='(W-w)/2+${nextTopMotion}':y=${layout.topImageY}:format=auto[tmpna]`,
+      `[tmpna][nbimg]overlay=x='(W-w)/2+${nextBottomMotion}':y=${layout.bottomImageY}:format=auto[tmpnb]`,
+    ] : []),
     `color=c=black@0:s=${layout.orSize}x${layout.orSize}:r=${canvas.fps}:d=${duration},format=rgba,geq=r=0:g=0:b=0:a='if(lte((X-${layout.orSize / 2})*(X-${layout.orSize / 2})+(Y-${layout.orSize / 2})*(Y-${layout.orSize / 2}),${layout.orSize / 2}*${layout.orSize / 2}),255,0)'[orcircle]`,
-    `[tmpb][orcircle]overlay=x=(W-w)/2:y=${canvas.height / 2}-${layout.orSize / 2}[withor]`,
+    `[${nextQuestion ? 'tmpnb' : 'tmpb'}][orcircle]overlay=x=(W-w)/2:y=${canvas.height / 2}-${layout.orSize / 2}[withor]`,
     `[withor]${[
       ...textLayer({ textFile: aText, fontSize: optionFontSizeA, x: `'${layout.textX}+${topMotion}'`, y: layout.topTextY, alphaExpression: optionAlphaA }),
       ...textLayer({ textFile: bText, fontSize: optionFontSizeB, x: `'${layout.textX}+${bottomMotion}'`, y: layout.bottomTextY, alphaExpression: optionAlphaB }),
       percentLayer({ textFile: aPercentText, winner: aWinner, y: layout.topPercentageY, motion: topMotion }),
       percentLayer({ textFile: bPercentText, winner: bWinner, y: layout.bottomPercentageY, motion: bottomMotion }),
+      ...(nextQuestion ? textLayer({ textFile: naText, fontSize: naFit.fontSize, x: `'${layout.textX}+${nextTopMotion}'`, y: layout.topTextY, alphaExpression: nextAlpha }) : []),
+      ...(nextQuestion ? textLayer({ textFile: nbText, fontSize: nbFit.fontSize, x: `'${layout.textX}+${nextBottomMotion}'`, y: layout.bottomTextY, alphaExpression: nextAlpha }) : []),
       `drawtext=fontfile=${font}:text='OR':fontsize=${typography.orSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2-5`,
       'setrange=limited,format=yuv420p[out]',
     ].join(',')}`,
   ].join(';');
-  const stillInputs = [a, b].flatMap(asset => buildStillImageInputArgs(asset.localPath, canvas.fps));
+  const stillInputs = [a, b, ...(nextQuestion ? [na, nb] : [])].flatMap(asset => buildStillImageInputArgs(asset.localPath, canvas.fps));
   const encode = getAudioSpec().encode;
   // 'veryfast', not 'ultrafast': x264's ultrafast preset forces cabac=0, which makes High profile
   // physically impossible -- libx264 silently downgrades to Constrained Baseline regardless of
@@ -226,7 +244,8 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
   let completed = 0;
   return mapWithConcurrency(plan.questions, sceneConcurrency, async (question, index) => {
     const scene = timeline?.scenes[index]; const sceneDuration = scene?.duration ?? duration;
-    const segment = await renderScene({ question, assets, index, duration: sceneDuration, timeline: scene, renderDir, ffmpegThreads });
+    const nextQuestion = plan.questions[index + 1] ?? null;
+    const segment = await renderScene({ question, nextQuestion, assets, index, duration: sceneDuration, timeline: scene, renderDir, ffmpegThreads });
     completed += 1; onProgress?.(completed, plan.questions.length); return segment;
   });
 };

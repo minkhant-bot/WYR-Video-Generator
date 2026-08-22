@@ -190,16 +190,27 @@ export const buildCountdownSchedule = timeline => {
   return { version: 1, ticksPerScene: timeline.tickCount ?? timeline.scenes[0]?.countdown.length, eventCount: events.length, events };
 };
 
+// The scene-N whoosh timestamp (scene N's own contentEnd - transitionSfxLead). Scene N+1's 'slide'
+// now lands on this exact same absolute timestamp instead of its own scene.start -- media.js bakes
+// scene N+1's visual entrance into scene N's own segment tail (a single crossover transition, both
+// scenes' content moving over the same window), so the two SFX belong on that one moment together,
+// not on two separate movements ~0.85s apart. Scene 0 has no predecessor, so it keeps 'slide' at
+// its own start (there is no earlier scene's whoosh to land on).
+const whooshTimestamp = scene => scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead;
+const slideEventTimestamp = (timeline, sceneIndex) =>
+  sceneIndex === 0 ? timeline.scenes[0].start : whooshTimestamp(timeline.scenes[sceneIndex - 1]);
+
 // Every scene gets 'slide' (entrance) and 'reveal'; only non-final scenes get 'whoosh' -- the final
 // scene skips its outgoing transition entirely (see buildSceneTimeline's isLastScene handling).
 export const buildSfxSchedule = timeline => {
   if (!Array.isArray(timeline?.scenes) || timeline.scenes.length === 0) throw new Error('A scene timeline is required to schedule SFX.');
   const events = timeline.scenes.flatMap((scene, sceneIndex) => {
+    const slideTimestamp = slideEventTimestamp(timeline, sceneIndex);
     const sceneEvents = [
-      { sceneIndex, type: 'slide', sceneTime: 0, timestamp: scene.start },
+      { sceneIndex, type: 'slide', sceneTime: slideTimestamp - scene.start, timestamp: slideTimestamp },
       { sceneIndex, type: 'reveal', sceneTime: scene.revealTime, timestamp: scene.start + scene.revealTime },
     ];
-    if (!scene.isLastScene) sceneEvents.push({ sceneIndex, type: 'whoosh', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead });
+    if (!scene.isLastScene) sceneEvents.push({ sceneIndex, type: 'whoosh', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: whooshTimestamp(scene) });
     return sceneEvents;
   }).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
   assertCompleteSfxSchedule({ timeline, events });
@@ -217,7 +228,7 @@ export const assertCompleteSfxSchedule = ({ timeline, events }) => {
     for (const type of expectedTypes) {
       const matching = sceneEvents.filter(event => event.type === type);
       if (matching.length !== 1) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain exactly one ${type} event.`);
-      const expected = type === 'slide' ? scene.start : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
+      const expected = type === 'slide' ? slideEventTimestamp(timeline, sceneIndex) : scene.start + (type === 'reveal' ? scene.revealTime : scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
       if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} ${type} event is not at its intended timestamp.`);
     }
     if (scene.isLastScene && sceneEvents.some(event => event.type === 'whoosh')) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} is the final scene and must not schedule a whoosh.`);
