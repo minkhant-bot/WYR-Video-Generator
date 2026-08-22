@@ -87,7 +87,12 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   // t=incomingDuration, still clipped/held at 1 afterward), so every already-settled frame this
   // motion feeds into (image position, OR-circle position, percentage motion) is pixel-identical to
   // before once the brief entrance window has passed. Restrained on purpose: no overshoot/bounce.
-  const rawIncomingProgress = `clip(t/${incomingDuration},0,1)`;
+  // Scene 1 (index 0) is the platform's auto-thumbnail frame (frame 0 of the whole render), so it
+  // must never start mid-slide: rawIncomingProgress is pinned to 1 for the entire scene instead of
+  // ramping from 0, meaning topMotion/bottomMotion are already 0 at t=0 -- both images and both
+  // option texts sit in their final on-screen position, full opacity, from the very first frame.
+  // Scene 2+ transitions (transitionSlideDuration) and every timing constant are untouched.
+  const rawIncomingProgress = index === 0 ? '1' : `clip(t/${incomingDuration},0,1)`;
   const incomingProgress = `(1-(1-${rawIncomingProgress})*(1-${rawIncomingProgress}))`;
   const outgoingProgress = `clip((t-${contentEnd})/${timing.transitionSlideDuration},0,1)`;
   const topMotion = `-${slideDistance}*(1-${incomingProgress})+${slideDistance}*${outgoingProgress}`;
@@ -103,8 +108,11 @@ const renderSegment = async ({ question, assets, index, duration, timeline, rend
   // the brief entrance has passed. text_h/text_w-based centering (below) already reads the CURRENT
   // frame's rendered size each frame, so no other formula needs to change for this to stay centered.
   const popFontSize = (baseSize, start, popDuration, startScale) => `'round(${baseSize}*(${startScale}+${1 - startScale}*clip((t-${start})/${popDuration},0,1)))'`;
-  const optionFontSizeA = popFontSize(aFit.fontSize, optionEntranceStart, incomingDuration, 0.88);
-  const optionFontSizeB = popFontSize(bFit.fontSize, optionEntranceStart, incomingDuration, 0.88);
+  // Scene 1 (index 0) is frame 0 of the whole render (see rawIncomingProgress above) -- option text
+  // must be at its full fitted size there too, not mid-pop, so startScale is 1 (no ramp at all) for
+  // index 0 instead of the usual 0.88 undersized start. Scene 2+ keep the existing pop-in unchanged.
+  const optionFontSizeA = popFontSize(aFit.fontSize, optionEntranceStart, incomingDuration, index === 0 ? 1 : 0.88);
+  const optionFontSizeB = popFontSize(bFit.fontSize, optionEntranceStart, incomingDuration, index === 0 ? 1 : 0.88);
   // Reveal "payoff": percentages pop in slightly OVERSIZED (118%) and settle to their normal size
   // within a fifth of a second -- a quick "result hit" rather than the number simply appearing at
   // rest. Purely a fontsize ramp layered onto the existing percentAlpha fade-in/out and motion; no
