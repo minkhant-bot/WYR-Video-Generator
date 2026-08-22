@@ -236,24 +236,43 @@ export class QuestionReplacementExhaustedError extends Error {
 // plan and swapped for another already-READY question from the pool, rather than either failing the
 // whole job immediately or ever accepting an unrelated filler image. A replacement question's images
 // still go through the EXACT same createImageSelection pipeline as every other question -- no
-// relevance/quality gate is bypassed or weakened for it. Bounded to config.questionReplacementMaxAttempts
-// (env WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS, default 12 -- see config.js) total swaps across the
-// whole job (not per-question), so a pool that's pathologically full of unfillable questions can
-// never loop forever; if the budget runs out, or the pool has no more candidates to offer, the
-// caller fails clearly with CONTENT_POOL_EXHAUSTED instead of looping.
+// relevance/quality gate is bypassed or weakened for it.
+//
+// Budget semantics: config.questionReplacementMaxAttempts (env WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS,
+// default 30 -- see config.js) is a PER-SLOT swap budget, tracked in the `slotAttempts` map below
+// keyed by question index. Previously this was a single counter shared across the whole job, which
+// meant one slot that happened to need many swaps (e.g. a hard-to-illustrate question landing in a
+// stretch of the pool with poor image coverage) could burn through the entire job's budget by
+// itself and report CONTENT_POOL_EXHAUSTED even while the pool still had plenty of untried READY
+// rows for that very slot. Each unfilled slot now gets its own independent budget, so a stubborn
+// slot no longer starves a different slot's replacement attempts (or vice versa). The loop still
+// cannot run forever: reserveReplacementQuestion's excludeIds strictly grows every attempt (so the
+// same row is never retried), each slot is hard-capped at maxAttemptsPerSlot tries, and the loop
+// exits immediately once reserveReplacementQuestion reports no more eligible candidates at all --
+// `poolGenuinelyExhausted` on the return value distinguishes that real-inventory exhaustion from
+// merely every remaining unfilled slot having burned through its own bounded retry budget.
 const unfilledQuestionIndexes = selection => new Set((selection.unfilledDiagnostics || []).map(diagnostic => diagnostic.scene - 1));
-// rejectedPoolIds/attempts are optional so the SAME job-wide budget/never-reoffer set can be
-// threaded in from a later stage (see downloadImagesWithReplacement below, which re-enters this loop
-// after a DOWNLOAD-stage -- not just a selection-stage -- exhaustion) without ever resetting either.
-const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages, rejectedPoolIds = new Set(), attempts = 0 }) => {
+// rejectedPoolIds/attempts/slotAttempts are optional so the SAME job-wide budget/never-reoffer state
+// can be threaded in from a later stage (see downloadImagesWithReplacement below, which re-enters
+// this loop after a DOWNLOAD-stage -- not just a selection-stage -- exhaustion) without ever
+// resetting any of it.
+const replaceUnfillableQuestions = async ({ job, config, plan, selection, selectImages, rejectedPoolIds = new Set(), attempts = 0, slotAttempts = new Map() }) => {
   let currentPlan = plan; let currentSelection = selection;
   let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
-  const maxAttempts = config.questionReplacementMaxAttempts;
-  while (currentSelection.selectedCount !== currentSelection.total && attempts < maxAttempts) {
-    const badIndex = [...unfilledQuestionIndexes(currentSelection)][0];
+  const maxAttemptsPerSlot = config.questionReplacementMaxAttempts;
+  let poolGenuinelyExhausted = false;
+  while (currentSelection.selectedCount !== currentSelection.total) {
+    // Pick the first unfilled slot that still has budget left. A slot that already burned through
+    // its own per-slot budget is skipped (not retried) but doesn't block a different, still-eligible
+    // slot from continuing -- only once EVERY unfilled slot is out of budget do we give up.
+    const unfilledIndexes = [...unfilledQuestionIndexes(currentSelection)];
+    const badIndex = unfilledIndexes.find(index => (slotAttempts.get(index) || 0) < maxAttemptsPerSlot);
+    if (badIndex === undefined) break;
     const badQuestion = currentPlan.questions[badIndex];
+    const slotAttemptCount = (slotAttempts.get(badIndex) || 0) + 1;
+    slotAttempts.set(badIndex, slotAttemptCount);
     attempts += 1;
-    log('content.question_replacement_attempt', { jobId: job.id, questionIndex: badIndex, rejectedPoolId: badQuestion.poolId, attempt: attempts, maxAttempts });
+    log('content.question_replacement_attempt', { jobId: job.id, questionIndex: badIndex, rejectedPoolId: badQuestion.poolId, attempt: attempts, slotAttempt: slotAttemptCount, maxAttemptsPerSlot });
     // Release THIS question only -- never consumed as 'used', and never re-offered to this same
     // job again (rejectedPoolIds, folded into excludeIds below). The other already-reserved
     // questions in this job are left completely untouched.
@@ -265,7 +284,11 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     const fantasyCapReached = otherQuestions.some(question => isFantasyQuestion(question));
     const { candidate: replacementRow, wordingRejectedCount: skippedForWording } = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached });
     wordingRejectedCount += skippedForWording;
-    if (!replacementRow) { log('content.question_replacement_unavailable', { jobId: job.id, questionIndex: badIndex, attempt: attempts }); break; }
+    if (!replacementRow) {
+      log('content.question_replacement_unavailable', { jobId: job.id, questionIndex: badIndex, attempt: attempts });
+      poolGenuinelyExhausted = true;
+      break;
+    }
     const replacementQuestion = rowToQuestion(replacementRow, badIndex);
     const nextQuestions = currentPlan.questions.map((question, index) => (index === badIndex ? replacementQuestion : question));
     const nextPlan = addIllustrativePercentages({ ...currentPlan, questions: nextQuestions });
@@ -277,7 +300,7 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     currentSelection = { ...currentSelection, slots: nextSlots, selectedCount, unfilledDiagnostics };
     log('content.question_replaced', { jobId: job.id, questionIndex: badIndex, newPoolId: replacementRow.id, selectedCount, total: currentSelection.total, attempt: attempts });
   }
-  return { plan: currentPlan, selection: currentSelection, attempts, wordingRejectedCount, rejectedPoolIds };
+  return { plan: currentPlan, selection: currentSelection, attempts, wordingRejectedCount, rejectedPoolIds, slotAttempts, poolGenuinelyExhausted };
 };
 
 // Final image-acquisition stage for the automatic path: downloads/validates every already-selected
@@ -289,36 +312,40 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
 // replaceUnfillableQuestions, because runPipeline called it internally, after
 // replaceUnfillableQuestions had already finished. A slot that exhausts HERE is now treated exactly
 // like an unfilled SELECTION slot: that one question is rejected and swapped via
-// replaceUnfillableQuestions (sharing the SAME job-wide attempts budget and rejected-question set),
-// then downloading is retried against the resulting fully-selected plan. IMAGE_SELECTION_EXHAUSTED
-// is therefore never surfaced while replacement attempts remain; only a genuinely exhausted
-// replacement budget (or a pool with nothing left to offer) falls through to the caller's existing
-// CONTENT_POOL_EXHAUSTED path -- see runAutomaticPipeline below, which applies the identical
-// `selectedCount !== total` check to this stage's result as it already does for selection.
-const downloadImagesWithReplacement = async ({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts, wordingRejectedCount }) => {
+// replaceUnfillableQuestions (sharing the SAME job-wide rejected-question set and the same per-slot
+// attempts budgets), then downloading is retried against the resulting fully-selected plan.
+// IMAGE_SELECTION_EXHAUSTED is therefore never surfaced while that slot still has replacement budget
+// left; only a genuinely exhausted replacement budget (or a pool with nothing left to offer) falls
+// through to the caller's existing CONTENT_POOL_EXHAUSTED path -- see runAutomaticPipeline below,
+// which applies the identical `selectedCount !== total` check to this stage's result as it already
+// does for selection.
+const downloadImagesWithReplacement = async ({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts, wordingRejectedCount, slotAttempts }) => {
   let currentPlan = plan; let currentSelection = selection; let currentAttempts = attempts; let currentWordingRejectedCount = wordingRejectedCount;
+  let poolGenuinelyExhausted = false;
   for (;;) {
     try {
       const assets = await downloadSelectedCandidates({ selection: currentSelection, assetsDir: path.join(job.workspace, 'assets'), config });
-      return { assets, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount };
+      return { assets, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount, poolGenuinelyExhausted };
     } catch (error) {
       const badIndex = Number(error?.scene) - 1;
       if (error?.code !== 'IMAGE_SELECTION_EXHAUSTED' || !Number.isInteger(badIndex) || !currentPlan.questions[badIndex]) throw error;
-      log('content.image_download_exhausted', { jobId: job.id, questionIndex: badIndex, slot: error.option, attempt: currentAttempts + 1, maxAttempts: config.questionReplacementMaxAttempts });
+      log('content.image_download_exhausted', { jobId: job.id, questionIndex: badIndex, slot: error.option, attempt: currentAttempts + 1, maxAttemptsPerSlot: config.questionReplacementMaxAttempts });
       // Reset just this question's two slots back to unfilled so replaceUnfillableQuestions' own
       // loop -- which already knows how to keep swapping if a REPLACEMENT also fails selection --
-      // picks it up exactly like any other unfilled slot, sharing the same attempts/rejectedPoolIds.
+      // picks it up exactly like any other unfilled slot, sharing the same
+      // attempts/rejectedPoolIds/slotAttempts.
       const badSlotKeys = Object.keys(currentSelection.slots).filter(key => currentSelection.slots[key].questionIndex === badIndex);
       const resetSlots = { ...currentSelection.slots };
       for (const key of badSlotKeys) resetSlots[key] = { ...resetSlots[key], selectedId: null };
       const resetSelection = { ...currentSelection, slots: resetSlots, selectedCount: Object.values(resetSlots).filter(slot => slot.selectedId).length };
       const wordingBaseBefore = currentPlan.contentQuality?.wordingRejectedCount || 0;
-      const replaced = await replaceUnfillableQuestions({ job, config, plan: currentPlan, selection: resetSelection, selectImages, rejectedPoolIds, attempts: currentAttempts });
+      const replaced = await replaceUnfillableQuestions({ job, config, plan: currentPlan, selection: resetSelection, selectImages, rejectedPoolIds, attempts: currentAttempts, slotAttempts });
       currentAttempts = replaced.attempts;
       currentWordingRejectedCount += replaced.wordingRejectedCount - wordingBaseBefore;
       currentPlan = replaced.plan; currentSelection = replaced.selection;
+      poolGenuinelyExhausted = replaced.poolGenuinelyExhausted;
       if (currentSelection.selectedCount !== currentSelection.total) {
-        return { assets: null, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount };
+        return { assets: null, plan: currentPlan, selection: currentSelection, attempts: currentAttempts, wordingRejectedCount: currentWordingRejectedCount, poolGenuinelyExhausted };
       }
       // Selection is fully filled again (either the original bad question's own replacement, or a
       // chain of replacements if a replacement itself also failed selection) -- loop back and retry
@@ -352,6 +379,8 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
       let imageReplacementAttempts = 0;
       let rejectedPoolIds = new Set();
+      let slotAttempts = new Map();
+      let poolGenuinelyExhausted = false;
       if (selection.selectedCount !== selection.total) {
         // selectImages (createImageSelection) already ran its own bounded Tiers 2-5 gap-fill for
         // every slot that came out of its strict Tier-1 pass unfilled -- see image-picker.js's
@@ -363,7 +392,7 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         // replaceUnfillableQuestions above) rather than failing the whole job or ever accepting an
         // unrelated filler image.
         const result = await replaceUnfillableQuestions({ job, config, plan, selection, selectImages });
-        plan = result.plan; selection = result.selection; imageReplacementAttempts = result.attempts; wordingRejectedCount = result.wordingRejectedCount; rejectedPoolIds = result.rejectedPoolIds;
+        plan = result.plan; selection = result.selection; imageReplacementAttempts = result.attempts; wordingRejectedCount = result.wordingRejectedCount; rejectedPoolIds = result.rejectedPoolIds; slotAttempts = result.slotAttempts; poolGenuinelyExhausted = result.poolGenuinelyExhausted;
       }
       // Concise, secret-free counters only -- never raw error messages/stacks from elsewhere in the
       // job (those could carry a redacted-but-still-sensitive DB error; see
@@ -372,23 +401,34 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
         const unfilledDiagnostics = selection.unfilledDiagnostics || [];
         const unfilledQuestionCount = unfilledQuestionIndexes(selection).size;
         const validQuestionsAssembled = plan.questions.length - unfilledQuestionCount;
-        log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics, wordingRejectedCount, imageReplacementAttempts });
+        // questionsAttemptedThisJob (rejectedPoolIds.size) is the number of distinct Content Pool
+        // questions this job rejected and swapped away from due to an unfillable image pair --
+        // always equal to imageReplacementAttempts, since each replacement attempt rejects exactly
+        // one question. readyInventoryExhausted distinguishes the two genuinely different reasons
+        // the bounded replacement loop can stop without filling every slot: either the pool truly
+        // had no more eligible READY candidates left to offer (reserveReplacementQuestion returned
+        // none), or every still-unfilled slot burned through its own bounded per-slot retry budget
+        // while candidates may still exist beyond it -- see replaceUnfillableQuestions above.
+        log('content.question_replacement_exhausted', { jobId: job.id, selectedCount: selection.selectedCount, total: selection.total, unfilledDiagnostics, wordingRejectedCount, imageReplacementAttempts, readyInventoryExhausted: poolGenuinelyExhausted });
         const summary = `CONTENT_POOL_EXHAUSTED: Could not assemble ${config.questionCount} quality-valid questions with ${selection.total} relevant usable images.`;
-        const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, replacement attempts used: ${imageReplacementAttempts}/${config.questionReplacementMaxAttempts}, valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}`;
+        const exhaustionReason = poolGenuinelyExhausted
+          ? 'no further eligible READY Content Pool questions were available'
+          : `every remaining unfilled slot reached its ${config.questionReplacementMaxAttempts}-attempt per-slot replacement budget`;
+        const diagnostics = `wording-rejected: ${wordingRejectedCount}, image-rejected: ${imageReplacementAttempts}, questions attempted this job: ${rejectedPoolIds.size}, replacement attempts used: ${imageReplacementAttempts} (max ${config.questionReplacementMaxAttempts} per question slot), valid questions assembled: ${validQuestionsAssembled}/${config.questionCount}, valid images assembled: ${selection.selectedCount}/${selection.total}, exhaustion reason: ${exhaustionReason}`;
         const diagnosticsReport = formatUnfilledSlotDiagnostics(unfilledDiagnostics);
         const message = [summary, diagnostics, diagnosticsReport].filter(Boolean).join('\n\n');
-        throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics, wordingRejectedCount, imageRejectedCount: imageReplacementAttempts, replacementAttemptsUsed: imageReplacementAttempts, validQuestionsAssembled, validImagesAssembled: selection.selectedCount });
+        throw new QuestionReplacementExhaustedError(message, { selectedCount: selection.selectedCount, unfilledSlots: unfilledDiagnostics.map(diag => diag.slot), unfilledDiagnostics, wordingRejectedCount, imageRejectedCount: imageReplacementAttempts, replacementAttemptsUsed: imageReplacementAttempts, questionsAttemptedThisJob: rejectedPoolIds.size, readyInventoryExhausted: poolGenuinelyExhausted, validQuestionsAssembled, validImagesAssembled: selection.selectedCount });
       };
       if (selection.selectedCount !== selection.total) throwContentPoolExhausted();
       // Final image acquisition (download + validate the already-selected candidates). Any
       // slot-level IMAGE_SELECTION_EXHAUSTED here is handled the SAME way as a selection-stage
       // exhaustion above -- swap the question via replaceUnfillableQuestions and retry -- so it
-      // never reaches the client while replacement attempts remain (see
+      // never reaches the client while that slot's replacement budget remains (see
       // downloadImagesWithReplacement). Only a genuinely exhausted replacement budget falls through
       // to the identical CONTENT_POOL_EXHAUSTED path used above.
       update({ status: 'downloading_assets', stage: 'downloading_assets', progress: 30 });
-      const downloadResult = await downloadImagesWithReplacement({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts: imageReplacementAttempts, wordingRejectedCount });
-      plan = downloadResult.plan; selection = downloadResult.selection; imageReplacementAttempts = downloadResult.attempts; wordingRejectedCount = downloadResult.wordingRejectedCount;
+      const downloadResult = await downloadImagesWithReplacement({ job, config, plan, selection, selectImages, rejectedPoolIds, attempts: imageReplacementAttempts, wordingRejectedCount, slotAttempts });
+      plan = downloadResult.plan; selection = downloadResult.selection; imageReplacementAttempts = downloadResult.attempts; wordingRejectedCount = downloadResult.wordingRejectedCount; poolGenuinelyExhausted = downloadResult.poolGenuinelyExhausted;
       if (selection.selectedCount !== selection.total) throwContentPoolExhausted();
       await runJobPipeline({ job, store, config, preparedPlan: plan, preparedAssets: downloadResult.assets, poolReserved });
       const result = store.get(job.id);

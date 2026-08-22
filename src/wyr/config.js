@@ -55,9 +55,16 @@ export const getConfig = () => {
     groqRateLimitMaxWaitMs: integer('WYR_GROQ_RATE_LIMIT_MAX_WAIT_MS', 30_000, 1_000, 60_000),
     contentHistoryPath: path.join(contentHistoryDir, 'history.json'),
     // Bounded per-question image-selection-exhaustion replacement budget (see pipeline.js's
-    // replaceUnfillableQuestions) -- total swaps across a whole job, not per-question, so a pool
-    // that's pathologically full of unfillable questions still can never loop forever.
-    questionReplacementMaxAttempts: positiveIntegerOrDefault('WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS', 12),
+    // replaceUnfillableQuestions) -- this many swap attempts PER UNFILLED QUESTION SLOT, not a
+    // single counter shared across the whole job. A job with two separately-unfillable slots gives
+    // each its own independent budget; a pool that's pathologically full of unfillable questions
+    // still can never loop forever, since each slot's budget is itself bounded and the pool of
+    // distinct candidates to try is finite. Raised from the original 12 to 30: a single stubborn
+    // slot (e.g. a hard-to-illustrate category) can legitimately need to walk further into a large
+    // ready pool before finding a question with a genuinely usable image pair, and 12 was proving too
+    // small to reach real remaining inventory -- see the CONTENT_POOL_EXHAUSTED fix that added this
+    // comment.
+    questionReplacementMaxAttempts: positiveIntegerOrDefault('WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS', 30),
     secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
