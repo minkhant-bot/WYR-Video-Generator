@@ -233,7 +233,7 @@ export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDi
 // by score (a flat score sort would front-load every strong hook and let pacing collapse afterward).
 export const arrangeForHook = rows => {
   if (rows.length <= 1) return [...rows];
-  const strongest = rows.reduce((best, row) => computeDilemmaRankScore(row) > computeDilemmaRankScore(best) ? row : best, rows[0]);
+  const strongest = rows.reduce((best, row) => Number(row.hook_score) > Number(best.hook_score) ? row : best, rows[0]);
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 
