@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
+import { PexelsImageProvider, assessImageCandidate, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
-import { deterministicImageQueries } from './image-query.js';
+import { buildImageQueries, deterministicImageQueries } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
 import { computeSubjectAwareCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
@@ -12,6 +12,10 @@ import { GroqContentProvider } from './content.js';
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
 const MAX_PROVIDER_CALLS_PER_SLOT = 18;
+// Tier 0 (see fetchCoreQueryTier below): how many usable candidates image-query.js's short,
+// literal buildImageQueries queries must clear before the broader/older selectionQueries fallback
+// list (and its own Tier-1 provider budget) is skipped entirely for a slot.
+const CORE_QUERY_USABLE_THRESHOLD = 5;
 // Bounded gap-fill budget for slots that Tier 1 (the strict, fixed 8-query/18-call pass above)
 // left unfilled -- reuses the SAME config knobs the (otherwise dead-on-the-automatic-path)
 // findAndDownloadImages recovery loop already exposes (WYR_IMAGE_RECOVERY_*), so ops can tune one
@@ -39,7 +43,8 @@ export class PixabayImageProvider {
     url.searchParams.set('per_page', '40');
     url.searchParams.set('safesearch', 'true');
     url.searchParams.set('orientation', 'horizontal');
-    url.searchParams.set('image_type', 'all');
+    url.searchParams.set('image_type', 'photo');
+    url.searchParams.set('min_width', '1280');
 
     const response = await fetchWithTimeout(url, {}, this.timeoutMs);
     if (!response.ok) {
@@ -143,7 +148,7 @@ const concreteSubjectQuery = optionText => dominantSubjectWordsFor(optionText).m
 
 const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
   const deterministic = deterministicImageQueries(option, { category });
-  const built = buildImageQueries(option);
+  const built = buildFallbackImageQueries(option);
   const simple = simpleVisualQuery(option);
   const subject = simple.split(' ').slice(-4).join(' ');
   // The stylized suffix is only meaningful (and only added) for fantasy-coded questions, so it's
@@ -326,6 +331,29 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
 
   state.exhausted = state.candidates.length === 0 && calls >= maxCalls;
   return state;
+};
+
+// Tier 0: image-query.js's short, literal noun-phrase queries (specific -> single noun ->
+// category), tried BEFORE the older/broader selectionQueries fallback list. A long raw option
+// phrase used as-is returns almost no real Pixabay/Pexels hits, so this fetches with the most
+// specific query first (one page per provider) and only escalates to the next, broader query if
+// the previous one didn't clear CORE_QUERY_USABLE_THRESHOLD usable candidates. Reuses
+// fetchPoolForSlot as-is, so every candidate found here still goes through the exact same
+// assessImageCandidate/sortPool ranking as every other tier -- this only changes what gets
+// searched for, never how a result is scored or accepted. state.queries/state.candidates are left
+// populated on the state for the caller to merge onto (never reset), so a caller that falls
+// through to the old Tier-1 pass afterward continues from here instead of starting over.
+const fetchCoreQueryTier = async (state, providers, config) => {
+  const coreQueries = [...state.queries];
+  let usedQuery = null;
+  for (let index = 0; index < coreQueries.length; index += 1) {
+    usedQuery = coreQueries[index];
+    state.queryIndex = index;
+    await fetchPoolForSlot(state, providers, config, CORE_QUERY_USABLE_THRESHOLD, { maxCalls: providers.length });
+    if (state.candidates.length >= CORE_QUERY_USABLE_THRESHOLD) break;
+  }
+  console.info(`[IMG] "${logSafe(state.optionText)}" -> q0="${logSafe(coreQueries[0] || '')}" q1="${logSafe(coreQueries[1] || '')}" used="${logSafe(usedQuery || '')}" got=${state.candidates.length}`);
+  return state.candidates.length >= CORE_QUERY_USABLE_THRESHOLD;
 };
 
 // Tiers 2-4 (bounded gap-fill): reached ONLY for a slot Tier 1 left with zero selectable
@@ -516,12 +544,20 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         slot,
         // The semantic-relevance target for image matching/query-broadening/diagnostics is the
         // option's explicit visualSubject (a concrete, photographable description -- see
-        // content-engine.js's deriveVisualSubject) when one is available, NOT the short punchy
-        // display text (option.text) that assessImageCandidate/dominantSubjectWordsFor used to be
-        // pointed at. displayText itself is never touched -- it still flows separately, unchanged,
-        // into the actual rendered video via plan.questions[i].optionA/B.text (see media.js).
-        optionText: option.visualSubject || option.text,
-        queries: selectionQueries(option, { category: question.category, fantasy }),
+        // content-engine.js's deriveVisualSubject) when one is available, else the hand-written
+        // DB searchQuery the image was actually fetched with (falling back to option.text only
+        // when neither exists) -- keeps the dominant-subject-word gate pointed at the SAME text
+        // driving the search, instead of a separately-derived display text that can diverge from
+        // it. displayText itself is never touched -- it still flows separately, unchanged, into
+        // the actual rendered video via plan.questions[i].optionA/B.text (see media.js).
+        optionText: option.visualSubject || option.searchQuery || option.text,
+        // Tier 0's queries: the hand-written DB searchQuery first when present (never pre-empted
+        // by a rule-derived guess), then buildImageQueries' short literal fallback queries. The
+        // older/broader selectionQueries list is only appended if Tier 0 comes up short.
+        queries: [...new Set([
+          String(option.searchQuery || '').trim(),
+          ...buildImageQueries(option.visualSubject || option.text, question.category),
+        ].filter(Boolean))],
         queryIndex: 0,
         providerIndex: 0,
         pages: {},
@@ -536,8 +572,17 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         providersAttempted: providers.map(provider => provider.name),
       };
 
-      // Tier 1: strict, fixed query list -- unchanged behavior/gates from before this fix.
-      await fetchPoolForSlot(state, providers, config, REVIEW_POOL_SIZE);
+      // Tier 0: short, literal core-noun queries, fetched first (see fetchCoreQueryTier). Only
+      // falls through to the older, broader Tier-1 query list if Tier 0 alone didn't clear
+      // CORE_QUERY_USABLE_THRESHOLD usable candidates -- merges onto whatever Tier 0 already found
+      // rather than restarting, and passes every candidate through the same unchanged ranking.
+      const coreSatisfied = await fetchCoreQueryTier(state, providers, config);
+      if (!coreSatisfied) {
+        // Tier 1: strict, fixed query list -- unchanged behavior/gates from before this fix.
+        const fallbackQueries = selectionQueries(option, { category: question.category, fantasy });
+        for (const query of fallbackQueries) if (!state.queries.includes(query)) state.queries.push(query);
+        await fetchPoolForSlot(state, providers, config, REVIEW_POOL_SIZE);
+      }
       selectBestAvailable(state);
       slots[key] = state;
     }

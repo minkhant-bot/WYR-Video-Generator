@@ -88,3 +88,35 @@ export const deterministicImageQueries = (option, { category = '' } = {}) => {
   const categoryBlend = [subject, ...categoryWords].filter(Boolean).slice(0, 5).join(' ');
   return [...new Set([subject, categoryBlend].filter(query => query.length >= 3))];
 };
+
+const IMAGE_QUERY_LEADING_VERBS = new Set(['get', 'have', 'be', 'go', 'take', 'eat', 'live', 'own', 'receive']);
+const IMAGE_QUERY_STOPWORDS = new Set(['a', 'an', 'the', 'your', 'my', 'very', 'really', 'always', 'never', 'forever', 'instantly', 'again', 'everyday', 'daily', 'constantly', 'immediately', 'only', 'just', 'still']);
+const IMAGE_QUERY_PREPOSITIONS = new Set(['at', 'in', 'on', 'with', 'to', 'for', 'from', 'of']);
+const IMAGE_QUERY_LEADING_PREPOSITIONS = new Set(['at', 'in', 'on', 'with', 'to', 'for', 'from', 'of', 'by', 'as']);
+
+// Short, literal noun-phrase queries for a stock-photo search -- deliberately much narrower than
+// coreSubjectQuery/deterministicImageQueries above (max 2 words, not 4): a long raw option phrase
+// like "get a long love letter" returns almost no real Pixabay/Pexels hits, so this tries a short,
+// specific noun phrase first ([0]), then a single bare noun ([1]), then the question's category as
+// a last resort ([2]) -- the caller stops escalating as soon as one tier returns enough usable
+// candidates. Kept to the exact ordered rule list from the ticket: leading-verb strip, stopword
+// strip, truncate at the first preposition, drop a leading gerund, then keep at most the last 2
+// words (the head noun of an English noun phrase sits at the end, e.g. "love letter", not the
+// front) -- deliberately no semantic synonym table here (see VISUAL_EXPANSIONS in images.js for
+// that separate, already-existing mechanism).
+export const buildImageQueries = (optionText, category = '') => {
+  const raw = normalize(optionText).split(' ').filter(Boolean);
+  let words = raw;
+  while (words.length > 1 && IMAGE_QUERY_LEADING_VERBS.has(words[0])) words = words.slice(1);
+  const destopped = words.filter(word => !IMAGE_QUERY_STOPWORDS.has(word));
+  words = destopped.length ? destopped : words;
+  const prepositionIndex = words.findIndex(word => IMAGE_QUERY_PREPOSITIONS.has(word));
+  if (prepositionIndex > 0) words = words.slice(0, prepositionIndex);
+  if (words.length > 1 && words[0].endsWith('ing')) words = words.slice(1);
+  let phrase = words.length > 2 ? words.slice(-2) : words;
+  if (phrase.length > 1 && IMAGE_QUERY_LEADING_PREPOSITIONS.has(phrase[0])) phrase = phrase.slice(1);
+  const q0 = phrase.join(' ') || raw.slice(-2).join(' ');
+  const q1 = phrase[phrase.length - 1] || q0;
+  const q2 = normalize(category);
+  return [...new Set([q0, q1, q2].filter(Boolean))];
+};
