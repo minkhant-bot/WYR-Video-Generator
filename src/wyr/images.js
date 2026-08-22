@@ -160,7 +160,14 @@ const HARD_DOMAIN_PATTERN = /(^|\.)(etsy|scale\.jobs|jobs|careers|marketplace|au
 const HARD_LAYOUT_PATTERN = /\b(card layout|text graphic|text-heavy|text heavy|graphic design|social post|press release|promo image|article image)\b/i;
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|line icon|silhouette icon|button icon|symbol icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
 const GENERIC_TECH_ABSTRACTION_PATTERN = /\b(cloud icon|upload icon|download icon|gear icon|network icon|circuit board|abstract technology|digital network|data flow|binary code|matrix code|generic technology|tech background|futuristic background|abstract background|glowing network|node network|connection lines|abstract data|generic diagram|flowchart|pie chart|bar chart|symbol only|isolated symbol|generic symbol)\b/i;
-const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation)\b/i;
+const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation|handshake|suit|office|meeting|teamwork)\b/i;
+// Gate for CORPORATE_WEAK_PATTERN above: a genuinely business/work-themed option ("Own a
+// successful company", "Get your dream job") legitimately wants office/meeting/handshake imagery,
+// so the generic-stock-business penalty only applies when the option itself isn't about business
+// or work -- checked against both the display text and the search query, so a curated DB
+// searchQuery like "modern office skyscraper building" for "Own a successful company" is exempted
+// the same way the option text itself would be.
+const BUSINESS_CONTEXT_PATTERN = /\b(business|company|corporate|office|work|job|career|ceo|entrepreneur|startup|bank|finance|financial|executive|boardroom)\b/i;
 const IMPACT_PATTERN = /\b(cinematic|dramatic|glowing|neon|vibrant|surreal|fantasy|fantasy art|concept art|digital art|3d render|artwork|portal|gateway|vortex|frozen|shattered|massive|luxury|action|transformation|multiplying|doubling)\b/gi;
 
 // Ranking-only semantic signal (see computeSemanticRankAdjustment below): folded ONLY into
@@ -178,7 +185,17 @@ const ABSTRACT_METAPHOR_PATTERN = /\b(abstract|conceptual|metaphor\w*|symbolic)\
 const HUMAN_EVIDENCE_PATTERN = /\b(person|people|man|men|woman|women|girl|boy|human|couple|friends|family|group)\b/;
 const GROUP_EVIDENCE_PATTERN = /\b(friends|group|team|together|couple|crowd|people)\b/;
 const PHOTOGRAPHIC_EVIDENCE_PATTERN = /\b(photo|photograph|photography|candid)\b/;
-const NON_PHOTOGRAPHIC_EVIDENCE_PATTERN = /\b(render|rendering|cgi|digital\s+art|3d\s+model|painting|drawing)\b/;
+// Strengthened per real render/digital-art/cutout false-accepts observed in production ("grim
+// reaper digital artwork" for "Own a treasure chest", "3D-rendered gold bars" for "Be a
+// billionaire at 65", "euro note cutout on plain white background" for "Own a safe full of
+// cash") -- broadened beyond the original render/rendering/cgi/digital art/3d model/painting/
+// drawing list to also catch bare "3d", illustration/illustrated, artwork, fantasy, isolated, and
+// the cutout/mockup phrasing real provider tags use for non-photographic or studio-isolated
+// results. Still ranking-only (see computeSemanticRankAdjustment) -- never a hard rejection -- so
+// a genuinely fantasy-coded option (dragon, portal, teleportation) with no real photo available
+// still gets its only-available fantasy-art candidate selected, just correctly ranked below any
+// literal photographic alternative in the same pool instead of being treated as equal or better.
+const NON_PHOTOGRAPHIC_EVIDENCE_PATTERN = /\b(render|rendered|rendering|3d|cgi|digital\s+art|illustration|illustrated|artwork|fantasy|isolated|white\s+background|studio\s+cutout|product\s+cutout|mockup|3d\s+model|painting|drawing)\b/;
 // Verbs whose CORE meaning is a visible human action -- when the option itself asks for one of
 // these, a candidate that actually shows a person doing it is a stronger, more immediately-
 // recognizable match than an equally "on-keyword" object-only or scenery-only shot.
@@ -186,7 +203,7 @@ const HUMAN_ACTION_VERBS = new Set(['wear', 'wears', 'wearing', 'ride', 'rides',
 // Explicit multi-person context: an option naming friends/family/group/together implies the
 // candidate should show more than one person, not a single isolated subject.
 const GROUP_CONTEXT_WORDS = new Set(['friends', 'friend', 'family', 'group', 'team', 'together', 'crowd', 'partner', 'couple']);
-const computeSemanticRankAdjustment = (optionWords, searchableText) => {
+const computeSemanticRankAdjustment = (optionWords, searchableText, headNounMatched = false) => {
   let adjustment = 0;
   // Off-topic filler imagery (flowers, generic animals, arrows, abstract/metaphorical art) is only
   // penalized when the OPTION's own words never actually call for it, so a genuine "explore a
@@ -198,11 +215,22 @@ const computeSemanticRankAdjustment = (optionWords, searchableText) => {
   // Human action / recognizable-subject and group-context bonuses.
   if (optionWords.some(word => HUMAN_ACTION_VERBS.has(word)) && HUMAN_EVIDENCE_PATTERN.test(searchableText)) adjustment += 12;
   if (optionWords.some(word => GROUP_CONTEXT_WORDS.has(word))) adjustment += GROUP_EVIDENCE_PATTERN.test(searchableText) ? 12 : -10;
-  // Mild photographic-realism preference: illustration/fantasy-art is handled elsewhere and never
-  // hard-rejected for fantasy content -- this only nudges a real photo above an otherwise-equal
-  // render/CGI/painting result.
+  // Photographic-realism preference: illustration/fantasy-art is handled elsewhere and never
+  // hard-rejected for fantasy content -- this only ranks a real photo above an otherwise-equal
+  // render/CGI/cutout/artwork result. Raised from -6 to -32 (see NON_PHOTOGRAPHIC_EVIDENCE_PATTERN
+  // above): a mild nudge wasn't enough to stop a non-photographic candidate from outranking a
+  // genuine photo already in the same accepted pool -- this is still ranking-only, never a hard
+  // rejection, so it can't cause a slot to come up empty the way strengthening a hard-reject
+  // pattern could.
   if (PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment += 6;
-  else if (NON_PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment -= 6;
+  else if (NON_PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment -= 32;
+  // Literal-subject bonus: reward a candidate whose tags/alt-text literally contain the head noun
+  // of the search query that actually found it (e.g. "supercars" should beat an "engine" close-up
+  // for "Have a garage of supercars"; "clothes" should beat a "sewing machine" for "Have a room of
+  // designer clothes") -- the concrete word the search itself was built around, not just any word
+  // from the option's broader display text. Computed by the caller (assessImageCandidate) using
+  // the same textTokens/textStems/stem machinery already used for dominantMatched below.
+  if (headNounMatched) adjustment += 16;
   return adjustment;
 };
 
@@ -352,11 +380,24 @@ export const assessImageCandidate = (candidate, option) => {
   const dominantSubjectWords = dominantSubjectWordsFor(option.text);
   const dominantMatched = dominantSubjectWords.filter(word => textTokens.has(word) || textStems.has(stem(word)) || (VISUAL_EXPANSIONS[word] || []).some(alias => textTokens.has(alias)));
   const dominantCoverage = dominantSubjectWords.length ? dominantMatched.length / dominantSubjectWords.length : 1;
+  // Literal-subject bonus input (see computeSemanticRankAdjustment): the head noun of the search
+  // query that actually found this candidate -- image-query.js's coreSubjectWords already strips
+  // leading verbs/stopwords, so the LAST word left is the concrete noun the query was built
+  // around ("supercars" for a "have a garage of supercars" query, "clothes" for "designer
+  // clothes"). Matched the same stem-aware way as dominantMatched above.
+  const searchQueryCoreWords = coreSubjectWords(option.searchQuery || '');
+  const searchQueryHeadNoun = searchQueryCoreWords[searchQueryCoreWords.length - 1] || '';
+  const headNounMatched = Boolean(searchQueryHeadNoun) && (textTokens.has(searchQueryHeadNoun) || textStems.has(stem(searchQueryHeadNoun)));
   const intentGroups = visualIntentGroups(option); const intentCoverage = intentGroups.length ? visualIntentCoverage(option, allTokens) : 1;
   const targetRatio = 750 / 450; const ratio = candidate.width / candidate.height;
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
   const resolution = Math.min(1, Math.min(candidate.width / 1600, candidate.height / 900));
-  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText) || GENERIC_TECH_ABSTRACTION_PATTERN.test(searchableText); const corporateWeak = CORPORATE_WEAK_PATTERN.test(searchableText); const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
+  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText) || GENERIC_TECH_ABSTRACTION_PATTERN.test(searchableText);
+  // See BUSINESS_CONTEXT_PATTERN above: a genuinely business/work-themed option is exempt from the
+  // generic-stock-business penalty, checked against both the display text and the search query.
+  const queryIsBusinessRelated = BUSINESS_CONTEXT_PATTERN.test(`${option.text || ''} ${option.searchQuery || ''}`);
+  const corporateWeak = CORPORATE_WEAK_PATTERN.test(searchableText) && !queryIsBusinessRelated;
+  const impactMatches = searchableText.match(IMPACT_PATTERN)?.length || 0;
   const relevanceScore = Math.round((coreCoverage * 60 + relevance * 20 + cropFit * 10 + resolution * 8 + Math.max(0, 2 - Number(candidate.position || 0) * 0.08)) * 10) / 10;
   const optionWords = normalizeWords(option.text); const bankGrowthRequired = optionWords.includes('double') && (optionWords.includes('bank') || optionWords.includes('balance'));
   const bankGrowthDepicted = !bankGrowthRequired || containsAny(allTokens, ['big', 'double', 'doubled', 'doubling', 'multiply', 'multiplying', 'increase', 'increasing', 'growth', 'growing', 'overflowing', 'surrounded', 'endless', 'abundance', 'raining', 'falling', 'pile', 'stacks']);
@@ -378,7 +419,7 @@ export const assessImageCandidate = (candidate, option) => {
   // the ranking composite sortPool (image-picker.js) sorts by first -- it never appears in
   // rejectionReasons/accepted, so this cannot loosen or tighten what counts as a valid candidate,
   // only which already-valid candidate wins ordering.
-  const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText);
+  const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText, headNounMatched);
   const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30 + semanticRankAdjustment);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
