@@ -22,8 +22,8 @@ export const WYR_TEMPLATE = Object.freeze({
   }),
   layout: Object.freeze({
     safeX: 60,
-    paperColor: '0xF3EFE3',
-    paperNoiseStrength: 10,
+    paperColor: '0xF5F5F3',
+    paperNoiseStrength: 24,
     topImageY: 84,
     bottomImageY: 1276,
     imageWidth: 940,

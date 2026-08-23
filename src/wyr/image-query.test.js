@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { coreSubjectQuery, coreSubjectWords, deterministicImageQueries } from './image-query.js';
+import { coreSubjectQuery, coreSubjectWords, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 
 test('"Live in a treehouse" produces a treehouse-specific query, not a generic trees query', () => {
   const query = coreSubjectQuery('Live in a treehouse');
@@ -45,6 +45,12 @@ test('deterministicImageQueries never includes decorative/stylistic filler words
 test('deterministicImageQueries de-duplicates when the subject and category blend collapse to the same text', () => {
   const queries = deterministicImageQueries({ text: 'Own a yacht' }, { category: '' });
   assert.equal(new Set(queries).size, queries.length);
+});
+
+test('food search context disambiguates food names without changing other categories', () => {
+  assert.equal(withFoodSearchContext('mac and cheese', 'food'), 'mac and cheese food');
+  assert.equal(withFoodSearchContext('mac and cheese food', 'food'), 'mac and cheese food');
+  assert.equal(withFoodSearchContext('mac pro computer', 'future technology'), 'mac pro computer');
 });
 
 // ---------------------------------------------------------------------------------------------

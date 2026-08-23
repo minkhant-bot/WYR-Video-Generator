@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { PexelsImageProvider, assessImageCandidate, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
-import { buildImageQueries, deterministicImageQueries } from './image-query.js';
+import { buildImageQueries, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
 import { computeSubjectAwareCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
@@ -167,7 +167,7 @@ const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
     simple,
     ...built,
     subject,
-  ].filter(query => query && query.length >= 3))].slice(0, 8);
+  ].map(query => withFoodSearchContext(query, category)).filter(query => query && query.length >= 3))].slice(0, 8);
 };
 
 // Tier 3 (gap-fill only, never used for the initial Tier-1 pass): subject-preserving broadening
@@ -381,8 +381,9 @@ const fillUnfilledSlot = async (state, providers, config, visualQueryProvider = 
   const runTier = async (label, extraQueries = []) => {
     tiersAttempted += 1;
     if (state.selectedId || Date.now() >= deadline || remainingBudget() <= 0) return;
-    if (extraQueries.length) {
-      const fresh = extraQueries.filter(query => !state.queries.includes(query));
+    const scopedQueries = extraQueries.map(query => withFoodSearchContext(query, state.category));
+    if (scopedQueries.length) {
+      const fresh = scopedQueries.filter(query => !state.queries.includes(query));
       if (fresh.length) {
         state.queries.push(...fresh);
         state.queryIndex = state.queries.length - fresh.length; // try the new queries first, not after a full old cycle
@@ -400,7 +401,7 @@ const fillUnfilledSlot = async (state, providers, config, visualQueryProvider = 
       deadline,
     });
     selectBestAvailable(state);
-    state.gapFillTiers.push({ tier: label, queriesAdded: extraQueries, candidatesAfter: state.candidates.length, filled: Boolean(state.selectedId) });
+    state.gapFillTiers.push({ tier: label, queriesAdded: scopedQueries, candidatesAfter: state.candidates.length, filled: Boolean(state.selectedId) });
   };
 
   // Tier 2: same subject-preserving query list, deeper provider pages -- catches results that only
@@ -436,7 +437,8 @@ const fillUnfilledSlot = async (state, providers, config, visualQueryProvider = 
       state.semanticVisualConceptError = error.message;
     }
     state.semanticVisualConcept = phrases.join('; ') || null;
-    for (const phrase of phrases) {
+    for (const rawPhrase of phrases) {
+      const phrase = withFoodSearchContext(rawPhrase, state.category);
       if (state.selectedId || Date.now() >= deadline || remainingBudget() <= 0) break;
       if (!state.queries.includes(phrase)) { state.queries.push(phrase); state.queryIndex = state.queries.length - 1; }
       const before = state.candidates.length;
@@ -542,6 +544,7 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         key,
         questionIndex: question.index,
         slot,
+        category: question.category,
         // The semantic-relevance target for image matching/query-broadening/diagnostics is the
         // option's explicit visualSubject (a concrete, photographable description -- see
         // content-engine.js's deriveVisualSubject) when one is available, else the hand-written
@@ -555,9 +558,9 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         // by a rule-derived guess), then buildImageQueries' short literal fallback queries. The
         // older/broader selectionQueries list is only appended if Tier 0 comes up short.
         queries: [...new Set([
-          String(option.searchQuery || '').trim(),
+          withFoodSearchContext(option.searchQuery, question.category),
           ...buildImageQueries(option.visualSubject || option.text, question.category),
-        ].filter(Boolean))],
+        ].map(query => withFoodSearchContext(query, question.category)).filter(Boolean))],
         queryIndex: 0,
         providerIndex: 0,
         pages: {},
@@ -780,7 +783,9 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
       // audit: failed downloads and framing rejections must trigger replacement searches, not an
       // immediate failure). Broaden to subject-preserving queries -- guaranteed to still satisfy
       // the dominant-subject gate -- for one more bounded round before finally giving up.
-      const extraQueries = broadenedSubjectQueries(item.optionText).filter(query => !(state.queries || []).includes(query));
+      const extraQueries = broadenedSubjectQueries(item.optionText)
+        .map(query => withFoodSearchContext(query, state.category))
+        .filter(query => !(state.queries || []).includes(query));
       if (extraQueries.length) {
         state.queries = state.queries || [];
         state.queries.push(...extraQueries);

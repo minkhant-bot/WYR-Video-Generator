@@ -61,6 +61,15 @@ const SUBJECT_WORD_FORM = Object.freeze({ shop: 'shopping', shops: 'shopping', d
 const TEMPORAL_MODIFIER_WORDS = new Set(['midnight', 'dawn', 'dusk', 'sunrise', 'sunset', 'noon', 'twilight', 'nightfall', 'daybreak']);
 const normalize = value => String(value ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 
+// Food names are often ambiguous outside their category (for example, "Mac" can resolve to an
+// Apple computer). Keep the stored/display text unchanged, but give provider searches the food
+// context needed to disambiguate them. Other categories retain their existing queries verbatim.
+export const withFoodSearchContext = (query, category = '') => {
+  const trimmed = String(query ?? '').trim();
+  if (!trimmed || normalize(category) !== 'food' || /\bfood\b/i.test(trimmed)) return trimmed;
+  return `${trimmed} food`;
+};
+
 // The literal, photographable subject of an option -- what a real photo of this option should
 // actually show. Strips generic verbs/connectors ("live in a", "eat", "own", "explore") that add
 // no visual specificity and can bias a search away from the exact subject (e.g. keeping "explore"

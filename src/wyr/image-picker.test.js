@@ -68,6 +68,23 @@ test('DB-first image selection tries the deterministic option-specific subject q
   } finally { global.fetch = originalFetch; }
 });
 
+test('food-category DB search queries carry food context before reaching image providers', async () => {
+  const originalFetch = global.fetch; const queries = [];
+  try {
+    global.fetch = async url => {
+      const parsed = new URL(url); const query = parsed.searchParams.get('query') || '';
+      queries.push(query);
+      return { ok: true, async json() { return { photos: [{ id: queries.length, width: 1600, height: 900, alt: `${query} meal dish`, url: `https://pexels.test/${queries.length}`, photographer: 'Test', photographer_url: 'https://pexels.test/p', src: { large2x: `https://pexels.test/${queries.length}-large.jpg`, original: `https://pexels.test/${queries.length}.jpg` } }] }; } };
+    };
+    const plan = { questions: [{ index: 0, category: 'food', optionA: { text: 'Mac and Cheese', searchQuery: 'mac and cheese' }, optionB: { text: 'Forest Cake', searchQuery: 'forest cake' } }] };
+    const selection = await createImageSelection({ plan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
+    assert.equal(selection.slots.Q1A.queries[0], 'mac and cheese food');
+    assert.equal(selection.slots.Q1B.queries[0], 'forest cake food');
+    assert.ok(queries.length > 0);
+    assert.equal(queries.every(query => /\bfood\b/i.test(query)), true);
+  } finally { global.fetch = originalFetch; }
+});
+
 test('a fantasy-coded question still gets a stylized fallback query, but a realistic one does not', async () => {
   const originalFetch = global.fetch;
   try {
