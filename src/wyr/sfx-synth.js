@@ -18,9 +18,9 @@ const measurePeakDbfs = wavPath => {
   return Number(match[1]);
 };
 
-// Restored from the project's earlier known-good implementation (commit 6e99c92) -- not
-// synthesized, not extracted from reference/ref.mp4. See config/audio-spec.json's `sfx` section
-// for provenance.
+// Checked-in sources, never synthesized at runtime and never extracted from reference/ref.mp4.
+// Tick, whoosh, and slide were restored from commit 6e99c92; reveal is a deterministic
+// FFmpeg-generated broadband hit. See config/audio-spec.json's `sfx` section for provenance.
 const REFERENCE_SOURCES = {
   tick: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-countdown.wav'),
   reveal: path.join(PROJECT_ROOT, 'assets', 'sfx', 'reference-reveal.wav'),
@@ -34,11 +34,9 @@ const fingerprintOf = spec => crypto.createHash('sha256')
   .update(JSON.stringify(spec.mix))
   .digest('hex');
 
-// Installs (or reuses a cached, still-valid copy of) the four restored reference SFX assets --
-// restored once from the project's earlier known-good implementation, never re-synthesized and
-// never re-extracted from any video. Regenerates automatically if the
-// checked-in reference WAV bytes or config/audio-spec.json's `mix` section change (tracked via a
-// fingerprint in the cache manifest), otherwise reuses the cached files untouched.
+// Installs (or reuses a cached, still-valid copy of) the four checked-in SFX assets. Refreshes the
+// cache if their bytes or config/audio-spec.json's `mix` section change (tracked via a fingerprint
+// in the cache manifest), otherwise reuses the cached files untouched.
 export const ensureSfxAssets = ({ cacheDir, spec }) => {
   fs.mkdirSync(cacheDir, { recursive: true });
   const manifestPath = path.join(cacheDir, 'manifest.json');
