@@ -152,7 +152,8 @@ test('buildSceneTimeline inserts a frame-aligned blank gap (config/audio-spec.js
   const sumOfSceneDurations = timeline.scenes.reduce((sum, scene) => sum + scene.duration, 0);
   assert.equal(Number(timeline.totalDuration.toFixed(6)), Number((sumOfSceneDurations + expectedGap * 5).toFixed(6)), 'total duration must equal every scene duration plus exactly 5 inter-scene gaps for 6 scenes');
 });
-test('SFX schedule contains slide, reveal, and whoosh at the visual timestamps in every scene except the last (which skips whoosh)', () => {
+test('SFX schedule keeps visuals unchanged while separating reveal and transition sounds', () => {
+  const spec = getAudioSpec();
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
   const schedule = buildSfxSchedule(timeline);
   assert.equal(schedule.eventCount, 8 * 3 - 1); // every scene gets slide+reveal+whoosh, except the last (no whoosh)
@@ -160,9 +161,22 @@ test('SFX schedule contains slide, reveal, and whoosh at the visual timestamps i
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
     const expectedTypes = scene.isLastScene ? ['slide', 'reveal'] : ['slide', 'reveal', 'whoosh'];
     assert.deepEqual(events.map(event => event.type), expectedTypes);
-    const expectedTimestamps = [scene.start, scene.start + scene.revealTime];
+    const expectedSlide = scene.index === 0
+      ? scene.start
+      : timeline.scenes[scene.index - 1].start + timeline.scenes[scene.index - 1].contentEnd + WYR_TEMPLATE.timing.transitionSlideDuration;
+    const expectedTimestamps = [expectedSlide, scene.start + scene.revealTime + spec.reveal.sfxDelaySeconds];
     if (!scene.isLastScene) expectedTimestamps.push(scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
     assert.deepEqual(events.map(event => event.timestamp), expectedTimestamps.map(value => Number(value.toFixed(6))));
+
+    const lastTick = buildCountdownSchedule(timeline).events.filter(event => event.sceneIndex === scene.index).at(-1);
+    const reveal = events.find(event => event.type === 'reveal');
+    assert.ok(reveal.timestamp - lastTick.timestamp >= spec.sfx.tick.durationSeconds + spec.reveal.sfxDelaySeconds - 0.000001);
+
+    if (scene.index > 0) {
+      const previousWhoosh = schedule.events.find(event => event.sceneIndex === scene.index - 1 && event.type === 'whoosh');
+      const slide = events.find(event => event.type === 'slide');
+      assert.ok(slide.timestamp - previousWhoosh.timestamp >= spec.sfx.whoosh.durationSeconds, 'the whoosh must finish before the slide impact starts');
+    }
   }
 });
 test('SFX validation fails if any scene silently loses an expected event', () => {

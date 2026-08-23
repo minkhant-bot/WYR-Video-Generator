@@ -16,7 +16,9 @@
   },
   "reveal": {
     "gapAfterLastTickSeconds": 0.085,
-    "gapAfterLastTickSecondsNote": "Overridden after production review (real rendered MP4) found the raw reference measurement below (0.68s) produced an audible ~0.6s dead-air gap between the last countdown tick and the reveal/result SFX -- both the reveal SFX and the visual percentage reveal are driven by this same value (see audio.js buildSceneTimeline revealTime, consumed by both buildSfxSchedule's 'reveal' event and media.js's percentAlpha), so they were already synchronized with each other; the gap itself was simply too large. Set to sfx.tick.durationSeconds (0.085s, below) so the reveal begins exactly as the last tick's own audible tail ends -- no dead air, no overlap. Do not restore 0.68 without re-justifying it against a real rendered review.",
+    "gapAfterLastTickSecondsNote": "Controls the visual percentage-reveal time and remains equal to the nominal tick duration. The reveal SFX has its own small audio-only delay below so a real encoded tick can fully decay without moving the percentage animation.",
+    "sfxDelaySeconds": 0.05,
+    "sfxDelaySecondsNote": "Audio-only separation added after a production render measured the final tick and reveal SFX starts only 0.08s apart. Delaying the reveal sound by 0.05s preserves the countdown cadence and visual reveal timestamp while leaving a clear tail gap.",
     "method": "audio piped s16le mono 24000Hz through highpass=2400,lowpass=2900; RMS in 5ms windows; peaks above 99.3rd percentile RMS with 1.0s minimum separation; gap measured from each countdown run's last tick to the next reveal peak after it",
     "measuredPeakCount": 7,
     "measuredGapRangeSeconds": [0.64, 0.735]

@@ -124,7 +124,7 @@ const revealPeakTimes = pickPeaks(revealRms, revealWin, SAMPLE_RATE, 99.3, 1.0);
     if (next !== undefined) gaps.push(next - lastTick);
   }
   const medianGap = median(gaps);
-  const expectedGap = spec.reveal.gapAfterLastTickSeconds;
+  const expectedGap = spec.reveal.gapAfterLastTickSeconds + (spec.reveal.sfxDelaySeconds ?? 0);
   const gapOk = medianGap !== null && Math.abs(medianGap - expectedGap) <= Math.max(0.3, expectedGap * 0.5);
   record('reveal gap after countdown', gapOk, `${gaps.length} reveal(s) matched to a countdown run, median gap=${medianGap?.toFixed(3)}s (expected ~${expectedGap}s)`);
 }
