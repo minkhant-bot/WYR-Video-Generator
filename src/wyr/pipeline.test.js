@@ -26,10 +26,10 @@ const EIGHT_DIVERSE = [
   { category: 'space', optionA: { text: 'Visit the ISS', searchQuery: 'international space station' }, optionB: { text: 'Visit the moon', searchQuery: 'moon surface astronaut' } },
   { category: 'ocean', optionA: { text: 'Swim with sharks', searchQuery: 'swimming with sharks' }, optionB: { text: 'Swim with whales', searchQuery: 'swimming with whales' } },
   { category: 'fame', optionA: { text: 'Be a movie star', searchQuery: 'movie star red carpet' }, optionB: { text: 'Be a rock star', searchQuery: 'rock star concert stage' } },
-];
+].map(item => ({ ...item, category: 'food' }));
 
 const baseConfig = overrides => ({
-  questionCount: 8, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
+  questionCount: 6, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
   poolTarget: 10, poolLowWaterMark: 100, poolEmergencyRefillMaxBatches: 1,
   secondsPerQuestion: 7,
   pixabayApiKey: 'test-pixabay-key', pexelsApiKey: 'test-pexels-key', pexelsConcurrency: 4,

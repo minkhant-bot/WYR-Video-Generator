@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
-import { commitPlanUsage, countReady, getPoolStats, insertQuestions, releaseReservation, releaseStaleReservations, reserveReplacementQuestion, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
+import { commitPlanUsage, countReady, countReadyFood, getPoolStats, insertQuestions, releaseReservation, releaseStaleReservations, reserveReplacementQuestion, selectAndReservePlan, selectPlanForJob } from './question-pool.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -13,7 +13,7 @@ const withFakeDb = async operation => {
 
 const question = (category, a, b, aq, bq) => ({ category, optionA: { text: a, searchQuery: aq || `${a} scene` }, optionB: { text: b, searchQuery: bq || `${b} scene` } });
 
-const EIGHT_DIVERSE = [
+const EIGHT_MIXED = [
   question('money', 'Own a yacht', 'Own a jet'),
   question('luxury', 'Live in a mansion', 'Live in a penthouse'),
   question('travel', 'Backpack Europe', 'Cruise the Caribbean'),
@@ -23,11 +23,12 @@ const EIGHT_DIVERSE = [
   question('ocean', 'Swim with sharks', 'Swim with whales'),
   question('fame', 'Be a movie star', 'Be a rock star'),
 ];
+const EIGHT_DIVERSE = EIGHT_MIXED.map(item => ({ ...item, category: 'food' }));
 
 // 16 distinct, non-fantasy questions across 8 distinct content families (2 categories each, at the
 // family cap), so two SEPARATE 6-question selections can each be drawn diversely from whatever is
 // still 'ready' after the other has consumed its 6 -- used only for the cross-job non-reuse test.
-const SIXTEEN_DIVERSE = [
+const SIXTEEN_MIXED = [
   question('money', 'Own a yacht', 'Own a jet'),
   question('luxury', 'Live in a mansion', 'Live in a penthouse'),
   question('travel', 'Backpack Europe', 'Cruise the Caribbean'),
@@ -45,6 +46,25 @@ const SIXTEEN_DIVERSE = [
   question('sports', 'Win an olympic gold medal', 'Win a world championship title'),
   question('music', 'Headline a huge festival', 'Record a platinum album'),
 ];
+const SIXTEEN_DIVERSE = SIXTEEN_MIXED.map(item => ({ ...item, category: 'food' }));
+
+test('countReadyFood is category-scoped while countReady remains the general admin/refill count', () => withFakeDb(async () => {
+  await insertQuestions(EIGHT_MIXED);
+  assert.equal(await countReady(), 8);
+  assert.equal(await countReadyFood(), 1);
+}));
+
+test('primary reservation filters to food before ranking and never fills from stronger non-food rows', () => withFakeDb(async () => {
+  await insertQuestions([
+    ...EIGHT_DIVERSE,
+    question('luxury', 'Own a private island', 'Own a private jet'),
+    question('money', 'Receive ten million dollars', 'Retire twenty years early', 'money cash vault', 'retirement beach couple'),
+  ]);
+  const reservation = await selectAndReservePlan({ jobId: 'job-food-only', count: 6, targetTotalSeconds: 999 });
+  assert.ok(reservation);
+  assert.equal(reservation.selected.length, 6);
+  assert.equal(reservation.selected.every(row => row.category === 'food'), true);
+}));
 
 test('insertQuestions persists a valid batch and rejects a duplicate insert of the same pair', () => withFakeDb(async () => {
   const first = await insertQuestions(EIGHT_DIVERSE.slice(0, 2));
@@ -85,7 +105,7 @@ test('selectAndReservePlan returns null (not a throw) when the pool cannot fill 
 
 test('concurrent jobs never both reserve the same questions (sequential reservations do not overlap)', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
-  await insertQuestions([question('survival-lite', 'Survive a desert island', 'Survive an arctic winter'), question('friendship/social', 'Throw a huge party', 'Host a small gathering')]);
+  await insertQuestions([question('food', 'Survive on canned food', 'Survive on dried food'), question('food', 'Throw a pizza party', 'Host a barbecue dinner')]);
   const first = await selectAndReservePlan({ jobId: 'job-a', count: 8, targetTotalSeconds: 999 });
   assert.ok(first);
   const second = await selectAndReservePlan({ jobId: 'job-b', count: 2 });
@@ -294,18 +314,20 @@ test('commitPlanUsage is idempotent: calling it twice for the same completed job
 
 test('reserveReplacementQuestion reserves exactly one ready question, excludes already-in-plan ids and motifs, and prefers a stronger eligible dilemma among ties', () => withFakeDb(async () => {
   await insertQuestions([
-    question('travel', 'Own a small suitcase', 'Own a large suitcase'), // deliberately weak/low-stakes
-    question('lifestyle', 'Keep every weekend off', 'Earn a much bigger salary', 'weekend off calendar', 'salary money stack'), // real tradeoff
+    question('food', 'Own a small snack', 'Own a large snack'), // deliberately weak/low-stakes
+    question('food', 'Eat gourmet meals daily', 'Keep every family recipe', 'gourmet meal table', 'family recipe cookbook'), // stronger tradeoff
+    question('luxury', 'Own a private island', 'Own a private jet'), // stronger non-food row must remain ineligible
   ]);
   const excludeIds = [];
   const result = await reserveReplacementQuestion({ jobId: 'job-replace-1', excludeIds, inPlanMotifs: new Set() });
   assert.ok(result.candidate, 'expected a replacement candidate to be found');
-  assert.equal(result.candidate.option_a_text, 'Keep every weekend off', 'the stronger eligible dilemma should be preferred as the replacement');
-  assert.equal(await countReady(), 1, 'exactly one question must move out of ready');
+  assert.equal(result.candidate.option_a_text, 'Eat gourmet meals daily', 'the stronger eligible food dilemma should be preferred as the replacement');
+  assert.equal(result.candidate.category, 'food');
+  assert.equal(await countReady(), 2, 'exactly one question must move out of ready');
 }));
 
 test('reserveReplacementQuestion excludes ids already in the plan and returns null when nothing eligible remains', () => withFakeDb(async () => {
-  const inserted = await insertQuestions([question('travel', 'Visit Rome', 'Visit Cairo')]);
+  const inserted = await insertQuestions([question('food', 'Eat pasta in Rome', 'Eat falafel in Cairo', 'rome pasta restaurant', 'cairo falafel restaurant')]);
   const result = await reserveReplacementQuestion({ jobId: 'job-replace-2', excludeIds: inserted.inserted, inPlanMotifs: new Set() });
   assert.equal(result.candidate, null);
   assert.equal(await countReady(), 1, 'an excluded/no-match outcome must never reserve anything');

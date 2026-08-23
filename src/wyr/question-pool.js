@@ -42,6 +42,14 @@ export const countReady = async () => {
   return rows[0].count;
 };
 
+// Production generation is food-only, but the admin pool totals intentionally remain global.
+// Keep this as a separate read model so failure diagnostics report the inventory the selector can
+// actually use without changing countReady()/getPoolStats() for existing maintenance workflows.
+export const countReadyFood = async () => {
+  const { rows } = await withClient(client => client.query("SELECT count(*)::int AS count FROM wyr_questions WHERE status = 'ready' AND category = 'food'"));
+  return rows[0].count;
+};
+
 // Admin/status-panel read model, sourced entirely from wyr_questions.status. A question that has
 // been successfully used in a completed, verified video is retired to status='used' (see
 // commitPlanUsage below) and never rotates back to 'ready' -- so "used" here counts consumed
@@ -125,7 +133,7 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
 // duration budget using only this candidate window -- that failure must never trigger a Groq call.
 export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
   const { rows: rawCandidates } = await client.query(
-    `SELECT * FROM wyr_questions WHERE status = 'ready'
+    `SELECT * FROM wyr_questions WHERE status = 'ready' AND category = 'food'
      ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
      LIMIT $1 FOR UPDATE SKIP LOCKED`,
     [candidateWindowSize],
@@ -222,7 +230,7 @@ export const releaseQuestionReservation = async ({ jobId, poolId }) => {
 // wordingRejectedCount is always reported so the caller can fold it into job-level diagnostics.
 export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, candidateWindowSize = 80 }) => withTransaction(async client => {
   const { rows: rawCandidates } = await client.query(
-    `SELECT * FROM wyr_questions WHERE status = 'ready' AND NOT (id = ANY($1::bigint[]))
+    `SELECT * FROM wyr_questions WHERE status = 'ready' AND category = 'food' AND NOT (id = ANY($1::bigint[]))
      ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
      LIMIT $2 FOR UPDATE SKIP LOCKED`,
     [excludeIds, candidateWindowSize],

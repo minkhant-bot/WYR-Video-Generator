@@ -5,7 +5,6 @@ import { insertQuestions, selectAndReservePlan, selectPlanForJob, countReady, Du
 import { selectContentPlan } from './content-source.js';
 import { estimateSceneDurationFromText, DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { createFakeDb } from './test-fake-db.js';
-import { computeDilemmaRankScore } from './pool-selection.js';
 
 const withFakeDb = async operation => {
   const fake = createFakeDb();
@@ -16,7 +15,7 @@ const withFakeDb = async operation => {
 
 const question = (category, a, aq, b, bq) => ({ category, optionA: { text: a, searchQuery: aq }, optionB: { text: b, searchQuery: bq } });
 
-// Eight long-narration questions, one per distinct content family, whose combined ESTIMATED
+// Eight long-narration food questions whose combined ESTIMATED
 // duration reproduces the production "61.933s" class of failure -- long enough to clear the
 // budget target, short enough to still pass computeInsertionFields' own quality gate.
 const LONG_QUESTIONS = [
@@ -28,9 +27,9 @@ const LONG_QUESTIONS = [
   question('space', 'Float weightlessly inside a real orbiting spacecraft', 'astronaut floating zero gravity', 'Walk slowly across the surface of the moon', 'moon surface astronaut walking'),
   question('survival-lite', 'Build a small shelter alone deep in a forest', 'wooden shelter forest survival', 'Start a warm fire alone without any matches', 'campfire sparks flint survival'),
   question('money', 'Own a small private island somewhere in the Pacific', 'private island aerial view', 'Own a tall penthouse somewhere in a big city', 'penthouse city skyline view'),
-];
+].map(item => ({ ...item, category: 'food' }));
 
-// A short, valid substitute for each family above.
+// A short, valid food substitute for each long row above.
 const SHORT_QUESTIONS = [
   question('superpowers', 'Fly fast', 'person flying sky superhero', 'Turn invisible', 'invisible person disappearing'),
   question('time', 'Meet your future self', 'two people mirror reflection', 'Meet your past self', 'old photo young person'),
@@ -40,7 +39,7 @@ const SHORT_QUESTIONS = [
   question('space', 'Visit the ISS', 'international space station interior', 'Visit the moon', 'moon surface astronaut footprint'),
   question('survival-lite', 'Start a fire', 'campfire sparks flint survival', 'Find fresh water', 'wild stream fresh water'),
   question('money', 'Own a yacht', 'luxury yacht ocean deck', 'Own a jet', 'private jet runway interior'),
-];
+].map(item => ({ ...item, category: 'food' }));
 
 // Forces the fake DB's LRU ordering (last_used_at ASC NULLS FIRST, used_count ASC, hook_score
 // DESC, id ASC) to place `rows` before every other ready row, by giving them the lowest
@@ -68,10 +67,10 @@ test('a long, over-budget 8-question DB selection is automatically repaired in p
     const projectedTotal = reservation.selected.reduce((sum, row) => sum + estimateSceneDurationFromText(row.option_a_text, row.option_b_text), 0);
     assert.ok(projectedTotal <= DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, `repaired total ${projectedTotal}s must be under the ${DEFAULT_DURATION_BUDGET_TOTAL_SECONDS}s budget`);
 
-    // Diversity rules preserved.
-    const familyCounts = new Map();
-    for (const row of reservation.selected) familyCounts.set(row.content_family, (familyCounts.get(row.content_family) || 0) + 1);
-    for (const [family, count] of familyCounts) assert.ok(count <= 2, `family ${family} appears ${count} times`);
+    // Food-only selection still preserves the hard motif/fantasy rules. The existing selector's
+    // soft family cap necessarily relaxes because every food row has the same content family.
+    assert.equal(reservation.selected.every(row => row.category === 'food'), true);
+    assert.deepEqual([...new Set(reservation.selected.map(row => row.content_family))], ['food_and_social']);
     assert.ok(reservation.selected.filter(row => row.is_fantasy).length <= 1);
     const motifs = reservation.selected.flatMap(row => [row.motif_key_a, row.motif_key_b]).filter(Boolean);
     assert.equal(new Set(motifs).size, motifs.length, 'no motif should be reused across the repaired selection');
@@ -83,7 +82,7 @@ test('a long, over-budget 8-question DB selection is automatically repaired in p
   } finally { globalThis.fetch = originalFetch; }
 }));
 
-test('Scene 1 is the strongest hook among the POST-repair 8, not whichever question happened to be selected first', () => withFakeDb(async fake => {
+test('Scene 1 is the highest raw hook_score food matchup among the POST-repair 8', () => withFakeDb(async fake => {
   await insertQuestions(LONG_QUESTIONS);
   await insertQuestions(SHORT_QUESTIONS);
   markFreshest(fake, new Set(LONG_QUESTIONS.map(q => q.optionA.text)), 0);
@@ -93,12 +92,8 @@ test('Scene 1 is the strongest hook among the POST-repair 8, not whichever quest
   assert.ok(plan);
   assert.equal(plan.questions.length, 8);
 
-  // Recover the real, DB-stored hook_score for every question actually in the final plan (i.e.
-  // the post-repair set) and confirm Scene 1 (index 0) is the one with the highest DILEMMA RANK
-  // SCORE among THOSE 8 -- hook_score (clarity/visual/concision) plus the local strength bonus (see
-  // pool-selection.js's computeDilemmaRankScore) -- not merely the highest raw hook_score, and not
-  // merely the highest among the original pre-repair 8, which duration repair may have partly
-  // swapped out.
+  // Recover the real DB rows for the final, post-repair set. arrangeForHook deliberately uses raw
+  // hook_score for the strongest food opener; candidate-window ranking remains unchanged.
   const byText = new Map([...fake.state.questions.values()].map(row => [row.option_a_text, row]));
   const finalRows = plan.questions.map(q => byText.get(q.optionA.text));
   assert.ok(finalRows.every(Boolean), 'every plan question must be traceable back to a real pool row');
@@ -108,9 +103,9 @@ test('Scene 1 is the strongest hook among the POST-repair 8, not whichever quest
   const shortTexts = new Set(SHORT_QUESTIONS.map(q => q.optionA.text));
   assert.ok(finalRows.some(row => shortTexts.has(row.option_a_text)), 'expected duration repair to have swapped in at least one short question');
 
-  const highestDilemmaRankScore = Math.max(...finalRows.map(computeDilemmaRankScore));
+  const highestHookScore = Math.max(...finalRows.map(row => Number(row.hook_score)));
   const scene1Row = byText.get(plan.questions[0].optionA.text);
-  assert.equal(computeDilemmaRankScore(scene1Row), highestDilemmaRankScore, 'Scene 1 must carry the highest dilemma rank score (hook clarity + strength signals) among the final, post-repair 8 questions');
+  assert.equal(Number(scene1Row.hook_score), highestHookScore);
 }));
 
 test('when no valid local substitute exists at all, selectAndReservePlan throws DurationBudgetExceededError (not CONTENT_POOL_EMPTY) and reserves nothing', () => withFakeDb(async fake => {

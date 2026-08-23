@@ -18,7 +18,8 @@ export const createFakeDb = () => {
     if (text.startsWith('INSERT INTO schema_migrations')) { state.migrations.add(params[0]); return { rows: [] }; }
 
     if (text.startsWith('SELECT count(*)::int AS count FROM wyr_questions')) {
-      const count = [...state.questions.values()].filter(row => row.status === 'ready').length;
+      const foodOnly = text.includes("category = 'food'");
+      const count = [...state.questions.values()].filter(row => row.status === 'ready' && (!foodOnly || row.category === 'food')).length;
       return { rows: [{ count }] };
     }
     if (text.startsWith('SELECT status, count(*)::int AS count FROM wyr_questions GROUP BY status')) {
@@ -59,7 +60,8 @@ export const createFakeDb = () => {
       const [excludeIds, limitAfterExclude] = excludesIds ? params : [[], params[0]];
       const limit = excludesIds ? limitAfterExclude : params[0];
       const excluded = new Set(excludeIds);
-      const ready = [...state.questions.values()].filter(row => row.status === 'ready' && !excluded.has(row.id))
+      const foodOnly = text.includes("category = 'food'");
+      const ready = [...state.questions.values()].filter(row => row.status === 'ready' && (!foodOnly || row.category === 'food') && !excluded.has(row.id))
         .sort((left, right) => (left.last_used_at ? 1 : 0) - (right.last_used_at ? 1 : 0) || left.used_count - right.used_count || right.hook_score - left.hook_score || left.id - right.id);
       return { rows: ready.slice(0, limit) };
     }
