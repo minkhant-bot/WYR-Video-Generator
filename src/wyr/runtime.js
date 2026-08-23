@@ -8,10 +8,10 @@ const require = createRequire(import.meta.url);
 export const PROJECT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const PUBLIC_DIR = path.join(PROJECT_ROOT, 'public');
 export const DEFAULT_DATA_DIR = path.join(PROJECT_ROOT, 'data');
-export const FONT_PATH = path.resolve(process.env.WYR_FONT_PATH || path.join(PROJECT_ROOT, 'assets', 'fonts', 'FreeSansBold.ttf'));
+export const FONT_PATH = path.resolve(process.env.WYR_FONT_PATH || path.join(PROJECT_ROOT, 'assets', 'fonts', 'Baloo2-ExtraBold.ttf'));
 export const resolveProjectPath = value => path.isAbsolute(value) ? value : path.resolve(PROJECT_ROOT, value);
 export const REQUIRED_FFMPEG_FILTERS = Object.freeze([
-  'drawtext', 'bbox', 'scale', 'crop', 'setsar', 'format', 'fade', 'drawbox', 'overlay', 'color', 'geq', 'setrange',
+  'drawtext', 'bbox', 'scale', 'crop', 'setsar', 'format', 'fade', 'drawbox', 'overlay', 'color', 'geq', 'setrange', 'noise',
   'aevalsrc', 'highpass', 'lowpass', 'afade', 'anullsrc', 'atrim', 'aresample', 'aformat', 'volume', 'adelay', 'asplit', 'amix', 'alimiter',
 ]);
 export const REQUIRED_FFMPEG_ENCODERS = Object.freeze(['libx264', 'aac']);
@@ -119,6 +119,6 @@ const resolveBinary = ({ name, environmentName, commonPaths, packageName, packag
 export const resolveFfprobePath = () => resolveBinary({ name: 'ffprobe', environmentName: 'FFPROBE_PATH', commonPaths: ['/usr/bin/ffprobe', '/usr/local/bin/ffprobe'], packageName: 'ffprobe-static', packagePath: installed => installed.path });
 
 export const assertFontAvailable = () => {
-  if (!fs.existsSync(FONT_PATH) || !fs.statSync(FONT_PATH).isFile()) throw new Error(`Render font not found: ${FONT_PATH}. Restore assets/fonts/FreeSansBold.ttf or set WYR_FONT_PATH.`);
+  if (!fs.existsSync(FONT_PATH) || !fs.statSync(FONT_PATH).isFile()) throw new Error(`Render font not found: ${FONT_PATH}. Restore assets/fonts/Baloo2-ExtraBold.ttf or set WYR_FONT_PATH.`);
   return FONT_PATH;
 };

@@ -130,17 +130,19 @@ const renderSegment = async ({ question, nextQuestion = null, assets, index, dur
   const percentPopDuration = 0.22;
   const percentFontSize = popFontSize(typography.percentageSize, revealTime, percentPopDuration, 1.18);
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
-    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0x19D8EE:x=${x}-4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
-    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=0xF45A78:x=${x}+4:y=${y}+(${layout.textHeight}-text_h)/2+4:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
-    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:borderw=7:bordercolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
+    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
-  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${percentFontSize}:fontcolor=${winner ? '0x00F044' : 'white'}:borderw=7:bordercolor=black:shadowcolor=0xF45A78:shadowx=5:shadowy=5:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
+  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${percentFontSize}:fontcolor=${winner ? '0x1FAE55' : 'black'}:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
   const filter = [
     ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a', crop: a.framing }),
     ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b', crop: b.framing }),
     ...(nextQuestion ? buildFramedImageChain({ input: '2:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'naimg', chainId: 'na', crop: na.framing }) : []),
     ...(nextQuestion ? buildFramedImageChain({ input: '3:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'nbimg', chainId: 'nb', crop: nb.framing }) : []),
-    `color=c=${layout.topColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},drawbox=x=0:y=${canvas.height / 2}:w=${canvas.width}:h=${canvas.height / 2}:color=${layout.bottomColor}:t=fill,drawbox=x=0:y=${layout.separatorY}:w=${canvas.width}:h=${layout.separatorHeight}:color=black:t=fill[base]`,
+    // Procedural paper texture: a flat off-white plate plus a fixed (non-temporal, luma-only) grain
+    // pattern from ffmpeg's noise filter -- 'u' without 't' keeps the same grain on every frame
+    // instead of flickering film-grain static, and restricting it to c0 (luma) avoids the colored
+    // speckling that noising the chroma planes of a yuv420p frame would cause.
+    `color=c=${layout.paperColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},format=yuv420p,noise=c0s=${layout.paperNoiseStrength}:c0f=u[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
     ...(nextQuestion ? [
