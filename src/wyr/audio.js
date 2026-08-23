@@ -153,8 +153,8 @@ export const buildSceneTimeline = ({ voiceovers, baseDuration = WYR_TEMPLATE.tim
   return { version: 1, baseDuration, voicePaddingSeconds, tickCount: ticks, tickSpacingSeconds: tickSpacing, blankGapSeconds: gap, totalDuration: cursor, scenes };
 };
 
-// 'slide' fires at scene start (accompanies images sliding in), 'whoosh' fires at scene end
-// (accompanies the outgoing slide) -- 'whoosh' is omitted on the final scene (see buildSfxSchedule).
+// 'slide' fires once at video start; 'whoosh' accompanies each inter-scene crossover; 'reveal'
+// fires once per scene. The final scene has no outgoing whoosh (see buildSfxSchedule).
 export const SFX_EVENT_TYPES = Object.freeze(['slide', 'reveal', 'whoosh']);
 
 export const assertCompleteCountdownSchedule = ({ timeline, events }) => {
@@ -190,27 +190,20 @@ export const buildCountdownSchedule = timeline => {
   return { version: 1, ticksPerScene: timeline.tickCount ?? timeline.scenes[0]?.countdown.length, eventCount: events.length, events };
 };
 
-// The whoosh leads into the unchanged visual crossover. Scene N+1's short slide/impact lands when
-// that crossover finishes, after the whoosh's 0.335s tail, instead of starting at the same instant
-// and doubling the whoosh's sample-identical first 0.125s. Scene 0 has no predecessor, so its slide
-// stays at the video start.
+// The whoosh spans the unchanged inter-scene crossover. The similar slide/impact sound is reserved
+// for the opening only; playing another one at the crossover's end makes one visual movement sound
+// like two separate hits.
 const whooshTimestamp = scene => scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead;
-const slideEventTimestamp = (timeline, sceneIndex) =>
-  sceneIndex === 0
-    ? timeline.scenes[0].start
-    : timeline.scenes[sceneIndex - 1].start + timeline.scenes[sceneIndex - 1].contentEnd + WYR_TEMPLATE.timing.transitionSlideDuration;
 const revealEventTimestamp = scene => scene.start + scene.revealTime + (getAudioSpec().reveal.sfxDelaySeconds ?? 0);
 
-// Every scene gets 'slide' (entrance) and 'reveal'; only non-final scenes get 'whoosh' -- the final
-// scene skips its outgoing transition entirely (see buildSceneTimeline's isLastScene handling).
+// Scene 1 gets the opening slide; every scene gets a reveal; each non-final scene gets exactly one
+// whoosh for its outgoing crossover.
 export const buildSfxSchedule = timeline => {
   if (!Array.isArray(timeline?.scenes) || timeline.scenes.length === 0) throw new Error('A scene timeline is required to schedule SFX.');
   const events = timeline.scenes.flatMap((scene, sceneIndex) => {
-    const slideTimestamp = slideEventTimestamp(timeline, sceneIndex);
-    const sceneEvents = [
-      { sceneIndex, type: 'slide', sceneTime: slideTimestamp - scene.start, timestamp: slideTimestamp },
-      { sceneIndex, type: 'reveal', sceneTime: revealEventTimestamp(scene) - scene.start, timestamp: revealEventTimestamp(scene) },
-    ];
+    const sceneEvents = [];
+    if (sceneIndex === 0) sceneEvents.push({ sceneIndex, type: 'slide', sceneTime: 0, timestamp: scene.start });
+    sceneEvents.push({ sceneIndex, type: 'reveal', sceneTime: revealEventTimestamp(scene) - scene.start, timestamp: revealEventTimestamp(scene) });
     if (!scene.isLastScene) sceneEvents.push({ sceneIndex, type: 'whoosh', sceneTime: scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead, timestamp: whooshTimestamp(scene) });
     return sceneEvents;
   }).map(event => ({ ...event, sceneTime: Number(event.sceneTime.toFixed(6)), timestamp: Number(event.timestamp.toFixed(6)) }));
@@ -223,13 +216,13 @@ export const assertCompleteSfxSchedule = ({ timeline, events }) => {
   let expectedTotal = 0;
   for (let sceneIndex = 0; sceneIndex < timeline.scenes.length; sceneIndex += 1) {
     const scene = timeline.scenes[sceneIndex]; const sceneEvents = events.filter(event => event.sceneIndex === sceneIndex);
-    const expectedTypes = scene.isLastScene ? SFX_EVENT_TYPES.filter(type => type !== 'whoosh') : SFX_EVENT_TYPES;
+    const expectedTypes = [...(sceneIndex === 0 ? ['slide'] : []), 'reveal', ...(!scene.isLastScene ? ['whoosh'] : [])];
     expectedTotal += expectedTypes.length;
     if (sceneEvents.length !== expectedTypes.length) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain ${expectedTypes.length} events; found ${sceneEvents.length}.`);
     for (const type of expectedTypes) {
       const matching = sceneEvents.filter(event => event.type === type);
       if (matching.length !== 1) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} must contain exactly one ${type} event.`);
-      const expected = type === 'slide' ? slideEventTimestamp(timeline, sceneIndex) : (type === 'reveal' ? revealEventTimestamp(scene) : whooshTimestamp(scene));
+      const expected = type === 'slide' ? scene.start : (type === 'reveal' ? revealEventTimestamp(scene) : whooshTimestamp(scene));
       if (!Number.isFinite(matching[0].timestamp) || Math.abs(matching[0].timestamp - expected) > 0.000001) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} ${type} event is not at its intended timestamp.`);
     }
     if (scene.isLastScene && sceneEvents.some(event => event.type === 'whoosh')) throw new Error(`SFX validation failed: scene ${sceneIndex + 1} is the final scene and must not schedule a whoosh.`);

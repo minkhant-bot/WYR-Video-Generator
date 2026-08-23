@@ -260,7 +260,8 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
 // indices used by the filters below. `normalize=0` on amix plus explicit per-input `volume=`
 // weights (computed from real measured peaks, see computeNarrationVolumes/sfx-synth.js) is what
 // keeps narration and SFX at their intended target levels instead of amix auto-attenuating
-// everything as more inputs are added.
+// everything as more inputs are added. Every SFX input is high-passed at 120Hz before its existing
+// volume is applied, removing source-file rumble without filtering the narration streams.
 export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [], loudnessTarget = getAudioSpec().mix }) => {
   const inputOrder = ['video'];
   const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`];
@@ -275,14 +276,14 @@ export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, cou
   for (const type of SFX_EVENT_TYPES) {
     const inputIndex = inputOrder.length; sfxInputIndexByType[type] = inputIndex; inputOrder.push(`sfx:${type}`);
     const typeEvents = schedule.events.filter(event => event.type === type);
-    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
+    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
     for (let index = 0; index < typeEvents.length; index += 1) {
       const label = `${type}${index}`; const delay = Math.round(typeEvents[index].timestamp * 1000);
       filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
     }
   }
   const tickInputIndex = inputOrder.length; inputOrder.push('sfx:tick');
-  filters.push(`[${tickInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.tick.volume},asplit=${countdown.events.length}${countdown.events.map((_, index) => `[tick${index}raw]`).join('')}`);
+  filters.push(`[${tickInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume=${sfx.tick.volume},asplit=${countdown.events.length}${countdown.events.map((_, index) => `[tick${index}raw]`).join('')}`);
   for (let index = 0; index < countdown.events.length; index += 1) {
     const label = `tick${index}`; const delay = Math.round(countdown.events[index].timestamp * 1000);
     filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
