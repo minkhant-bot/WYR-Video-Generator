@@ -18,7 +18,7 @@ writeJsonAtomic(path.join(workspace, 'plan.json'), plan); writeJsonAtomic(path.j
 const timeline = buildSceneTimeline({ voiceovers: plan.questions.map(() => ({ duration: 2.5 })), baseDuration: WYR_TEMPLATE.timing.defaultSceneDuration });
 const sfx = await createLocalSfx({ audioDir: path.join(workspace, 'audio') });
 const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
-writeJsonAtomic(path.join(workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(workspace, 'sfx.json'), { provider: sfx.provider, entrance: sfx.entrance, reveal: sfx.reveal, transition: sfx.transition, countdownSequence: sfx.countdownSequence, schedule: sfxSchedule, countdownSchedule });
+writeJsonAtomic(path.join(workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(workspace, 'sfx.json'), { provider: sfx.provider, reveal: sfx.reveal, transition: sfx.transition, countdownSequence: sfx.countdownSequence, schedule: sfxSchedule, countdownSchedule });
 buildComposition({ plan, assets, timeline, sfx, workspace });
 const outputPath = await renderVideo({ plan, assets, timeline, sfx, sfxSchedule, countdownSchedule, workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => console.log(JSON.stringify({ stage: 'rendering', done, total })) });
 const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(workspace, 'render'), timeline, sfxSchedule, countdownSchedule });

@@ -20,8 +20,4 @@ export const loadAudioSpec = ({ force = false } = {}) => {
 export const getAudioSpec = () => loadAudioSpec();
 export const __resetAudioSpecCacheForTests = () => { cached = null; };
 
-// (tickCount - 1) * tickSpacing covers the tick train itself; the reveal fires
-// revealGapAfterLastTickSeconds after the LAST tick, so the countdown-to-reveal span is the sum of
-// both -- this replaces the old fixed countdownSequenceDuration constant.
-export const getCountdownSequenceDuration = (spec = getAudioSpec()) =>
-  (spec.countdown.tickCount - 1) * spec.countdown.tickSpacingSeconds + spec.reveal.gapAfterLastTickSeconds;
+export const getCountdownSequenceDuration = (spec = getAudioSpec()) => spec.countdown.sequenceDurationSeconds;

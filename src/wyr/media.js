@@ -197,14 +197,14 @@ export const buildConcatSegmentList = ({ segments, timeline, gapSegmentPath }) =
   return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapPathFor(index)] : [segment]);
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, slide: sfx.slide.filename, reveal: sfx.reveal.filename, whoosh: sfx.whoosh.filename, tick: sfx.tick.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
 const assertReadableNonEmptyFile = (localPath, label) => {
   if (!localPath || !fs.existsSync(localPath)) throw new Error(`Required render input is missing: ${label}.`);
   if (!fs.statSync(localPath).isFile() || fs.statSync(localPath).size <= 0) throw new Error(`Required render input is empty or unreadable: ${label}.`);
 };
-const SFX_ASSET_NAMES = Object.freeze(['slide', 'reveal', 'whoosh', 'tick']);
+const SFX_ASSET_NAMES = Object.freeze([...SFX_EVENT_TYPES, 'countdownSequence']);
 export const assertProductionAudioInputs = ({ plan, voiceovers = [], timeline, sfx }) => {
   if ((voiceovers.length && voiceovers.length !== plan.questions.length) || !timeline || !sfx || SFX_ASSET_NAMES.some(name => !sfx[name]?.localPath)) throw new Error('Production audio rendering requires a timeline and all local SFX files, plus one voice file per scene when narration is enabled.');
   // Catches a deleted/corrupted/never-written file with a clear message before the expensive
@@ -255,13 +255,12 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
 // extracted from renderVideo so the input ordering, adelay timestamps, and amix label wiring can
 // be verified deterministically in tests against ANY scene count, without needing a real ffmpeg
 // render for every case. Input order (and therefore stream indices) is: [0]=video, then one input
-// per voiceover, then one input per SFX_EVENT_TYPES entry, then the tick SFX -- renderVideo pushes
+// per voiceover, then one input per SFX_EVENT_TYPES entry, then the countdown sequence -- renderVideo pushes
 // '-i' arguments in this exact same order, so inputOrder's indices are the real ffmpeg stream
 // indices used by the filters below. `normalize=0` on amix plus explicit per-input `volume=`
-// weights (computed from real measured peaks, see computeNarrationVolumes/sfx-synth.js) is what
+// weights is what
 // keeps narration and SFX at their intended target levels instead of amix auto-attenuating
-// everything as more inputs are added. Every SFX input is high-passed at 120Hz before its existing
-// volume is applied, removing source-file rumble without filtering the narration streams.
+// everything as more inputs are added.
 export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [], loudnessTarget = getAudioSpec().mix }) => {
   const inputOrder = ['video'];
   const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`];
@@ -276,16 +275,16 @@ export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, cou
   for (const type of SFX_EVENT_TYPES) {
     const inputIndex = inputOrder.length; sfxInputIndexByType[type] = inputIndex; inputOrder.push(`sfx:${type}`);
     const typeEvents = schedule.events.filter(event => event.type === type);
-    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
+    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx[type].volume},asplit=${typeEvents.length}${typeEvents.map((_, index) => `[${type}${index}raw]`).join('')}`);
     for (let index = 0; index < typeEvents.length; index += 1) {
       const label = `${type}${index}`; const delay = Math.round(typeEvents[index].timestamp * 1000);
       filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
     }
   }
-  const tickInputIndex = inputOrder.length; inputOrder.push('sfx:tick');
-  filters.push(`[${tickInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume=${sfx.tick.volume},asplit=${countdown.events.length}${countdown.events.map((_, index) => `[tick${index}raw]`).join('')}`);
-  for (let index = 0; index < countdown.events.length; index += 1) {
-    const label = `tick${index}`; const delay = Math.round(countdown.events[index].timestamp * 1000);
+  const countdownInputIndex = inputOrder.length; inputOrder.push('sfx:countdownSequence');
+  filters.push(`[${countdownInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${sfx.countdownSequence.volume},asplit=${timeline.scenes.length}${timeline.scenes.map((_, index) => `[countdownSequence${index}raw]`).join('')}`);
+  for (let index = 0; index < timeline.scenes.length; index += 1) {
+    const label = `countdownSequence${index}`; const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].countdownStart) * 1000);
     filters.push(`[${label}raw]adelay=delays=${delay}:all=1[${label}]`); mixLabels.push(`[${label}]`);
   }
   // Final-output loudness normalization: applied ONCE, after every voice+SFX input has already been
@@ -300,7 +299,7 @@ export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, cou
   filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0[premix]`);
   filters.push(`[premix]loudnorm=I=${targetIntegratedLufs}:TP=${truePeakCeilingDb}:LRA=${loudnessRangeTarget}:print_format=summary[normalized]`);
   filters.push(`[normalized]alimiter=limit=0.90:attack=5:release=50,atrim=duration=${totalDuration}[aout]`);
-  return { inputOrder, filters, mixLabels, sfxInputIndexByType, tickInputIndex };
+  return { inputOrder, filters, mixLabels, sfxInputIndexByType, countdownInputIndex };
 };
 
 export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, narrationPeakDbfs = -3 }) => {
@@ -323,7 +322,7 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
     const inputs = ['-y', '-i', silentVideo];
     for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
     for (const type of SFX_EVENT_TYPES) inputs.push('-i', sfx[type].localPath);
-    inputs.push('-i', sfx.tick.localPath);
+    inputs.push('-i', sfx.countdownSequence.localPath);
     await run(ffmpegPath, [...inputs, '-filter_complex', mixPlan.filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', String(totalDuration), '-movflags', '+faststart', output], 'mix narration and SFX');
   } else {
     // Debug/fixture path only (see fixtures.js) -- never used by production DB-first generation,
@@ -362,7 +361,7 @@ export const verifyVideo = async (output, { expectedSceneCount, expectedDuration
   if (timeline || countdownSchedule) {
     if (!timeline || !countdownSchedule) throw new Error('Verification failed: both timeline and countdown schedule are required for countdown verification.');
     assertCompleteCountdownSchedule({ timeline, events: countdownSchedule.events });
-    countdown = { eventCount: countdownSchedule.events.length, ticksPerScene: countdownSchedule.ticksPerScene, events: countdownSchedule.events };
+    countdown = { eventCount: countdownSchedule.events.length, numbersPerScene: countdownSchedule.numbersPerScene, events: countdownSchedule.events };
   }
   return { fileSize: stat.size, duration, width: video.width, height: video.height, fps: rate(video.avg_frame_rate || video.r_frame_rate), pixelFormat: video.pix_fmt, videoCodec: video.codec_name, audioCodec: audio.codec_name, hasVideo: true, hasAudio: true, sceneCount: expectedSceneCount ?? null, sfx, countdown };
 };

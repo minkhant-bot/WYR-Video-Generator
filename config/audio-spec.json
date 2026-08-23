@@ -1,13 +1,15 @@
 {
   "source": {
     "file": "reference/ref.mp4",
-    "note": "Measured once during Phase 1 to derive timing only (countdown/reveal/transition/volume sections below). The file itself is not read by any production code and is not the source of the sfx assets -- those are restored from the project's earlier known-good implementation (commit 6e99c92), see the `sfx` section.",
+    "note": "Measured once during Phase 1 to derive timing only. The file itself is not read by production code and is not the source of the SFX assets; the active SFX set is documented below.",
     "durationSecondsAtMeasurementTime": 65.833333
   },
   "countdown": {
-    "tickCount": 6,
-    "tickCountNote": "Not the raw reference measurement below (measuredTicksPerGenuineRun=16) -- that count matched the reference video's own scene/duration structure, which this project does not use (production is fixed at 8 scenes / 7.25s max per scene, see config.js). tickCount here is instead FIT to the production scene structure's own countdown window: the pre-tick-train design's countdownStart-to-reveal span was 1.8112916666666667s, and at tickSpacingSeconds=0.2 plus the kept reveal.gapAfterLastTickSeconds=0.68, 6 ticks span 1.68s (the largest tick count that still fits inside that window -- 7 ticks would span 1.88s and overflow it). If the production scene structure changes, recompute this by hand; do not restore 16 without re-deriving it against whatever window is current at that time.",
-    "tickSpacingSeconds": 0.2,
+    "cueNumbers": [8, 7, 6, 5, 4, 3, 2, 1],
+    "cueOffsetsSeconds": [0.027, 0.241, 0.431, 0.621, 0.835, 1.02, 1.229, 1.419],
+    "sequenceDurationSeconds": 1.594308,
+    "tickCount": 8,
+    "tickSpacingSeconds": 0.198857,
     "method": "audio piped s16le mono 24000Hz through highpass=5500,lowpass=11000; RMS in 5ms windows; peaks above 97th percentile RMS with 0.09s minimum separation; consecutive peaks grouped into runs where spacing is 0.08-0.45s",
     "measuredGenuineRunCount": 7,
     "measuredTicksPerGenuineRun": 16,
@@ -15,10 +17,9 @@
     "excludedAnomaly": "a 2-tick group at 35.850-35.965s (spacing 0.115s) did not fit the 16-tick pattern and was treated as noise, not a real countdown run -- excluded from the medians above"
   },
   "reveal": {
-    "gapAfterLastTickSeconds": 0.085,
-    "gapAfterLastTickSecondsNote": "Controls the visual percentage-reveal time and remains equal to the nominal tick duration. The reveal SFX has its own small audio-only delay below so a real encoded tick can fully decay without moving the percentage animation.",
-    "sfxDelaySeconds": 0.05,
-    "sfxDelaySecondsNote": "Audio-only separation added after a production render measured the final tick and reveal SFX starts only 0.08s apart. Delaying the reveal sound by 0.05s preserves the countdown cadence and visual reveal timestamp while leaving a clear tail gap.",
+    "gapAfterLastCueSeconds": 0.175308,
+    "gapAfterLastTickSeconds": 0.175308,
+    "sfxDelaySeconds": 0,
     "method": "audio piped s16le mono 24000Hz through highpass=2400,lowpass=2900; RMS in 5ms windows; peaks above 99.3rd percentile RMS with 1.0s minimum separation; gap measured from each countdown run's last tick to the next reveal peak after it",
     "measuredPeakCount": 7,
     "measuredGapRangeSeconds": [0.64, 0.735]
@@ -42,11 +43,10 @@
     "measuredMeanVolumeDb": -19.8
   },
   "sfx": {
-    "note": "Tick, whoosh, and slide were restored from the project's earlier known-good SFX implementation (commit 6e99c92, 'Finalize WYR media pipeline and content engine') and are not extracted from reference/ref.mp4. Reveal is a deterministic FFmpeg-generated, band-limited white-noise payoff committed directly as reference-reveal.wav; it contains no sine oscillators and is not extracted from reference/ref.mp4.",
-    "tick": { "sourceFile": "assets/sfx/reference-countdown.wav", "restoredFrom": "assets/sfx/reference-countdown-click.wav @ 6e99c92", "durationSeconds": 0.085, "description": "single countdown tick, played once per tick event" },
-    "reveal": { "sourceFile": "assets/sfx/reference-reveal.wav", "generatedWith": "ffmpeg anoisesrc white, seed 2643; cascaded highpass 1500Hz and lowpass 6000Hz; 2ms fade-in; fade-out from 30ms to 120ms", "durationSeconds": 0.12, "description": "short broadband result-reveal tick/pop with no sustained tonal tail" },
-    "whoosh": { "sourceFile": "assets/sfx/reference-transition.wav", "restoredFrom": "assets/sfx/reference-scene-transition-whoosh.wav @ 6e99c92", "durationSeconds": 0.335, "description": "scene-transition whoosh, played on the outgoing edge of every non-final scene" },
-    "slide": { "sourceFile": "assets/sfx/reference-entrance.wav", "restoredFrom": "assets/sfx/reference-scene-entrance-impact.wav @ 6e99c92", "durationSeconds": 0.125, "description": "scene-entrance impact, played at the start of every scene" }
+    "note": "The active reveal cue (cue-09) and countdown sequence were extracted from WYRSFXlastrefrence.wav without filtering. Cues 10 and 11 are not active. The transition SFX uses the active portion of universfield-fast-swoosh-383967.mp3. Only short edge fades and 48kHz stereo PCM conversion were applied.",
+    "reveal": { "sourceFile": "assets/sfx/cue-09.wav", "sourceRangeSeconds": [61.556848, 62.1966], "durationSeconds": 0.639751, "volume": 0.21 },
+    "transition": { "sourceFile": "universfield-fast-swoosh-383967.mp3", "sourceRangeSeconds": [0.07, 0.3], "durationSeconds": 0.23, "volume": 0.125 },
+    "countdownSequence": { "sourceFile": "assets/sfx/reference-countdown-sequence.wav", "sourceRangeSeconds": [3.54, 5.134308], "durationSeconds": 1.594308, "volume": 0.17 }
   },
   "mix": {
     "sfxPeakDbfs": -13,

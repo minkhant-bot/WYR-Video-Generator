@@ -152,23 +152,16 @@ test('buildSceneTimeline inserts a frame-aligned blank gap (config/audio-spec.js
   const sumOfSceneDurations = timeline.scenes.reduce((sum, scene) => sum + scene.duration, 0);
   assert.equal(Number(timeline.totalDuration.toFixed(6)), Number((sumOfSceneDurations + expectedGap * 5).toFixed(6)), 'total duration must equal every scene duration plus exactly 5 inter-scene gaps for 6 scenes');
 });
-test('SFX schedule keeps one opening slide and exactly one whoosh per visual crossover', () => {
-  const spec = getAudioSpec();
-  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
+test('SFX schedule includes reveal on every scene, with transitions only before another scene', () => {
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, () => ({ duration: 4 })), baseDuration: 7 });
   const schedule = buildSfxSchedule(timeline);
-  assert.equal(schedule.eventCount, 16); // 1 opening slide + 8 reveals + 7 transition whooshes
-  assert.equal(schedule.events.filter(event => event.type === 'slide').length, 1);
+  assert.equal(schedule.eventCount, 11);
   for (const scene of timeline.scenes) {
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
-    const expectedTypes = [...(scene.index === 0 ? ['slide'] : []), 'reveal', ...(!scene.isLastScene ? ['whoosh'] : [])];
-    assert.deepEqual(events.map(event => event.type), expectedTypes);
-    const expectedTimestamps = [...(scene.index === 0 ? [scene.start] : []), scene.start + scene.revealTime + spec.reveal.sfxDelaySeconds];
-    if (!scene.isLastScene) expectedTimestamps.push(scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead);
+    const isFinalScene = scene.index === timeline.scenes.length - 1;
+    assert.deepEqual(events.map(event => event.type), isFinalScene ? ['reveal'] : ['reveal', 'transition']);
+    const expectedTimestamps = [scene.start + scene.revealTime, ...(isFinalScene ? [] : [scene.start + scene.contentEnd - WYR_TEMPLATE.timing.transitionSfxLead])];
     assert.deepEqual(events.map(event => event.timestamp), expectedTimestamps.map(value => Number(value.toFixed(6))));
-
-    const lastTick = buildCountdownSchedule(timeline).events.filter(event => event.sceneIndex === scene.index).at(-1);
-    const reveal = events.find(event => event.type === 'reveal');
-    assert.ok(reveal.timestamp - lastTick.timestamp >= spec.sfx.tick.durationSeconds + spec.reveal.sfxDelaySeconds - 0.000001);
   }
 });
 test('SFX validation fails if any scene silently loses an expected event', () => {
@@ -178,33 +171,33 @@ test('SFX validation fails if any scene silently loses an expected event', () =>
 });
 test('SFX validation rejects duplicate and mistimed events', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }, { duration: 4 }], baseDuration: 7 }); const schedule = buildSfxSchedule(timeline);
-  assert.throws(() => assertCompleteSfxSchedule({ timeline, events: [...schedule.events, schedule.events[0]] }), /scene 1 must contain 3 events; found 4/);
+  assert.throws(() => assertCompleteSfxSchedule({ timeline, events: [...schedule.events, schedule.events[0]] }), /scene 1 must contain 2 events; found 3/);
   const mistimed = schedule.events.map(event => event.type === 'reveal' ? { ...event, timestamp: event.timestamp + 0.1 } : event);
   assert.throws(() => assertCompleteSfxSchedule({ timeline, events: mistimed }), /reveal event is not at its intended timestamp/);
 });
-test('the final scene never schedules a whoosh', () => {
+test('the final scene does not schedule a transition SFX', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 3 }, () => ({ duration: 4 })), baseDuration: 7 });
   const schedule = buildSfxSchedule(timeline);
-  assert.equal(schedule.events.filter(event => event.sceneIndex === 2 && event.type === 'whoosh').length, 0);
-  assert.equal(schedule.events.filter(event => event.sceneIndex === 0 && event.type === 'whoosh').length, 1);
+  assert.equal(schedule.events.filter(event => event.sceneIndex === 2 && event.type === 'transition').length, 0);
+  assert.equal(schedule.events.filter(event => event.type === 'transition').length, 2);
 });
-test('countdown schedules a tick train per scene, spaced per config/audio-spec.json, and reveals after the last tick', () => {
+test('countdown schedules the reference WAV cue sequence and reveals when it ends', () => {
   const spec = getAudioSpec();
-  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7 });
-  const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 8 * spec.countdown.tickCount);
-  assert.equal(schedule.ticksPerScene, spec.countdown.tickCount);
+  const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 6 }, (_, index) => ({ duration: 4 + index * 0.25 })), baseDuration: 7 });
+  const schedule = buildCountdownSchedule(timeline); assert.equal(schedule.eventCount, 6 * spec.countdown.cueNumbers.length);
+  assert.equal(schedule.numbersPerScene, spec.countdown.cueNumbers.length);
   for (const scene of timeline.scenes) {
     const events = schedule.events.filter(event => event.sceneIndex === scene.index);
-    assert.deepEqual(events.map(event => event.tick), Array.from({ length: spec.countdown.tickCount }, (_, index) => index + 1));
+    assert.deepEqual(events.map(event => event.number), spec.countdown.cueNumbers);
     assert.ok(events[0].sceneTime > scene.voiceStart + scene.voiceDuration);
-    events.forEach((event, index) => assert.ok(Math.abs((event.sceneTime - scene.countdownStart) - index * spec.countdown.tickSpacingSeconds) < 0.000001));
+    events.forEach((event, index) => assert.ok(Math.abs((event.sceneTime - scene.countdownStart) - spec.countdown.cueOffsetsSeconds[index]) < 0.000001));
     assert.equal(Number((scene.countdownStart + getCountdownSequenceDuration()).toFixed(6)), Number(scene.revealTime.toFixed(6)));
   }
 });
-test('countdown validation fails when any scene is missing a tick', () => {
+test('countdown validation fails when any scene is missing a reference cue', () => {
   const timeline = buildSceneTimeline({ voiceovers: Array.from({ length: 8 }, () => ({ duration: 4 })), baseDuration: 7 });
-  const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.tick === 1));
-  assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain \d+ ticks/);
+  const events = buildCountdownSchedule(timeline).events.filter(event => !(event.sceneIndex === 4 && event.number === 1));
+  assert.throws(() => assertCompleteCountdownSchedule({ timeline, events }), /scene 5 must contain 8 cues/);
 });
 test('countdown validation rejects a narration-to-countdown gap over 0.20s', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 4 }], baseDuration: 7 });
@@ -212,41 +205,27 @@ test('countdown validation rejects a narration-to-countdown gap over 0.20s', () 
   const invalidTimeline = { ...timeline, scenes: timeline.scenes.map(scene => ({ ...scene, countdownStart: scene.countdownStart + 0.11 })) };
   assert.throws(() => assertCompleteCountdownSchedule({ timeline: invalidTimeline, events: schedule.events }), /narration-to-countdown gap is 0\.210s/);
 });
-test('local SFX installs the exact, cache-backed reference tick/reveal/whoosh/slide assets', async () => {
+test('local SFX installs only the selected reveal/transition/countdown assets and fixed volumes', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-'));
   try {
     const sfx = await createLocalSfx({ audioDir: dir });
     assert.equal(sfx.provider, 'licensed-reference-extract');
-    for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
-      assert.equal(sfx[name].filename, `${name}.wav`);
+    const expected = {
+      reveal: ['cue-09.wav', 0.21],
+      transition: ['reference-scene-transition-whoosh.wav', 0.125],
+      countdownSequence: ['reference-countdown-sequence.wav', 0.17],
+    };
+    for (const [name, [filename, volume]] of Object.entries(expected)) {
+      assert.equal(sfx[name].filename, filename);
+      assert.equal(sfx[name].volume, volume);
       assert.ok(fs.statSync(sfx[name].localPath).size > 44, `${name} SFX must be a real, non-empty wav`);
-      assert.ok(Number.isFinite(sfx[name].volume) && sfx[name].volume > 0, `${name} SFX must carry a computed positive volume multiplier`);
+      assert.deepEqual(fs.readFileSync(sfx[name].localPath), fs.readFileSync(path.resolve('assets', 'sfx', filename)));
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
-test('reference SFX assets never leak embedded platform/video-ID metadata into shipped WAV files', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-sfx-provenance-'));
-  try {
-    const sfx = await createLocalSfx({ audioDir: dir });
-    for (const name of ['tick', 'reveal', 'whoosh', 'slide']) {
-      const bytes = fs.readFileSync(sfx[name].localPath);
-      // A prior asset set embedded a short-form-video platform ID in its WAV metadata comment,
-      // proving that particular WAV set had been extracted from someone else's video container.
-      // That is the only thing the embedded tag is evidence of -- it does NOT establish that
-      // those SFX were the cause of a real prior YouTube copyright takedown on this channel; per
-      // the project owner, that takedown was actually triggered by background music, unrelated to
-      // these sound effects. Regardless of that takedown's real cause, shipping WAV bytes that
-      // still carry a third-party platform's own container metadata (video IDs, uploader handles,
-      // etc.) is bad hygiene on its own merits, so this guard stays: shipped assets are cut from
-      // raw PCM samples with container metadata stripped (see sfx-synth.js), never copied verbatim
-      // from a source container, so this should always pass; it exists to catch a future regression.
-      assert.doesNotMatch(bytes.toString('latin1'), /\bvid:[a-z0-9]{10,}/i, `${name} SFX contains a suspicious embedded video-ID tag`);
-    }
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-});
-test('production and fixture audio validation cannot silently omit any of the four SFX assets', () => {
+test('production and fixture audio validation cannot silently omit any active SFX asset', () => {
   const timeline = buildSceneTimeline({ voiceovers: [{ duration: 2.5 }], baseDuration: 7 });
-  const base = { slide: { localPath: 'slide.wav' }, reveal: { localPath: 'reveal.wav' }, whoosh: { localPath: 'whoosh.wav' } }; // missing 'tick'
+  const base = { reveal: { localPath: 'reveal.wav' }, transition: { localPath: 'transition.wav' } }; // missing countdown sequence
   assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: base }), /all local SFX files/);
 });
 
@@ -259,7 +238,7 @@ test('assertProductionAudioInputs verifies every SFX/voiceover file actually exi
     assert.equal(assertProductionAudioInputs({ plan, timeline, sfx: validSfx }), true);
 
     // A missing file (deleted/never-written) is caught with a clear message.
-    const missing = { ...validSfx, whoosh: { localPath: path.join(dir, 'does-not-exist.wav') } };
+    const missing = { ...validSfx, transition: { localPath: path.join(dir, 'does-not-exist.wav') } };
     assert.throws(() => assertProductionAudioInputs({ plan, timeline, sfx: missing }), /Required render input is missing/);
 
     // A zero-byte file (write interrupted/corrupt) is also caught, not just a missing one.

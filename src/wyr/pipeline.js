@@ -177,7 +177,7 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     log('timeline.built', { jobId: job.id, totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length, productionDurationCeiling: PRODUCTION_DURATION_CEILING_SECONDS });
     const sfx = await createLocalSfx({ audioDir: path.join(job.workspace, 'audio') });
     const sfxSchedule = buildSfxSchedule(timeline); const countdownSchedule = buildCountdownSchedule(timeline);
-    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, slide: { ...sfx.slide, localPath: path.relative(job.workspace, sfx.slide.localPath) }, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, whoosh: { ...sfx.whoosh, localPath: path.relative(job.workspace, sfx.whoosh.localPath) }, tick: { ...sfx.tick, localPath: path.relative(job.workspace, sfx.tick.localPath) }, schedule: sfxSchedule, countdownSchedule });
+    writeJsonAtomic(path.join(job.workspace, 'timeline.json'), timeline); writeJsonAtomic(path.join(job.workspace, 'sfx.json'), { provider: sfx.provider, reveal: { ...sfx.reveal, localPath: path.relative(job.workspace, sfx.reveal.localPath) }, transition: { ...sfx.transition, localPath: path.relative(job.workspace, sfx.transition.localPath) }, countdownSequence: { ...sfx.countdownSequence, localPath: path.relative(job.workspace, sfx.countdownSequence.localPath) }, schedule: sfxSchedule, countdownSchedule });
     buildComposition({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace });
 
     update({ status: 'rendering', stage: 'rendering', progress: 71 });

@@ -10,9 +10,7 @@ export const WYR_TEMPLATE = Object.freeze({
     countdownPauseAfterVoice: 0.1,
     maximumNarrationCountdownGap: 0.2,
     countdownInterval: 0.8,
-    // Tick count/spacing and the reveal gap after the last tick now come from
-    // config/audio-spec.json (see audio-spec.js's getCountdownSequenceDuration) instead of being
-    // hardcoded here -- the old 3-cue "3, 2, 1" countdown was replaced by a tick-train countdown.
+    // Countdown cue timing and sequence duration come from config/audio-spec.json.
     countdownFadeDuration: 0.06,
     transitionOutStart: 6.18,
     revealHoldDuration: 1.5,
