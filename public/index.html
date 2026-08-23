@@ -11,7 +11,6 @@
   <section class="panel hero">
     <p class="eyebrow">WYR VIDEO GENERATOR</p>
     <h1>Generate. Automatically. Done.</h1>
-    <p class="lede">Groq creates the questions. Pixabay finds and selects all the visuals automatically, with Pexels as fallback, then the video renders — no manual review needed.</p>
     <button id="start">Create WYR</button>
   </section>
 
@@ -34,8 +33,8 @@
     <a id="download" class="button" download>Download MP4</a>
   </section>
 
-  <section id="pool-panel" class="panel pool-panel">
-    <p class="eyebrow">CONTENT POOL</p>
+  <details id="pool-panel" class="panel pool-panel">
+    <summary class="eyebrow pool-summary">CONTENT POOL</summary>
     <div class="pool-stats">
       <div><span id="pool-ready">–</span><small>Ready</small></div>
       <div><span id="pool-total">–</span><small>Total</small></div>
@@ -59,7 +58,7 @@
       </details>
     </div>
     <p id="pool-error" class="error" hidden></p>
-  </section>
+  </details>
 </main>
 <script src="/app.js" type="module"></script>
 </body>
