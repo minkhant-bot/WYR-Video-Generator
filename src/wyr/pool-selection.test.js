@@ -186,6 +186,29 @@ test('a weak hook is never selected over a stronger hook for scene 1', () => {
   assert.equal(arranged[0].id, weakFirst[1].id);
 });
 
+test('arrangeForHook prefers the strongest food question for scene 1 even when another category scores higher', () => {
+  const rows = [
+    row({ category: 'luxury', a: 'Live in a mansion', b: 'Live in a penthouse', hookScore: 95 }),
+    row({ category: 'food', a: 'Only eat pizza forever', b: 'Only eat sushi forever', hookScore: 60 }),
+    row({ category: 'food', a: 'Only eat spicy food', b: 'Only eat sweet food', hookScore: 80 }),
+    row({ category: 'travel', a: 'Backpack Europe', b: 'Cruise the Caribbean', hookScore: 90 }),
+  ];
+  const arranged = arrangeForHook(rows);
+  assert.equal(arranged[0].category, 'food');
+  assert.equal(arranged[0].hook_score, 80);
+  assert.deepEqual(arranged.slice(1).map(r => r.id).sort(), [rows[0].id, rows[1].id, rows[3].id].sort());
+});
+
+test('arrangeForHook falls back to the strongest hook_score overall when no selected question is food', () => {
+  const rows = [
+    row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', hookScore: 40 }),
+    row({ category: 'luxury', a: 'Live in a mansion', b: 'Live in a penthouse', hookScore: 95 }),
+    row({ category: 'travel', a: 'Backpack Europe', b: 'Cruise the Caribbean', hookScore: 60 }),
+  ];
+  const arranged = arrangeForHook(rows);
+  assert.equal(arranged[0].hook_score, 95);
+});
+
 test('rankCandidatesByStrength ranks a stronger WYR dilemma above a clearly weak one within the same LRU tier', () => {
   const weak = row({ category: 'travel', a: 'One suitcase of belongings', b: 'A house full of memories', hookScore: 50 });
   const strong = row({ category: 'lifestyle', a: 'Earn more but lose your weekends', b: 'Earn less and keep every weekend', hookScore: 50 });

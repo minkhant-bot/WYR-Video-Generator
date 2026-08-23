@@ -228,12 +228,17 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
 const DILEMMA_STRENGTH_WEIGHT = 1.6;
 export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text) * DILEMMA_STRENGTH_WEIGHT;
 
-// Scene 1 is the highest-priority slot: whichever selected question has the strongest dilemma rank
-// score leads, and the rest keep their diversity-selection order rather than being fully re-sorted
-// by score (a flat score sort would front-load every strong hook and let pacing collapse afterward).
+// Scene 1 is the highest-priority slot: food this-or-that reliably outperforms other categories on
+// TikTok (instantly relatable, readable from the image alone), so the strongest-hook_score food
+// question leads whenever one was selected. Falls back to the strongest hook_score overall when
+// none of the 6 selected are food, rather than failing. The rest keep their diversity-selection
+// order rather than being fully re-sorted by score (a flat score sort would front-load every
+// strong hook and let pacing collapse afterward).
 export const arrangeForHook = rows => {
   if (rows.length <= 1) return [...rows];
-  const strongest = rows.reduce((best, row) => Number(row.hook_score) > Number(best.hook_score) ? row : best, rows[0]);
+  const strongestOf = pool => pool.reduce((best, row) => Number(row.hook_score) > Number(best.hook_score) ? row : best, pool[0]);
+  const foodRows = rows.filter(row => row.category === 'food');
+  const strongest = foodRows.length ? strongestOf(foodRows) : strongestOf(rows);
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 
