@@ -10,7 +10,8 @@ import { buildNarration } from './audio.js';
 
 const fixtureFfmpeg = resolveFfmpegPath();
 const writeCandidate = (candidate, destination) => {
-  const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=size=800x480:rate=1', '-frames:v', '1', destination], { encoding: 'utf8' });
+  // Large enough to remain a valid FOOD fixture under the effective 960x600 crop/zoom gate.
+  const result = spawnSync(fixtureFfmpeg, ['-y', '-f', 'lavfi', '-i', 'testsrc2=size=1600x960:rate=1', '-frames:v', '1', destination], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`Could not create fixture image: ${result.stderr}`);
   fs.appendFileSync(destination, Buffer.from(String(candidate.id)));
 };

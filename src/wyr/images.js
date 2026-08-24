@@ -588,6 +588,104 @@ export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpeg
   return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]), flatBackgroundFraction: computeFlatBackgroundFraction(histogram) }, { foodMode });
 };
 
+// FOOD images receive a small subject-aware zoom during framing. Validate effective resolution
+// against that FINAL cover geometry rather than imposing a landscape-only source-size rule: a
+// sufficiently dense square/portrait remains valid, while a nominally 750x450 source cannot be
+// silently enlarged into the 960x600 production slot. A tiny allowance absorbs integer rounding
+// and harmless resampling; anything beyond it is material upscaling.
+export const MAX_FOOD_EFFECTIVE_UPSCALE = 1.08;
+export const assessFoodEffectiveResolution = ({ sourceWidth, sourceHeight, framing }) => {
+  const scaleX = Number(framing?.coverWidth) / Number(sourceWidth);
+  const scaleY = Number(framing?.coverHeight) / Number(sourceHeight);
+  const upscaleFactor = Math.max(scaleX, scaleY);
+  const valid = [scaleX, scaleY, upscaleFactor].every(Number.isFinite) && scaleX > 0 && scaleY > 0 && upscaleFactor <= MAX_FOOD_EFFECTIVE_UPSCALE;
+  return {
+    valid, upscaleFactor,
+    reason: valid ? null : `hard-rejected: decoded FOOD image would require ${Number.isFinite(upscaleFactor) ? upscaleFactor.toFixed(2) : 'unknown'}x effective upscaling after crop/zoom (maximum ${MAX_FOOD_EFFECTIVE_UPSCALE.toFixed(2)}x)`,
+  };
+};
+
+const FOOD_SHARPNESS_WIDTH = 480;
+const FOOD_SHARPNESS_HEIGHT = 300;
+const FOOD_BACKGROUND_DISTANCE = 20;
+const FOOD_BACKGROUND_LUMA_GAP = 16;
+// Mean absolute Laplacian on useful subject pixels at half-slot resolution. Real photos and crisp
+// isolated product shots normally sit comfortably above this; the deliberately low floor only
+// rejects strongly blurred/preview-like subjects.
+export const MIN_FOOD_SUBJECT_SHARPNESS = 3;
+const median = values => {
+  const ordered = [...values].sort((left, right) => left - right);
+  return ordered[Math.floor(ordered.length / 2)] || 0;
+};
+export const computeFoodSubjectSharpness = ({ buffer, width = FOOD_SHARPNESS_WIDTH, height = FOOD_SHARPNESS_HEIGHT }) => {
+  const expected = width * height * 3;
+  if (!Buffer.isBuffer(buffer) || buffer.length < expected) return { valid: false, score: NaN, usefulFraction: 0, reason: 'decoded FOOD sharpness pixels were unavailable' };
+  const cornerSize = Math.max(4, Math.round(Math.min(width, height) * 0.04));
+  const corners = [];
+  for (const [startX, startY] of [[0, 0], [width - cornerSize, 0], [0, height - cornerSize], [width - cornerSize, height - cornerSize]]) {
+    for (let y = startY; y < startY + cornerSize; y += 1) for (let x = startX; x < startX + cornerSize; x += 1) {
+      const offset = (y * width + x) * 3;
+      corners.push([buffer[offset], buffer[offset + 1], buffer[offset + 2]]);
+    }
+  }
+  const background = [0, 1, 2].map(channel => median(corners.map(sample => sample[channel])));
+  const backgroundLuma = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2];
+  const subject = new Uint8Array(width * height); const luma = new Float64Array(width * height);
+  let subjectPixels = 0;
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const pixel = y * width + x; const offset = pixel * 3;
+    const red = buffer[offset]; const green = buffer[offset + 1]; const blue = buffer[offset + 2];
+    const value = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    luma[pixel] = value;
+    const differsFromBackground = Math.hypot(red - background[0], green - background[1], blue - background[2]) > FOOD_BACKGROUND_DISTANCE || value < backgroundLuma - FOOD_BACKGROUND_LUMA_GAP;
+    if (differsFromBackground) { subject[pixel] = 1; subjectPixels += 1; }
+  }
+  const detail = [];
+  for (let y = 1; y < height - 1; y += 1) for (let x = 1; x < width - 1; x += 1) {
+    const pixel = y * width + x;
+    // Erode the mask by one pixel so the high-contrast outline between a product and a white field
+    // cannot make an otherwise blurred subject look sharp.
+    if (!subject[pixel] || !subject[pixel - 1] || !subject[pixel + 1] || !subject[pixel - width] || !subject[pixel + width]) continue;
+    detail.push(Math.abs(4 * luma[pixel] - luma[pixel - 1] - luma[pixel + 1] - luma[pixel - width] - luma[pixel + width]));
+  }
+  const usefulFraction = subjectPixels / (width * height);
+  const score = detail.length ? detail.reduce((sum, value) => sum + value, 0) / detail.length : 0;
+  const valid = detail.length >= width * height * 0.005 && score >= MIN_FOOD_SUBJECT_SHARPNESS;
+  return { valid, score, usefulFraction, sampleCount: detail.length, reason: valid ? null : `hard-rejected: decoded FOOD subject appears visibly blurred or lacks useful crop detail (sharpness ${score.toFixed(2)}, minimum ${MIN_FOOD_SUBJECT_SHARPNESS.toFixed(2)})` };
+};
+
+const readFoodCropPixels = async ({ localPath, framing, targetWidth, targetHeight, binary = resolveFfmpegPath() }) => {
+  const filter = `scale=${Math.round(framing.coverWidth)}:${Math.round(framing.coverHeight)},crop=${targetWidth}:${targetHeight}:${Math.round(framing.x)}:${Math.round(framing.y)},scale=${FOOD_SHARPNESS_WIDTH}:${FOOD_SHARPNESS_HEIGHT}:flags=area,format=rgb24`;
+  const child = spawn(binary, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', filter, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-frames:v', '1', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks = []; let stderr = '';
+  child.stdout.on('data', chunk => chunks.push(chunk)); child.stderr.on('data', chunk => { stderr += String(chunk); });
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', code => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`FFmpeg FOOD sharpness analysis exited with code ${code}: ${stderr.slice(-500)}`)));
+  });
+};
+
+// Single post-download authority shared by the automatic Pixabay/Pexels path and the optional
+// Wikimedia/DuckDuckGo path. Every rejection is returned to the caller, whose existing candidate
+// loop then continues to the next ranked candidate/provider unchanged.
+export const validateDownloadedImageForRender = async ({
+  localPath, option, targetWidth = WYR_TEMPLATE.layout.imageWidth, targetHeight = WYR_TEMPLATE.layout.imageHeight,
+  binary = resolveFfmpegPath(), inspectImage = (filename, settings) => inspectDownloadedImage(filename, settings), computeCrop = computeSubjectAwareCrop,
+} = {}) => {
+  const foodMode = String(option?.category || '').trim().toLowerCase() === 'food';
+  const inspection = await inspectImage(localPath, { binary, foodMode });
+  if (!inspection?.valid) return { valid: false, reasons: inspection?.reasons || ['downloaded image failed visual-content validation'], inspection, framing: null };
+  const framing = await computeCrop({ localPath, sourceWidth: inspection.width, sourceHeight: inspection.height, targetWidth, targetHeight });
+  if (!framing?.safe) return { valid: false, reasons: [framing?.reason || 'framing rejected: could not compute a safe crop for this image'], inspection, framing };
+  if (!foodMode) return { valid: true, reasons: [], inspection, framing };
+  const resolution = assessFoodEffectiveResolution({ sourceWidth: inspection.width, sourceHeight: inspection.height, framing });
+  if (!resolution.valid) return { valid: false, reasons: [resolution.reason], inspection, framing, resolution };
+  const sharpnessPixels = await readFoodCropPixels({ localPath, framing, targetWidth, targetHeight, binary });
+  const sharpness = computeFoodSubjectSharpness({ buffer: sharpnessPixels });
+  if (!sharpness.valid) return { valid: false, reasons: [sharpness.reason], inspection, framing, resolution, sharpness };
+  return { valid: true, reasons: [], inspection, framing, resolution, sharpness };
+};
+
 const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch, phase = 'normal' }) => {
   const results = await mapWithConcurrency(jobs, Math.min(concurrency, provider.maxConcurrency || concurrency), async job => {
     try {
@@ -721,19 +819,14 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
         const filename = `q${String(state.option.questionIndex + 1).padStart(2, '0')}-${state.option.slot.toLowerCase()}-${selected.provider === 'Pexels' ? 'pexels' : 'web'}-${safeId}.jpg`; const localPath = path.join(assetsDir, filename);
         try {
           await downloader.downloadAsset(selected, localPath);
-          const inspection = await imageInspector(localPath, selected, state.option);
-          if (!inspection?.valid) throw new Error(`downloaded image rejected: ${inspection?.reasons?.join('; ') || 'image failed visual-content validation'}`);
-          if (Number.isFinite(inspection.width)) selected.width = inspection.width;
-          if (Number.isFinite(inspection.height)) selected.height = inspection.height;
-          // Framing safety gate: compute where the crop would land before committing to this
-          // candidate. A candidate whose subject can't be kept safely in frame (extreme aspect
-          // ratio, or the best crop window still loses most of the image's detail) is rejected here
-          // -- same as a broken download -- so the existing pool/fallback logic below just moves on
-          // to the next ranked candidate instead of ever rendering a bad crop.
-          const framing = await computeCrop({ localPath, sourceWidth: selected.width, sourceHeight: selected.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
-          if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
-          selected.framing = renderableCrop(framing);
-          return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection };
+          const quality = await validateDownloadedImageForRender({
+            localPath, option: state.option, computeCrop,
+            inspectImage: (filename, settings) => imageInspector(filename, selected, state.option, settings),
+          });
+          if (!quality.valid) throw new Error(`downloaded image rejected: ${quality.reasons.join('; ')}`);
+          selected.width = quality.inspection.width; selected.height = quality.inspection.height;
+          selected.framing = renderableCrop(quality.framing);
+          return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection: quality.inspection };
         }
         catch (error) { fs.rmSync(localPath, { force: true }); if (/hard-rejected/i.test(error.message)) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${selected.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : selected.provider} | domain=${selected.sourceDomain || 'unknown'} | query="${String(selected.query || '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${error.message.replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}"`); return { ok: false, state, error }; }
       });

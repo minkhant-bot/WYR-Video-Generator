@@ -21,12 +21,17 @@ const FOOD_HEADS = new Set(`
 // Common multi-word dishes whose final token is not by itself a useful food head.
 const EXACT_FOODS = new Set(`
   apple pie|banana bread|beef wellington|breakfast burrito|buffalo wings|caesar salad|carrot cake|
+  apple juice|apple turnover|applesauce|baked beans|baked ziti|beef brisket|brie|chocolate bar|chocolate fudge|chocolate toffee|
   chicken nuggets|chicken parmesan|chicken sandwich|chicken tenders|chicken wings|cinnamon roll|
+  cheese crackers|cheese cubes|chocolate eclair|chocolate raisins|coleslaw|corn dogs|cottage pie|
   clam chowder|club sandwich|crème brûlée|creme brulee|eggs benedict|fish and chips|french fries|
-  french toast|fried chicken|fried rice|fruit salad|garlic bread|grilled cheese|hot chocolate|hot dog|
+  fig tart|focaccia|fried pickles|french toast|fried chicken|fried rice|fruit cup|fruit salad|fudge|garlic bread|grilled cheese|gulab jamun|gummy bears|
+  hash browns|hot chocolate|hot dog|ice cream bars|iced matcha|jalapeno poppers|jelly beans|
   ice cream|key lime pie|mac and cheese|mashed potatoes|mozzarella sticks|onion rings|peanut butter cups|
-  potato chips|rice pudding|roast chicken|shrimp cocktail|spring rolls|sweet potato fries|tater tots|
-  tomato soup|tuna sandwich
+  lamb chops|lemon bars|lemon loaf|lemon tart|licorice|mixed nuts|pizza bites|pork ribs|pot roast|potato chips|potato skins|potato wedges|pulled pork|
+  rice pudding|roast chicken|shortbread|slushie|smoked turkey|sourdough|spinach dip|stuffed peppers|
+  trail mix|shrimp cocktail|spring rolls|strawberries|stuffing|sweet potato fries|tater tots|yule log|
+  tomato soup|tuna sandwich|queso dip|granola bar|crackers|scones
 `.replace(/\s*\|\s*/g, '|').trim().split('|'));
 
 const FORBIDDEN_WORDS = new Set(`

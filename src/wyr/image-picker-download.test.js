@@ -22,6 +22,7 @@ const renderLavfiJpeg = source => {
 // writeCandidate uses), which is what actually gives each fixture distinct bytes/sha256 so the
 // pipeline's own cross-slot duplicate-image detection doesn't collide unrelated test fixtures.
 let cachedValidBase = null; let cachedBlankBase = null;
+let cachedSmallFoodBase = null; let cachedLargeFoodBase = null;
 // A real, decodable, detailed (non-blank) JPEG >10KB -- passes both the provider size floor and
 // inspectDownloadedImage's decode + blank/low-detail checks.
 const validImageBytes = () => {
@@ -36,6 +37,14 @@ const blankImageBytes = () => {
 };
 // Correct size, correct content-type, but not valid image data at all -- fails ffmpeg decode.
 const corruptImageBytes = () => Buffer.concat([Buffer.from(randomUUID()), Buffer.alloc(15_000, 65)]);
+const smallFoodImageBytes = () => {
+  cachedSmallFoodBase ??= renderLavfiJpeg('testsrc2=size=800x800:rate=1');
+  return Buffer.concat([cachedSmallFoodBase, Buffer.from(randomUUID())]);
+};
+const largeFoodImageBytes = () => {
+  cachedLargeFoodBase ??= renderLavfiJpeg('testsrc2=size=1600x1000:rate=1');
+  return Buffer.concat([cachedLargeFoodBase, Buffer.from(randomUUID())]);
+};
 
 const jpegResponse = bytes => ({ ok: true, status: 200, headers: { get: name => name === 'content-type' ? 'image/jpeg' : null }, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), text: async () => '' });
 const notFoundResponse = () => ({ ok: false, status: 404, headers: { get: () => null }, text: async () => 'not found', arrayBuffer: async () => new ArrayBuffer(0) });
@@ -164,6 +173,21 @@ test('a blank/low-detail image on candidate 1 falls back to candidate 2', () => 
     const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-dl-')), config });
     const result = assets.find(asset => asset.questionIndex === 0);
     assert.equal(result.id, good.id);
+  });
+});
+
+test('a decoded FOOD image that needs material upscaling falls through to the next provider candidate', () => {
+  const handlers = new Map();
+  const lowResolution = makeCandidate('Pixabay', handlers, () => jpegResponse(smallFoodImageBytes()));
+  const sufficientPexels = makeCandidate('Pexels', handlers, () => jpegResponse(largeFoodImageBytes()));
+  const testSlot = { key: 'QT0', questionIndex: 0, slot: 'A', category: 'food', optionText: 'Pizza', candidates: [lowResolution, sufficientPexels], selectedId: lowResolution.candidateKey };
+  const selection = buildSelection([testSlot], handlers);
+  return withMockedFetch(handlers, async () => {
+    const assets = await downloadSelectedCandidates({ selection, assetsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-food-upscale-fallback-')), config });
+    const result = assets.find(asset => asset.questionIndex === 0);
+    assert.equal(result.id, sufficientPexels.id);
+    assert.equal(result.selectedProvider, 'Pexels');
+    assert.deepEqual([result.width, result.height], [1600, 1000]);
   });
 });
 

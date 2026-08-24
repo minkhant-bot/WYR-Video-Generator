@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildFoodPhotoRecoveryQueries, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
+import { PexelsImageProvider, assessImageCandidate, buildFoodPhotoRecoveryQueries, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, validateDownloadedImageForRender } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { buildImageQueries, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
@@ -720,11 +720,9 @@ const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsD
   const localPath = path.join(assetsDir, filename);
   try {
     await provider.downloadAsset(candidate, localPath);
-    const inspection = await inspectDownloadedImage(localPath, { foodMode: String(item.category || '').trim().toLowerCase() === 'food' });
-    if (!inspection.valid) throw new Error(`failed validation: ${inspection.reasons.join('; ')}`);
-    const framing = await computeCrop({ localPath, sourceWidth: inspection.width, sourceHeight: inspection.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
-    if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
-    return { localPath, filename, framing: renderableCrop(framing) };
+    const quality = await validateDownloadedImageForRender({ localPath, option: item, computeCrop });
+    if (!quality.valid) throw new Error(`failed validation: ${quality.reasons.join('; ')}`);
+    return { localPath, filename, width: quality.inspection.width, height: quality.inspection.height, framing: renderableCrop(quality.framing) };
   } catch (error) {
     fs.rmSync(localPath, { force: true });
     throw error;
@@ -772,13 +770,13 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
       if (!provider) { failedKeys.add(candidate.candidateKey); return null; }
       rank += 1;
       try {
-        const { localPath, filename, framing } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir, computeCrop });
+        const { localPath, filename, width, height, framing } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir, computeCrop });
         const sha256 = createHash('sha256').update(fs.readFileSync(localPath)).digest('hex');
         if (usedContentHashes.has(sha256)) { fs.rmSync(localPath, { force: true }); throw new Error('duplicate image bytes already used for another slot'); }
         usedContentHashes.add(sha256); usedCandidateKeys.add(candidate.candidateKey);
         log('image.candidate_accepted', { slot: item.key, provider: candidate.provider, query: candidate.queryUsed, candidateRank: rank });
         return {
-          ...candidate, questionIndex: item.questionIndex, slot: item.slot, text: item.optionText,
+          ...candidate, width, height, questionIndex: item.questionIndex, slot: item.slot, text: item.optionText,
           queryUsed: candidate.queryUsed, localPath, filename, sha256, framing,
           selectedProvider: candidate.provider, selectedQuery: candidate.queryUsed,
           providerAttemptOrder: [...IMAGE_PROVIDER_ORDER], locked: false,

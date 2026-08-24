@@ -8,6 +8,9 @@ const DUCKDUCKGO_IMAGES_URL = 'https://duckduckgo.com/i.js';
 const COMMONS_API_URL = 'https://commons.wikimedia.org/w/api.php';
 const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const COMMONS_USER_AGENT = 'WYRVideoGenerator/1.0 (automated food-video image selection; https://github.com/)';
+const COMMONS_PREVIEW_WIDTH = 2400;
+const COMMONS_PRACTICAL_ORIGINAL_MAX_PIXELS = 20_000_000;
+const COMMONS_PRACTICAL_ORIGINAL_MAX_BYTES = 20_000_000;
 const BLOCK_PATTERN = /captcha|verify you are human|unusual traffic|automated quer(?:y|ies)|anomaly-modal|challenge-platform/i;
 const VQD_PATTERNS = [/vqd=["']([^"']+)/i, /vqd=([\d-]+)/i];
 const sourceDomain = value => { try { return new URL(value).hostname.toLowerCase(); } catch { return 'unknown'; } };
@@ -61,7 +64,7 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
         const commonsUrl = new URL(COMMONS_API_URL);
         const isolatedStyleSearch = /\b(?:isolated|white background|product photo|single food)\b/i.test(String(query || ''));
         const commonsSearch = isolatedStyleSearch ? `${literalFoodSubject} white background` : literalFoodSubject;
-        for (const [key, value] of Object.entries({ action: 'query', generator: 'search', gsrsearch: commonsSearch, gsrnamespace: '6', gsrlimit: '24', prop: 'imageinfo', iiprop: 'url|size|mime|extmetadata', iiurlwidth: '2000', format: 'json', origin: '*' })) commonsUrl.searchParams.set(key, value);
+        for (const [key, value] of Object.entries({ action: 'query', generator: 'search', gsrsearch: commonsSearch, gsrnamespace: '6', gsrlimit: '24', prop: 'imageinfo', iiprop: 'url|size|mime|extmetadata', iiurlwidth: String(COMMONS_PREVIEW_WIDTH), format: 'json', origin: '*' })) commonsUrl.searchParams.set(key, value);
         const commonsResponse = await this.request(commonsUrl, { headers: { 'User-Agent': COMMONS_USER_AGENT, Accept: 'application/json' } }, 'search');
         const commonsPayload = await commonsResponse.json();
         const subjectWords = normalizedWords(literalFoodSubject);
@@ -72,10 +75,18 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
           if (!info?.url || !Number.isFinite(Number(info.width)) || !Number.isFinite(Number(info.height)) || !/^image\/(?:jpeg|png|webp)$/i.test(String(info.mime || ''))) return [];
           if (!subjectWords.every(word => titleWords.has(word) || [...titleWords].some(titleWord => titleWord.startsWith(word) || word.startsWith(titleWord)))) return [];
           const license = String(info.extmetadata?.LicenseShortName?.value || 'Wikimedia Commons');
+          const originalWidth = Number(info.width); const originalHeight = Number(info.height); const originalBytes = Number(info.size);
+          const originalPractical = originalWidth * originalHeight <= COMMONS_PRACTICAL_ORIGINAL_MAX_PIXELS
+            && (!Number.isFinite(originalBytes) || originalBytes <= COMMONS_PRACTICAL_ORIGINAL_MAX_BYTES);
+          const previewWidth = Number(info.thumbwidth); const previewHeight = Number(info.thumbheight);
+          const usablePreview = info.thumburl && Number.isFinite(previewWidth) && Number.isFinite(previewHeight);
+          const selectedUrl = originalPractical || !usablePreview ? info.url : info.thumburl;
+          const selectedWidth = selectedUrl === info.url ? originalWidth : previewWidth;
+          const selectedHeight = selectedUrl === info.url ? originalHeight : previewHeight;
           return [{
             id: createHash('sha256').update(String(info.url)).digest('hex'), provider: this.name, providerSource: 'Wikimedia Commons',
-            width: Number(info.width), height: Number(info.height), alt: `${literalFoodSubject} photograph - ${title}`, title: `${literalFoodSubject} photograph - ${title}`, keywords: `${literalFoodSubject} food photograph`,
-            originalImageUrl: info.url, downloadUrl: info.url, thumbnailUrl: info.thumburl || null,
+            width: selectedWidth, height: selectedHeight, alt: `${literalFoodSubject} photograph - ${title}`, title: `${literalFoodSubject} photograph - ${title}`, keywords: `${literalFoodSubject} food photograph`,
+            originalImageUrl: info.url, downloadUrl: selectedUrl, thumbnailUrl: info.thumburl || null,
             sourcePageUrl: info.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(page.title)}`, sourceDomain: 'commons.wikimedia.org', photoUrl: info.descriptionurl || null,
             photographer: 'Wikimedia Commons contributor', photographerUrl: info.descriptionurl || null,
             license, licenseUrl: info.extmetadata?.LicenseUrl?.value || null, usageRights: `${license}; verify attribution on the source page`, credit: null,
@@ -127,9 +138,9 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
 
   async downloadAsset(candidate, destination) {
     let response; let lastError;
-    const assetUrl = candidate.sourceDomain === 'commons.wikimedia.org' && candidate.thumbnailUrl
-      ? candidate.thumbnailUrl
-      : candidate.downloadUrl;
+    // downloadUrl and width/height are selected together by search(). Never silently swap to a
+    // thumbnail here after the candidate was scored using different dimensions.
+    const assetUrl = candidate.downloadUrl;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         const commonsAsset = candidate.sourceDomain === 'commons.wikimedia.org';

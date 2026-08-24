@@ -30,6 +30,14 @@ test('runStartupMigrations does not abort startup when FOOD theme seeding is inc
   assert.ok(results.every(result => result.applied));
 }));
 
+test('runStartupMigrations does not abort startup when FOOD reconciliation is incomplete', () => withFakeDb(async () => {
+  const results = await runStartupMigrations({
+    reconcileThemes: async () => { throw new Error('safe reconciliation conflict'); },
+    seedThemes: async () => [],
+  });
+  assert.ok(results.every(result => result.applied));
+}));
+
 test('runStartupMigrations surfaces a clear, wrapped error when a migration fails', () => withFakeDb(async fake => {
   const originalQuery = fake.client.query;
   fake.client.query = async (sql, params) => { if (sql.includes('CREATE TABLE IF NOT EXISTS wyr_questions')) throw new Error('permission denied for schema public'); return originalQuery(sql, params); };

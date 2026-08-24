@@ -28,7 +28,7 @@ test('food-photo searches prefer literal full-resolution Wikimedia Commons files
   let duckRequests = 0;
   const pages = Object.fromEntries(Array.from({ length: 5 }, (_, index) => [index + 1, {
     title: `File:Fried chicken plate ${index + 1}.jpg`,
-    imageinfo: [{ width: 2400, height: 1600, mime: 'image/jpeg', url: `https://upload.wikimedia.org/chicken-${index + 1}.jpg`, descriptionurl: `https://commons.wikimedia.org/wiki/File:Chicken-${index + 1}.jpg`, extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, LicenseUrl: { value: 'https://creativecommons.org/licenses/by-sa/4.0/' } } }],
+    imageinfo: [{ width: 2400, height: 1600, size: 4_000_000, thumbwidth: 1200, thumbheight: 800, mime: 'image/jpeg', url: `https://upload.wikimedia.org/chicken-${index + 1}.jpg`, thumburl: `https://upload.wikimedia.org/thumb/chicken-${index + 1}.jpg`, descriptionurl: `https://commons.wikimedia.org/wiki/File:Chicken-${index + 1}.jpg`, extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, LicenseUrl: { value: 'https://creativecommons.org/licenses/by-sa/4.0/' } } }],
   }]));
   const provider = new DuckDuckGoImageProvider({ fetcher: async url => {
     if (String(url).startsWith('https://commons.wikimedia.org/')) return new Response(JSON.stringify({ query: { pages } }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -38,6 +38,7 @@ test('food-photo searches prefer literal full-resolution Wikimedia Commons files
   assert.equal(candidates.length, 5);
   assert.equal(candidates.every(candidate => candidate.providerSource === 'Wikimedia Commons'), true);
   assert.equal(candidates.every(candidate => candidate.width === 2400 && candidate.sourceDomain === 'commons.wikimedia.org'), true);
+  assert.equal(candidates.every(candidate => candidate.downloadUrl === candidate.originalImageUrl), true, 'practical originals must win over smaller previews');
   assert.equal(duckRequests, 0);
 });
 
@@ -52,6 +53,32 @@ test('isolated FOOD searches ask Commons for the literal subject on a white back
   assert.match(decodeURIComponent(requestUrl), /gsrsearch=croissant\+white\+background/);
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].providerSource, 'Wikimedia Commons');
+});
+
+test('Wikimedia candidate dimensions always describe the exact URL selected for download', async () => {
+  const originalUrl = 'https://upload.wikimedia.org/huge-croissant.jpg';
+  const previewUrl = 'https://upload.wikimedia.org/thumb/huge-croissant-2400.jpg';
+  const pages = { 1: {
+    title: 'File:Croissant white background.jpg',
+    imageinfo: [{ width: 8000, height: 5000, size: 32_000_000, thumbwidth: 2400, thumbheight: 1500, mime: 'image/jpeg', url: originalUrl, thumburl: previewUrl }],
+  } };
+  const downloaded = [];
+  const provider = new DuckDuckGoImageProvider({ fetcher: async url => {
+    const requested = String(url);
+    if (requested.startsWith('https://commons.wikimedia.org/')) return new Response(JSON.stringify({ query: { pages } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    downloaded.push(requested);
+    return new Response(Buffer.alloc(12_000, 3), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+  } });
+  const candidates = await provider.search('croissant isolated white background product photo no people');
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].originalImageUrl, originalUrl);
+  assert.equal(candidates[0].downloadUrl, previewUrl);
+  assert.deepEqual([candidates[0].width, candidates[0].height], [2400, 1500]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-commons-resolution-'));
+  try {
+    await provider.downloadAsset(candidates[0], path.join(dir, 'image.jpg'));
+    assert.deepEqual(downloaded, [previewUrl]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('DuckDuckGo provider detects CAPTCHA and HTTP blocking without retrying', async () => {

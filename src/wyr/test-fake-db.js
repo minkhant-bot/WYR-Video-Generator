@@ -6,7 +6,7 @@
 let nextId = 1;
 
 export const createFakeDb = () => {
-  const state = { questions: new Map(), themes: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), nextThemeId: 1, nextVideoId: 1 };
+  const state = { questions: new Map(), themes: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), foodContentReconciliations: new Map(), nextThemeId: 1, nextVideoId: 1 };
   const log = [];
 
   const query = async (sql, params = []) => {
@@ -16,6 +16,14 @@ export const createFakeDb = () => {
     if (text.startsWith('CREATE TABLE IF NOT EXISTS schema_migrations')) return { rows: [] };
     if (text.startsWith('SELECT name FROM schema_migrations')) return { rows: [...state.migrations].map(name => ({ name })) };
     if (text.startsWith('INSERT INTO schema_migrations')) { state.migrations.add(params[0]); return { rows: [] }; }
+    if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [{ pg_advisory_xact_lock: null }] };
+    if (text.startsWith('SELECT revision FROM wyr_food_content_reconciliations')) {
+      return { rows: state.foodContentReconciliations.has(params[0]) ? [{ revision: params[0] }] : [] };
+    }
+    if (text.startsWith('INSERT INTO wyr_food_content_reconciliations')) {
+      if (!state.foodContentReconciliations.has(params[0])) state.foodContentReconciliations.set(params[0], JSON.parse(params[1]));
+      return { rows: [] };
+    }
 
     if (text.startsWith('SELECT count(*)::int AS count FROM wyr_questions')) {
       const foodOnly = text.includes("category = 'food'");
@@ -40,6 +48,11 @@ export const createFakeDb = () => {
       const theme = [...state.themes.values()].find(candidate => candidate.theme_key === params[0]);
       return { rows: theme ? [{ id: theme.id }] : [] };
     }
+    if (text.startsWith('UPDATE wyr_food_themes SET title')) {
+      const [title, hookTtsText, id] = params; const theme = state.themes.get(id);
+      if (theme) { theme.title = title; theme.hook_tts_text = hookTtsText; }
+      return { rows: [], rowCount: theme ? 1 : 0 };
+    }
     if (text.startsWith('INSERT INTO wyr_questions')) {
       // Column order must mirror question-pool.js's real INSERT exactly (17 columns, including the
       // option_a_visual_subject/option_b_visual_subject pair added by migration 003) -- a stale,
@@ -51,6 +64,8 @@ export const createFakeDb = () => {
       const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionAVisualSubject, optionBText, optionBSearchQuery, optionBVisualSubject, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider, themeId = null, themePosition = null] = params;
       const existing = [...state.questions.values()].find(row => row.dedupe_key === dedupeKey);
       if (existing) return { rows: [] };
+      const occupiedThemePosition = themeId == null ? null : [...state.questions.values()].find(row => row.theme_id === themeId && row.theme_position === themePosition);
+      if (occupiedThemePosition) throw new Error('duplicate key value violates unique constraint idx_wyr_questions_theme_position');
       const id = nextId++;
       state.questions.set(id, {
         id, category, content_family: contentFamily, motif_key: motifKey, motif_key_a: motifKeyA, motif_key_b: motifKeyB,
@@ -73,6 +88,13 @@ export const createFakeDb = () => {
     if (text.startsWith('SELECT id, theme_id, theme_position, status FROM wyr_questions WHERE dedupe_key')) {
       const row = [...state.questions.values()].find(candidate => candidate.dedupe_key === params[0]);
       return { rows: row ? [{ id: row.id, theme_id: row.theme_id, theme_position: row.theme_position, status: row.status }] : [] };
+    }
+    if (text.startsWith('SELECT q.id, q.theme_id, q.theme_position, q.status, q.dedupe_key')) {
+      return { rows: [...state.questions.values()].filter(row => row.theme_id === params[0]).sort((a, b) => a.theme_position - b.theme_position).map(row => ({ id: row.id, theme_id: row.theme_id, theme_position: row.theme_position, status: row.status, dedupe_key: row.dedupe_key, has_video_history: state.videoQuestions.some(item => item.question_id === row.id) })) };
+    }
+    if (text.startsWith('SELECT id, theme_id, theme_position, status, dedupe_key FROM wyr_questions WHERE dedupe_key')) {
+      const row = [...state.questions.values()].find(candidate => candidate.dedupe_key === params[0]);
+      return { rows: row ? [{ id: row.id, theme_id: row.theme_id, theme_position: row.theme_position, status: row.status, dedupe_key: row.dedupe_key }] : [] };
     }
     if (text.startsWith('SELECT id FROM wyr_questions WHERE theme_id')) {
       const row = [...state.questions.values()].find(candidate => candidate.theme_id === params[0] && candidate.theme_position === params[1]);
@@ -120,6 +142,29 @@ export const createFakeDb = () => {
       if (!row) return { rows: [], rowCount: 0 };
       row.theme_id = themeId; row.theme_position = themePosition;
       return { rows: [{ id: row.id }], rowCount: 1 };
+    }
+    if (text.startsWith('UPDATE wyr_questions SET\n     category = $1')) {
+      const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionAVisualSubject, optionBText, optionBSearchQuery, optionBVisualSubject, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider, themeId, themePosition, id] = params;
+      const row = state.questions.get(id);
+      const historical = state.videoQuestions.some(item => item.question_id === id);
+      if (!row || row.status !== 'ready' || historical) return { rows: [], rowCount: 0 };
+      const duplicate = [...state.questions.values()].find(candidate => candidate.id !== id && candidate.dedupe_key === dedupeKey);
+      const occupied = [...state.questions.values()].find(candidate => candidate.id !== id && candidate.theme_id === themeId && candidate.theme_position === themePosition);
+      if (duplicate || occupied) throw new Error('duplicate key value violates unique constraint');
+      Object.assign(row, {
+        category, content_family: contentFamily, motif_key: motifKey, motif_key_a: motifKeyA, motif_key_b: motifKeyB,
+        option_a_text: optionAText, option_a_search_query: optionASearchQuery, option_a_visual_subject: optionAVisualSubject,
+        option_b_text: optionBText, option_b_search_query: optionBSearchQuery, option_b_visual_subject: optionBVisualSubject,
+        dedupe_key: dedupeKey, is_fantasy: isFantasy, hook_score: hookScore, quality_score: qualityScore, visual_score: visualScore,
+        source_provider: sourceProvider, theme_id: themeId, theme_position: themePosition,
+      });
+      return { rows: [{ id }], rowCount: 1 };
+    }
+    if (text.startsWith('DELETE FROM wyr_questions WHERE id')) {
+      const row = state.questions.get(params[0]);
+      const historical = state.videoQuestions.some(item => item.question_id === params[0]);
+      if (!row || row.status !== 'ready' || historical) return { rows: [], rowCount: 0 };
+      state.questions.delete(row.id); return { rows: [{ id: row.id }], rowCount: 1 };
     }
     if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE id = $1")) {
       const [id, jobId] = params;
