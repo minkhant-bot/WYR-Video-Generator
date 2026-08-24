@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
 import { FOOD_THEME_SEEDS, canonicalFoodThemeKey } from './food-themes.js';
-import { commitPlanUsage, insertFoodTheme, insertQuestions, selectPlanForJob } from './question-pool.js';
+import { questionMotifs } from './content-engine.js';
+import { rowToQuestion } from './pool-selection.js';
+import { commitPlanUsage, insertFoodTheme, insertQuestions, releaseQuestionReservation, reserveReplacementQuestion, selectPlanForJob } from './question-pool.js';
 import { createFakeDb } from './test-fake-db.js';
 
 const withFakeDb = async operation => {
@@ -50,4 +52,27 @@ test('usage commit rejects anything other than exactly seven reserved questions 
   await assert.rejects(() => commitPlanUsage({ jobId: 'partial-commit', plan, duration: 45 }), /found 6 of 7 reserved questions/);
   assert.equal(fake.state.videos.size, 0);
   assert.equal([...fake.state.questions.values()].filter(row => row.status === 'used').length, 0);
+}));
+
+test('usage commit records the exact seven final questions after replacement', () => withFakeDb(async fake => {
+  await insertFoodTheme(FOOD_THEME_SEEDS[0]);
+  const plan = await selectPlanForJob({ jobId: 'replacement-commit', count: 7 });
+  const rejected = plan.questions[0];
+  await releaseQuestionReservation({ jobId: 'replacement-commit', poolId: rejected.poolId });
+  const retained = plan.questions.slice(1);
+  const { candidate } = await reserveReplacementQuestion({
+    jobId: 'replacement-commit',
+    themeKey: plan.hook.themeKey,
+    excludeIds: plan.questions.map(question => question.poolId),
+    inPlanMotifs: new Set(retained.flatMap(question => questionMotifs(question))),
+  });
+  assert.ok(candidate);
+  const finalPlan = { ...plan, questions: [rowToQuestion(candidate, 0), ...retained.map((question, index) => ({ ...question, index: index + 1 }))] };
+  await commitPlanUsage({ jobId: 'replacement-commit', plan: finalPlan, duration: 45 });
+
+  const committedIds = new Set(fake.state.videoQuestions.map(row => row.question_id));
+  assert.equal(committedIds.size, 7);
+  assert.equal(committedIds.has(rejected.poolId), false);
+  assert.equal(committedIds.has(candidate.id), true);
+  assert.equal(fake.state.questions.get(rejected.poolId).status, 'ready');
 }));

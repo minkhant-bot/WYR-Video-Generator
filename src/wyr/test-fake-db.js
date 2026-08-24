@@ -121,6 +121,13 @@ export const createFakeDb = () => {
       row.theme_id = themeId; row.theme_position = themePosition;
       return { rows: [{ id: row.id }], rowCount: 1 };
     }
+    if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE id = $1")) {
+      const [id, jobId] = params;
+      const row = state.questions.get(id);
+      if (!row || row.reserved_by_job !== jobId || row.status !== 'reserved') return { rows: [], rowCount: 0 };
+      row.status = 'ready'; row.reserved_by_job = null; row.reserved_at = null;
+      return { rows: [], rowCount: 1 };
+    }
     if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE reserved_by_job")) {
       const [jobId] = params;
       let count = 0;
