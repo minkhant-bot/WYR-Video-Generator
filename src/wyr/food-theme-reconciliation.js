@@ -3,7 +3,7 @@ import { isStrictFoodPoolRow } from './food-content.js';
 import { FOOD_THEME_SEEDS, canonicalFoodThemeKey, validateFoodTheme } from './food-themes.js';
 import { computeInsertionFields } from './pool-selection.js';
 
-export const FOOD_CONTENT_REVISION = 'food-static-content-2026-08-24';
+export const FOOD_CONTENT_REVISION = 'food-static-content-2026-08-24-visual-variety-v2';
 
 const fieldValues = fields => [
   fields.category, fields.contentFamily, fields.motifKey, fields.motifKeyA, fields.motifKeyB,
