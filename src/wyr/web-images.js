@@ -14,6 +14,7 @@ const COMMONS_PRACTICAL_ORIGINAL_MAX_BYTES = 20_000_000;
 const BLOCK_PATTERN = /captcha|verify you are human|unusual traffic|automated quer(?:y|ies)|anomaly-modal|challenge-platform/i;
 const VQD_PATTERNS = [/vqd=["']([^"']+)/i, /vqd=([\d-]+)/i];
 const sourceDomain = value => { try { return new URL(value).hostname.toLowerCase(); } catch { return 'unknown'; } };
+const sourceFilename = value => { try { return decodeURIComponent(new URL(value).pathname.split('/').filter(Boolean).at(-1) || ''); } catch { return ''; } };
 const candidateId = result => String(result.image_token || createHash('sha256').update(String(result.image || '')).digest('hex'));
 const foodSubjectFromQuery = query => {
   const value = String(query || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -25,6 +26,7 @@ const foodSubjectFromQuery = query => {
     .trim();
 };
 const normalizedWords = value => String(value || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(word => word.length > 1);
+const plainMetadata = value => String(value || '').replace(/<[^>]*>/g, ' ').replace(/&(?:nbsp|amp|quot|#39);/gi, ' ').replace(/\s+/g, ' ').trim();
 
 export class WebImageProvider {
   async search() { throw new Error('WebImageProvider.search must be implemented.'); }
@@ -75,6 +77,7 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
           if (!info?.url || !Number.isFinite(Number(info.width)) || !Number.isFinite(Number(info.height)) || !/^image\/(?:jpeg|png|webp)$/i.test(String(info.mime || ''))) return [];
           if (!subjectWords.every(word => titleWords.has(word) || [...titleWords].some(titleWord => titleWord.startsWith(word) || word.startsWith(titleWord)))) return [];
           const license = String(info.extmetadata?.LicenseShortName?.value || 'Wikimedia Commons');
+          const semanticMetadata = [title, info.extmetadata?.ImageDescription?.value, info.extmetadata?.ObjectName?.value, info.extmetadata?.Categories?.value].map(plainMetadata).filter(Boolean).join(' ');
           const originalWidth = Number(info.width); const originalHeight = Number(info.height); const originalBytes = Number(info.size);
           const originalPractical = originalWidth * originalHeight <= COMMONS_PRACTICAL_ORIGINAL_MAX_PIXELS
             && (!Number.isFinite(originalBytes) || originalBytes <= COMMONS_PRACTICAL_ORIGINAL_MAX_BYTES);
@@ -86,6 +89,7 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
           return [{
             id: createHash('sha256').update(String(info.url)).digest('hex'), provider: this.name, providerSource: 'Wikimedia Commons',
             width: selectedWidth, height: selectedHeight, alt: `${literalFoodSubject} photograph - ${title}`, title: `${literalFoodSubject} photograph - ${title}`, keywords: `${literalFoodSubject} food photograph`,
+            semanticMetadata, pageTitle: title, sourceFilename: String(page.title || '').replace(/^File:/i, ''),
             originalImageUrl: info.url, downloadUrl: selectedUrl, thumbnailUrl: info.thumburl || null,
             sourcePageUrl: info.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(page.title)}`, sourceDomain: 'commons.wikimedia.org', photoUrl: info.descriptionurl || null,
             photographer: 'Wikimedia Commons contributor', photographerUrl: info.descriptionurl || null,
@@ -127,6 +131,7 @@ export class DuckDuckGoImageProvider extends WebImageProvider {
       return [{
         id: candidateId(result), provider: this.name, providerSource: result.source || 'web-wide index',
         width, height, alt: String(result.title || ''), title: String(result.title || ''), keywords: String(result.title || ''),
+        semanticMetadata: [result.title, result.source].filter(Boolean).join(' '), pageTitle: String(result.title || ''), sourceFilename: sourceFilename(result.image),
         originalImageUrl: result.image, downloadUrl: result.image, thumbnailUrl: result.thumbnail || null,
         sourcePageUrl: result.url, sourceDomain: sourceDomain(result.url), photoUrl: result.url,
         photographer: 'Unknown', photographerUrl: null,

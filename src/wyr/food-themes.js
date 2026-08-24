@@ -29,29 +29,29 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Baked Ziti', 'Stuffed Peppers'], ['Meatloaf', 'Casserole'], ['Chili', 'Stew'],
   ]),
   theme('Plan Your Pizza Night', 'Plan your pizza night.', [
-    ['Pepperoni Pizza', 'Margherita Pizza'], ['Hawaiian Pizza', 'BBQ Chicken Pizza'], ['Mushroom Pizza', 'Sausage Pizza'],
-    ['Buffalo Chicken Pizza', 'Cheeseburger Pizza'], ['White Pizza', 'Pesto Pizza'], ['Deep Dish Pizza', 'Thin Crust Pizza'],
-    ['Veggie Pizza', 'Meatball Pizza'], ['Breakfast Pizza', 'Taco Pizza'], ['Truffle Pizza', 'Garlic Pizza'],
+    ['Pepperoni Pizza', 'Margherita Pizza'], ['Cheese Bread', 'Mozzarella Sticks'], ['Garden Salad', 'Caprese Salad'],
+    ['Buffalo Wings', 'Meatballs'], ['Cheesecake', 'Lemon Tart'], ['Orange Soda', 'Iced Tea'],
+    ['Focaccia', 'Calzone'], ['Mushroom Pizza', 'Sausage Pizza'], ['White Pizza', 'Pesto Pizza'],
   ]),
   theme('Pick Your Taco Night', 'Pick your taco night.', [
-    ['Beef Taco', 'Chicken Taco'], ['Fish Taco', 'Shrimp Taco'], ['Carnitas Taco', 'Barbecue Taco'],
-    ['Breakfast Taco', 'Avocado Taco'], ['Crispy Taco', 'Soft Taco'], ['Cheeseburger Taco', 'Pizza Taco'],
-    ['Bacon Taco', 'Sausage Taco'], ['Potato Taco', 'Falafel Taco'], ['Lobster Taco', 'Salmon Taco'],
+    ['Beef Tacos', 'Chicken Tacos'], ['Cheese Quesadillas', 'Bean Tostadas'], ['Loaded Nachos', 'Curly Fries'],
+    ['Guacamole', 'Tomato Salsa'], ['Tamales', 'Pork Burrito'], ['Cinnamon Churros', 'Caramel Pudding'],
+    ['Lime Soda', 'Fruit Smoothie'], ['Fish Tacos', 'Shrimp Tacos'], ['Avocado Salad', 'Taco Salad'],
   ]),
   theme('Build Your Burger Bar', 'Build your burger bar.', [
-    ['Cheeseburger', 'Bacon Burger'], ['Chicken Burger', 'Salmon Burger'], ['Mushroom Burger', 'Avocado Burger'],
-    ['BBQ Burger', 'Chili Burger'], ['Pizza Burger', 'Taco Burger'], ['Breakfast Burger', 'Sausage Burger'],
-    ['Garlic Burger', 'Truffle Burger'], ['Macaroni Burger', 'Meatball Burger'], ['Falafel Burger', 'Shrimp Burger'],
+    ['Cheeseburger', 'Bacon Burger'], ['Chicken Sandwich', 'Fish Sandwich'], ['Seasoned Fries', 'Onion Rings'],
+    ['Macaroni Salad', 'Pasta Salad'], ['Chicken Wings', 'Fried Pickles'], ['Vanilla Milkshake', 'Cola'],
+    ['Caramel Brownies', 'Sugar Cookies'], ['Mushroom Burger', 'Salmon Burger'], ['Curly Fries', 'Potato Skins'],
   ]),
   theme('Choose Your Pasta Night', 'Choose your pasta night.', [
-    ['Spaghetti', 'Lasagna'], ['Fettuccine Alfredo', 'Pesto Pasta'], ['Macaroni', 'Gnocchi'],
-    ['Cheese Ravioli', 'Meatball Pasta'], ['Salmon Pasta', 'Shrimp Pasta'], ['Chicken Parmesan', 'Garlic Pasta'],
-    ['Mushroom Risotto', 'Lobster Risotto'], ['Bacon Pasta', 'Sausage Pasta'], ['Tomato Pasta', 'Avocado Pasta'],
+    ['Spaghetti', 'Lasagna'], ['Cheese Ravioli', 'Gnocchi'], ['Fettuccine Alfredo', 'Pesto Pasta'],
+    ['Chicken Parmesan', 'Italian Meatballs'], ['Rosemary Bread', 'Focaccia'], ['Tomato Salad', 'Antipasto'],
+    ['Tiramisu', 'Cannoli'], ['Mushroom Risotto', 'Lobster Risotto'], ['Bacon Pasta', 'Sausage Pasta'],
   ]),
   theme('Fill Your Sushi Platter', 'Fill your sushi platter.', [
-    ['Salmon Sushi', 'Tuna Sushi'], ['Shrimp Sushi', 'Lobster Sushi'], ['Avocado Sushi', 'Cucumber Sushi'],
-    ['Bacon Sushi', 'Chicken Sushi'], ['Mango Sushi', 'Orange Sushi'], ['Spicy Sushi', 'Tempura Sushi'],
-    ['Egg Sushi', 'Tofu Sushi'], ['Crab Sushi', 'Eel Sushi'], ['Steak Sushi', 'Scallop Sushi'],
+    ['Salmon Sushi', 'Tuna Sushi'], ['Shrimp Sushi', 'Avocado Sushi'], ['Dumplings', 'Spring Rolls'],
+    ['Ramen', 'Fried Rice'], ['Miso Soup', 'Seaweed Salad'], ['Teriyaki Salmon', 'Tempura Shrimp'],
+    ['Matcha Latte', 'Green Tea'], ['Crab Sushi', 'Eel Sushi'], ['Tofu Sushi', 'Egg Sushi'],
   ]),
   theme('Fill Your Bakery Box', 'Fill your bakery box.', [
     ['Butter Croissant', 'Almond Croissant'], ['Blueberry Muffin', 'Banana Muffin'], ['Chocolate Donut', 'Glazed Donut'],
@@ -59,9 +59,9 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Lemon Tart', 'Chocolate Eclair'], ['Macarons', 'Cannoli'], ['Sourdough', 'Focaccia'],
   ]),
   theme('Visit The Ice Cream Shop', 'Visit the ice cream shop.', [
-    ['Vanilla Ice Cream', 'Chocolate Ice Cream'], ['Strawberry Ice Cream', 'Mango Ice Cream'], ['Coffee Ice Cream', 'Caramel Ice Cream'],
-    ['Mint Ice Cream', 'Pistachio Ice Cream'], ['Cookie Ice Cream', 'Brownie Ice Cream'], ['Banana Ice Cream', 'Peach Ice Cream'],
-    ['Coconut Ice Cream', 'Avocado Ice Cream'], ['Cheesecake Ice Cream', 'Tiramisu Ice Cream'], ['Churro Ice Cream', 'Donut Ice Cream'],
+    ['Vanilla Ice Cream', 'Chocolate Ice Cream'], ['Gelato', 'Frozen Yogurt'], ['Caramel Milkshake', 'Fruit Smoothie'],
+    ['Walnut Brownies', 'Sugar Cookies'], ['Belgian Waffles', 'Cinnamon Churros'], ['Cherry Pie', 'Pound Cake'],
+    ['Espresso', 'Chai Tea'], ['Strawberry Ice Cream', 'Mango Ice Cream'], ['Coffee Cake', 'Chocolate Eclair'],
   ]),
   theme('Pick Your Movie Snacks', 'Pick your movie snacks.', [
     ['Butter Popcorn', 'Caramel Popcorn'], ['Cheese Fries', 'Pizza Bites'], ['Sausage Roll', 'Calzone'],
@@ -89,24 +89,24 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Christmas Pudding', 'Yule Log'], ['Shrimp', 'Lobster'], ['Hot Chocolate', 'Coffee'],
   ]),
   theme('Choose Your Coffee Shop Order', 'Choose your coffee shop order.', [
-    ['Espresso', 'Cappuccino'], ['Vanilla Latte', 'Caramel Latte'], ['Iced Coffee', 'Chai Tea'],
-    ['Hot Chocolate', 'Matcha Latte'], ['Lemon Muffin', 'Chocolate Croissant'], ['Cinnamon Roll', 'Chocolate Donut'],
-    ['Lemon Loaf', 'Pound Cake'], ['Fruit Danish', 'Vanilla Donut'], ['Iced Matcha', 'Milkshake'],
+    ['Espresso', 'Cappuccino'], ['Iced Coffee', 'Matcha Latte'], ['Butter Croissant', 'Plain Bagel'],
+    ['Lemon Muffin', 'Chocolate Croissant'], ['Lemon Cake', 'Tiramisu'], ['Club Sandwich', 'Chicken Wrap'],
+    ['Berry Parfait', 'Granola'], ['Hot Chocolate', 'Chai Tea'], ['Lemon Loaf', 'Pound Cake'],
   ]),
   theme('Mix Your Smoothie Bar', 'Mix your smoothie bar.', [
-    ['Strawberry Smoothie', 'Mango Smoothie'], ['Banana Smoothie', 'Peach Smoothie'], ['Blueberry Smoothie', 'Raspberry Smoothie'],
-    ['Avocado Smoothie', 'Coconut Smoothie'], ['Orange Smoothie', 'Apple Smoothie'], ['Chocolate Smoothie', 'Coffee Smoothie'],
-    ['Yogurt Smoothie', 'Granola Smoothie'], ['Peanut Butter Smoothie', 'Cinnamon Smoothie'], ['Pineapple Smoothie', 'Watermelon Smoothie'],
+    ['Strawberry Smoothie', 'Mango Smoothie'], ['Orange', 'Strawberries'], ['Apple', 'Greek Yogurt'],
+    ['Chia Pudding', 'Granola'], ['Banana Muffin', 'Lemon Loaf'], ['Avocado Toast', 'Peanut Butter Toast'],
+    ['Mixed Nuts', 'Trail Mix'], ['Blueberry Smoothie', 'Peach Smoothie'], ['Iced Coffee', 'Green Tea'],
   ]),
   theme('Choose Your Soup Season', 'Choose your soup season.', [
-    ['Tomato Soup', 'Chicken Soup'], ['Potato Soup', 'Mushroom Soup'], ['Lobster Soup', 'Shrimp Soup'],
-    ['Ramen', 'Noodle Soup'], ['Chili', 'Beef Stew'], ['Clam Chowder', 'Corn Soup'],
-    ['Curry Soup', 'Coconut Soup'], ['Meatball Soup', 'Sausage Soup'], ['Garlic Soup', 'Avocado Soup'],
+    ['Roasted Tomato Soup', 'Chicken Soup'], ['Clam Chowder', 'Beef Stew'], ['Noodle Soup', 'Chicken Chili'],
+    ['Cheese Crackers', 'Cheese Toast'], ['Garden Salad', 'Cobb Salad'], ['Roast Chicken', 'Sausage Roll'],
+    ['Cherry Pie', 'Bread Pudding'], ['Potato Soup', 'Mushroom Soup'], ['Lentil Soup', 'Corn Soup'],
   ]),
   theme('Build Your Salad Bowl', 'Build your salad bowl.', [
-    ['Caesar Salad', 'Greek Salad'], ['Chicken Salad', 'Tuna Salad'], ['Fruit Salad', 'Apple Salad'],
-    ['Potato Salad', 'Macaroni Salad'], ['Salmon Salad', 'Shrimp Salad'], ['Taco Salad', 'Cobb Salad'],
-    ['Egg Salad', 'Bacon Salad'], ['Couscous Salad', 'Rice Salad'], ['Lobster Salad', 'Steak Salad'],
+    ['Caesar Salad', 'Greek Salad'], ['Grilled Chicken', 'Grilled Salmon'], ['Avocado', 'Eggs'],
+    ['Couscous', 'Brown Rice'], ['Spinach Dip', 'Guacamole'], ['Sourdough', 'Pita Bread'],
+    ['Apple Juice', 'Green Tea'], ['Macaroni Salad', 'Potato Salad'], ['Lobster', 'Steak'],
   ]),
   theme('Choose Your Seafood Feast', 'Choose your seafood feast.', [
     ['Grilled Salmon', 'Fried Fish'], ['Shrimp', 'Lobster Roll'], ['Fish and Chips', 'Shrimp and Chips'],
@@ -114,19 +114,19 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Seafood Rice', 'Seafood Pasta'], ['Salmon Burger', 'Shrimp Burger'], ['Ceviche', 'Crab Salad'],
   ]),
   theme('Choose Your Chicken Dinner', 'Choose your chicken dinner.', [
-    ['Fried Chicken', 'Roast Chicken'], ['Chicken Wings', 'Chicken Tenders'], ['Chicken Parmesan', 'Chicken Alfredo'],
-    ['Chicken Sandwich', 'Chicken Wrap'], ['Chicken Curry', 'Chicken Chili'], ['Chicken Salad', 'Chicken Soup'],
-    ['Chicken Pizza', 'Chicken Taco'], ['Chicken Burger', 'Chicken Quesadilla'], ['Chicken and Waffles', 'Chicken and Biscuits'],
+    ['Fried Chicken', 'Roast Chicken'], ['Chicken Wings', 'Chicken Tenders'], ['Chicken Parmesan', 'Chicken Curry'],
+    ['Roast Potatoes', 'Macaroni'], ['Cobb Salad', 'Coleslaw'], ['Dinner Rolls', 'Biscuits'],
+    ['Pecan Pie', 'Banana Pudding'], ['Chicken Burger', 'Chicken Quesadilla'], ['Chicken Soup', 'Chicken Pot Pie'],
   ]),
   theme('Build Your Potato Party', 'Build your potato party.', [
-    ['French Fries', 'Sweet Potato Fries'], ['Baked Potatoes', 'Roast Potatoes'], ['Potato Salad', 'Potato Soup'],
-    ['Potato Chips', 'Tater Tots'], ['Hash Browns', 'Potato Wedges'], ['Potato Casserole', 'Potato Pie'],
-    ['Potato Pancakes', 'Potato Waffles'], ['Potato Bread', 'Potato Biscuits'], ['Potato Tacos', 'Potato Burritos'],
+    ['French Fries', 'Tater Tots'], ['Baked Potatoes', 'Roast Potatoes'], ['Potato Chips', 'Hash Browns'],
+    ['Potato Salad', 'Coleslaw'], ['Potato Soup', 'Beef Stew'], ['Potato Bread', 'Sourdough'],
+    ['Potato Pancakes', 'Waffles'], ['Sweet Potato Fries', 'Potato Wedges'], ['Potato Casserole', 'Cottage Pie'],
   ]),
   theme('Choose Your Sandwich Shop', 'Choose your sandwich shop.', [
-    ['Grilled Cheese', 'Club Sandwich'], ['Chicken Sandwich', 'Tuna Sandwich'], ['Meatball Sandwich', 'Sausage Sandwich'],
-    ['Pastrami Sandwich', 'Roast Beef Sandwich'], ['Breakfast Sandwich', 'Bagel Sandwich'], ['Steak Sandwich', 'Cheeseburger'],
-    ['Falafel Sandwich', 'Avocado Sandwich'], ['Bacon Sandwich', 'Egg Sandwich'], ['Salmon Sandwich', 'Fish Sandwich'],
+    ['Grilled Cheese', 'Roast Beef Sandwich'], ['Turkey Wrap', 'Tuna Wrap'], ['Pastrami Sandwich', 'Sausage Roll'],
+    ['Tomato Soup', 'French Fries'], ['Mozzarella Sticks', 'Pretzels'], ['Chocolate Fudge', 'Apple Cobbler'],
+    ['Orange Soda', 'Milkshake'], ['Meatball Sandwich', 'Egg Sandwich'], ['Bagel Sandwich', 'Breakfast Sandwich'],
   ]),
   theme('Tour The Street Food Stalls', 'Tour the street food stalls.', [
     ['Tacos', 'Tamales'], ['Gyros', 'Falafel'], ['Bao', 'Dumplings'],
@@ -139,9 +139,9 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Salmon', 'Shrimp'], ['Tomato Pasta', 'Olive Pasta'], ['Baklava', 'Fig Tart'],
   ]),
   theme('Build Your Indian Feast', 'Build your Indian feast.', [
-    ['Tandoori Chicken', 'Butter Chicken'], ['Chicken Curry', 'Fish Curry'], ['Coconut Curry', 'Potato Curry'],
-    ['Basmati Rice', 'Fried Rice'], ['Curry Rice', 'Curry Noodles'], ['Rice Pudding', 'Gulab Jamun'],
-    ['Mango Smoothie', 'Spiced Tea'], ['Lentil Soup', 'Chicken Soup'], ['Cauliflower Curry', 'Egg Curry'],
+    ['Tandoori Chicken', 'Butter Chicken'], ['Chicken Curry', 'Fish Curry'], ['Basmati Rice', 'Fried Rice'],
+    ['Naan Bread', 'Pita Bread'], ['Lentil Soup', 'Curry Soup'], ['Mango Smoothie', 'Spiced Tea'],
+    ['Rice Pudding', 'Gulab Jamun'], ['Coconut Curry', 'Potato Curry'], ['Cauliflower Curry', 'Egg Curry'],
   ]),
   theme('Choose Your Southern Supper', 'Choose your southern supper.', [
     ['Fried Chicken', 'Chicken and Waffles'], ['Mac and Cheese', 'Sweet Potato Casserole'], ['Buttermilk Biscuits', 'Sweet Cornbread'],
@@ -154,24 +154,24 @@ export const FOOD_THEME_SEEDS = Object.freeze([
     ['Pasta Salad', 'Fruit Salad'], ['Apple Juice', 'Chocolate Milk'], ['Muffin', 'Banana Bread'],
   ]),
   theme('Fill Your Chocolate Box', 'Fill your chocolate box.', [
-    ['Chocolate Truffles', 'Chocolate Candy'], ['Chocolate Cake', 'Chocolate Cheesecake'], ['Chocolate Brownies', 'Chocolate Cookies'],
-    ['Chocolate Cupcake', 'Chocolate Donut'], ['Chocolate Fudge', 'Chocolate Toffee'], ['Chocolate Pudding', 'Chocolate Custard'],
-    ['Chocolate Croissant', 'Chocolate Danish'], ['Chocolate Muffin', 'Chocolate Cinnamon Roll'], ['Chocolate Macarons', 'Chocolate Cannoli'],
+    ['Chocolate Truffles', 'Chocolate Fudge'], ['Chocolate Cake', 'Chocolate Cheesecake'], ['Chocolate Brownies', 'Chocolate Cookies'],
+    ['Chocolate Cupcake', 'Chocolate Donut'], ['Chocolate Pudding', 'Chocolate Ice Cream'], ['Hot Chocolate', 'Chocolate Milkshake'],
+    ['Chocolate Croissant', 'Chocolate Cannoli'], ['Chocolate Muffin', 'Chocolate Cinnamon Roll'], ['Chocolate Macarons', 'Chocolate Toffee'],
   ]),
   theme('Build Your Waffle Bar', 'Build your waffle bar.', [
-    ['Belgian Waffles', 'Buttermilk Waffles'], ['Chocolate Waffles', 'Vanilla Waffles'], ['Strawberry Waffles', 'Blueberry Waffles'],
-    ['Banana Waffles', 'Peach Waffles'], ['Bacon Waffles', 'Sausage Waffles'], ['Chicken and Waffles', 'Ice Cream Waffles'],
-    ['Cinnamon Waffles', 'Caramel Waffles'], ['Apple Waffles', 'Pumpkin Waffles'], ['Peanut Butter Waffles', 'Coffee Waffles'],
+    ['Belgian Waffles', 'Buttermilk Waffles'], ['Chicken Tenders', 'Bacon'], ['Strawberries', 'Bananas'],
+    ['Vanilla Ice Cream', 'Frozen Yogurt'], ['Fudge Brownies', 'Oatmeal Cookies'], ['Cappuccino', 'Milkshake'],
+    ['Blueberry Muffin', 'Apple Cobbler'], ['Chocolate Waffles', 'Blueberry Waffles'], ['Sausage', 'Eggs'],
   ]),
   theme('Build Your Burrito', 'Build your burrito.', [
-    ['Beef Burrito', 'Chicken Burrito'], ['Shrimp Burrito', 'Fish Burrito'], ['Breakfast Burrito', 'Bacon Burrito'],
-    ['Potato Burrito', 'Rice Burrito'], ['Chili Burrito', 'Curry Burrito'], ['Cheeseburger Burrito', 'Pizza Burrito'],
-    ['Avocado Burrito', 'Falafel Burrito'], ['Sausage Burrito', 'Meatball Burrito'], ['Lobster Burrito', 'Salmon Burrito'],
+    ['Beef Burrito', 'Chicken Burrito'], ['Chicken Quesadilla', 'Beef Quesadilla'], ['Cheese Nachos', 'Potato Wedges'],
+    ['Corn Salad', 'Tomato Salad'], ['Fried Rice', 'Chili'], ['Chocolate Churros', 'Rice Pudding'],
+    ['Iced Tea', 'Cola'], ['Breakfast Burrito', 'Shrimp Burrito'], ['Tacos', 'Quesadillas'],
   ]),
   theme('Choose Your Cake Table', 'Choose your cake table.', [
-    ['Chocolate Cake', 'Vanilla Cake'], ['Carrot Cake', 'Tiramisu Cake'], ['Strawberry Cake', 'Blueberry Cake'],
-    ['Apple Cake', 'Banana Cake'], ['Coffee Cake', 'Cinnamon Cake'], ['Orange Cake', 'Lemon Cake'],
-    ['Coconut Cake', 'Pistachio Cake'], ['Peach Cake', 'Mango Cake'], ['Cookie Cake', 'Brownie Cake'],
+    ['Chocolate Cake', 'Vanilla Cake'], ['Carrot Cake', 'Cheesecake'], ['Lemon Cupcake', 'Vanilla Donut'],
+    ['Key Lime Pie', 'Peach Cobbler'], ['Fudge Brownies', 'Shortbread'], ['Cupcakes', 'Chocolate Truffles'],
+    ['Coffee', 'Milkshake'], ['Lemon Cake', 'Coconut Cake'], ['Banana Bread', 'Pound Cake'],
   ]),
   theme('Fill Your Snack Board', 'Fill your snack board.', [
     ['Potato Chips', 'Pretzels'], ['Popcorn', 'Nachos'], ['Hummus', 'Guacamole'],
@@ -201,6 +201,61 @@ const jaccard = (left, right) => {
   const intersection = [...left].filter(word => right.has(word)).length;
   const union = new Set([...left, ...right]).size;
   return union ? intersection / union : 0;
+};
+
+const CUP_DRINK_HEADS = new Set(['cappuccino', 'coffee', 'cola', 'espresso', 'juice', 'latte', 'lemonade', 'milk', 'milkshake', 'slushie', 'smoothie', 'soda', 'tea', 'water']);
+const visualForm = value => {
+  const normalized = normalizeFoodOption(value);
+  if (/\bice cream\b/.test(normalized)) return 'frozen dessert';
+  const head = normalized.split(' ').at(-1) || 'unknown';
+  if (CUP_DRINK_HEADS.has(head)) return 'cup drink';
+  return head;
+};
+
+// Static, photo-sequence-focused audit of the seven primary questions. Deliberately classify by
+// the visible food form (the noun head), not every repeated ingredient: chocolate cake and
+// chocolate pudding remain visibly distinct, as do fries and baked potatoes. Conversely, seven
+// differently topped pizzas, smoothies, salads or cakes correctly collapse to one repeated form.
+export const auditFoodThemeVisualVariety = (themes = FOOD_THEME_SEEDS, { questionsPerVideo = 7 } = {}) => {
+  const themeReports = themes.map(themeValue => {
+    const primary = themeValue.questions.slice(0, questionsPerVideo);
+    const forms = primary.flatMap(questionValue => [visualForm(questionValue.optionA.text), visualForm(questionValue.optionB.text)]);
+    const formCounts = new Map();
+    for (const form of forms) formCounts.set(form, (formCounts.get(form) || 0) + 1);
+    const sortedForms = [...formCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+    const questionSignatures = primary.map(questionValue => [...new Set([
+      visualForm(questionValue.optionA.text), visualForm(questionValue.optionB.text),
+    ])].sort().join(' + '));
+    const signatureCounts = new Map();
+    for (const signature of questionSignatures) signatureCounts.set(signature, (signatureCounts.get(signature) || 0) + 1);
+    const dominantForm = sortedForms[0]?.[0] || null;
+    const dominantFormOptions = sortedForms[0]?.[1] || 0;
+    const maxRepeatedQuestionSignature = Math.max(0, ...signatureCounts.values());
+    const distinctForms = formCounts.size;
+    let classification = 'PASS';
+    const reasons = [];
+    if (dominantFormOptions >= 8 || distinctForms <= 3 || maxRepeatedQuestionSignature >= 5) classification = 'FAIL';
+    else if (dominantFormOptions >= 6 || distinctForms <= 5 || maxRepeatedQuestionSignature >= 3) classification = 'BORDERLINE';
+    if (dominantFormOptions >= 6) reasons.push(`${dominantForm} appears in ${dominantFormOptions} of ${forms.length} primary options`);
+    if (distinctForms <= 5) reasons.push(`only ${distinctForms} distinct visual forms across Q1-Q${primary.length}`);
+    if (maxRepeatedQuestionSignature >= 3) reasons.push(`one visual-form pairing repeats across ${maxRepeatedQuestionSignature} primary questions`);
+    return {
+      themeKey: themeValue.themeKey,
+      themeTitle: themeValue.title,
+      classification,
+      reasons,
+      primaryQuestionCount: primary.length,
+      distinctForms,
+      dominantForm,
+      dominantFormOptions,
+      maxRepeatedQuestionSignature,
+      formCounts: Object.fromEntries(sortedForms),
+      questionSignatures,
+    };
+  });
+  const totals = { PASS: 0, BORDERLINE: 0, FAIL: 0 };
+  for (const report of themeReports) totals[report.classification] += 1;
+  return { questionsPerVideo, totals, themes: themeReports };
 };
 
 export const auditFoodThemeContent = (themes = FOOD_THEME_SEEDS, { nearDuplicateThreshold = 0.75, questionsPerVideo = 7 } = {}) => {
@@ -265,6 +320,7 @@ export const auditFoodThemeContent = (themes = FOOD_THEME_SEEDS, { nearDuplicate
     nearDuplicatePairs,
     optionFrequency,
     crossThemeOptionOverlap,
+    visualVariety: auditFoodThemeVisualVariety(themes, { questionsPerVideo }),
     maximumCompleteVideos: themes.reduce((sum, themeValue) => sum + Math.floor(themeValue.questions.length / questionsPerVideo), 0),
   };
 };
@@ -282,6 +338,9 @@ export const validateFoodThemeCollection = (themes = FOOD_THEME_SEEDS) => {
   if (report.exactDuplicates.length) reasons.push(`${report.exactDuplicates.length} exact normalized pair duplicate(s)`);
   if (report.reversedDuplicates.length) reasons.push(`${report.reversedDuplicates.length} reversed normalized pair duplicate(s)`);
   if (report.nearDuplicatePairs.length) reasons.push(`${report.nearDuplicatePairs.length} near-duplicate pair(s)`);
+  for (const themeReport of report.visualVariety.themes.filter(item => item.classification !== 'PASS')) {
+    reasons.push(`${themeReport.themeTitle}: visual variety ${themeReport.classification.toLowerCase()} (${themeReport.reasons.join('; ')})`);
+  }
   return { valid: reasons.length === 0, reasons, report };
 };
 

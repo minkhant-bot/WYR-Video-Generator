@@ -16,7 +16,7 @@ export class PexelsImageProvider extends ImageProvider {
     const response = await fetchWithTimeout(url, { headers: { Authorization: this.apiKey } }, this.timeoutMs);
     if (!response.ok) throw new Error(`Pexels search returned HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
     const payload = await response.json();
-    return (payload.photos || []).map((photo, position) => ({ id: String(photo.id), provider: 'Pexels', width: Number(photo.width), height: Number(photo.height), alt: String(photo.alt || ''), title: String(photo.alt || ''), photographer: photo.photographer, photographerUrl: photo.photographer_url, photoUrl: photo.url, sourcePageUrl: photo.url, sourceDomain: 'pexels.com', originalImageUrl: photo.src?.original, downloadUrl: photo.src?.large2x || photo.src?.large || photo.src?.original, license: 'Pexels License', licenseUrl: 'https://www.pexels.com/license/', usageRights: 'Pexels License; review current terms before reuse', sha256: null, position })).filter(candidate => candidate.downloadUrl && candidate.width > 0 && candidate.height > 0);
+    return (payload.photos || []).map((photo, position) => ({ id: String(photo.id), provider: 'Pexels', width: Number(photo.width), height: Number(photo.height), alt: String(photo.alt || ''), title: String(photo.alt || ''), description: String(photo.alt || ''), semanticMetadata: String(photo.alt || ''), pageTitle: String(photo.url || '').split('/').filter(Boolean).at(-1) || '', photographer: photo.photographer, photographerUrl: photo.photographer_url, photoUrl: photo.url, sourcePageUrl: photo.url, sourceDomain: 'pexels.com', originalImageUrl: photo.src?.original, downloadUrl: photo.src?.large2x || photo.src?.large || photo.src?.original, license: 'Pexels License', licenseUrl: 'https://www.pexels.com/license/', usageRights: 'Pexels License; review current terms before reuse', sha256: null, position })).filter(candidate => candidate.downloadUrl && candidate.width > 0 && candidate.height > 0);
   }
   async downloadAsset(candidate, destination) {
     await retry(async () => {
@@ -214,6 +214,111 @@ const FOOD_CLEAN_STUDIO_PATTERN = /\b(isolated|white background|off[ -]?white ba
 const FOOD_VISIBLE_BACKGROUND_PATTERN = /\b(restaurant table|table setting|dining table|wooden table|rustic table|plate on table|kitchen counter|kitchen interior|room interior|restaurant interior|food spread|buffet|scenery|outdoors?)\b/i;
 const FOOD_CONFLICTING_DISH_PATTERN = /\b(poutine|tater tots?|combo platter|sampler platter|novelty cake|funny style|affogato|rhubarb|pistachio and raspberry|batter|waffle iron|raw dough|uncooked)\b/i;
 const FOOD_UNSUITABLE_HOST_PATTERN = /(^|\.)(nightcafe\.studio|fineartamerica\.com|emojis\.com|redbubble\.com|deviantart\.com|artstation\.com|citypng\.com|pngtree\.com|designbundles\.net|wallpapers\.com|wallpapercrafter\.com|wallpapercave\.com|wallpaperflare\.com|etsy\.com|walmart\.com|target\.com|ebay\.(?:com|co\.[a-z]{2}|[a-z]{2})|alibaba\.com|aliexpress\.com|instacart\.com|amazon\.(?:com(?:\.[a-z]{2})?|co\.[a-z]{2}|[a-z]{2}))$/i;
+
+// Exact FOOD identities only: these groups express spelling/name equivalence, never fuzzy
+// similarity between distinct dishes. For compounds the final dish/form remains mandatory.
+const FOOD_IDENTITY_SYNONYM_GROUPS = Object.freeze([
+  ['fries', 'french fries'], ['donut', 'doughnut'], ['soda', 'soft drink'],
+  ['omelet', 'omelette'], ['mac and cheese', 'macaroni and cheese', 'mac cheese'],
+  ['ice cream', 'icecream'], ['hot dog', 'hotdog'],
+  ['mozzarella sticks', 'mozzarella stick', 'cheese sticks', 'cheese stick'],
+  ['chicken tenders', 'chicken tender', 'chicken strips', 'chicken strip'],
+  ['chicken wings', 'chicken wing', 'buffalo wings', 'buffalo wing', 'hot wings', 'hot wing'],
+  ['onion rings', 'onion ring'], ['spring rolls', 'spring roll'], ['egg rolls', 'egg roll'],
+  ['sausage rolls', 'sausage roll'], ['hash browns', 'hash brown'], ['tater tots', 'tater tot'],
+  ['potato wedges', 'potato wedge'],
+]);
+const FOOD_IDENTITY_TERMS = new Set([
+  'bagel', 'biscuit', 'bread', 'brownie', 'burger', 'burrito', 'cake', 'candy', 'cereal',
+  'cheesecake', 'chicken', 'chili', 'chocolate', 'cobbler', 'coffee', 'cookie', 'curry',
+  'cupcake', 'donut', 'doughnut', 'dumpling', 'fish', 'fries', 'hot dog', 'ice cream',
+  'lasagna', 'lobster', 'mac and cheese', 'meatball', 'muffin', 'nachos', 'noodles',
+  'omelet', 'omelette', 'pancake', 'pasta', 'pie', 'pizza', 'pretzel', 'pudding', 'quesadilla',
+  'rice', 'salad', 'sandwich', 'sausage', 'smoothie', 'soda', 'soft drink', 'soup', 'steak',
+  'sushi', 'taco', 'toast', 'waffle', 'wrap', 'mozzarella sticks', 'chicken tenders',
+  'chicken wings', 'onion rings', 'spring rolls', 'egg rolls', 'sausage rolls', 'hash browns',
+  'tater tots', 'potato wedges',
+]);
+const FOOD_MULTIWORD_BASES = [...new Set(FOOD_IDENTITY_SYNONYM_GROUPS.flat())]
+  .filter(term => term.includes(' ')).sort((left, right) => right.split(' ').length - left.split(' ').length);
+const FOOD_METADATA_NON_DISH_PATTERN = /\b(car|vehicle|phone|computer|laptop|chair|furniture|building|street|landscape|portrait|person|people|restaurant|cafe|shop|store|venue|kitchen interior|menu|logo|toy|pet|dog|cat)\b/i;
+const FOOD_LABEL_FILLER = new Set(['and', 'with', 'style', 'classic', 'loaded', 'grilled', 'fried', 'baked', 'roasted', 'fresh', 'spicy', 'sweet', 'savory']);
+const FOOD_EXCLUSIVE_MODIFIER_GROUPS = Object.freeze([
+  ['chicken', 'beef', 'pork', 'fish', 'shrimp', 'lobster', 'turkey', 'ham', 'bacon', 'sausage', 'salmon', 'tuna', 'bean', 'cheese', 'mushroom'],
+  ['apple', 'banana', 'blueberry', 'cherry', 'chocolate', 'lemon', 'lime', 'mango', 'orange', 'peach', 'pineapple', 'raspberry', 'strawberry', 'vanilla', 'caramel'],
+]);
+const semanticNormalize = value => String(value || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const singularFoodTerm = value => {
+  const term = semanticNormalize(value);
+  if (term === 'fries') return 'fries';
+  if (/^(?:cookies|brownies|smoothies|pies)$/.test(term)) return term.slice(0, -1);
+  if (term.endsWith('ies')) return `${term.slice(0, -3)}y`;
+  if (term.endsWith('oes')) return term.slice(0, -2);
+  if (term.endsWith('ses') || term.endsWith('xes') || term.endsWith('zes') || term.endsWith('ches') || term.endsWith('shes')) return term.slice(0, -2);
+  if (term.length > 4 && term.endsWith('s')) return term.slice(0, -1);
+  return term;
+};
+const phrasePresent = (text, phrase) => {
+  const textWords = semanticNormalize(text).split(' ').filter(Boolean);
+  const phraseWords = semanticNormalize(phrase).split(' ').filter(Boolean);
+  if (!phraseWords.length || phraseWords.length > textWords.length) return false;
+  for (let index = 0; index <= textWords.length - phraseWords.length; index += 1) {
+    if (phraseWords.every((word, offset) => singularFoodTerm(textWords[index + offset]) === singularFoodTerm(word))) return true;
+  }
+  return false;
+};
+const aliasesForFoodIdentity = base => {
+  const normalized = semanticNormalize(base);
+  const group = FOOD_IDENTITY_SYNONYM_GROUPS.find(items => items.some(item => singularFoodTerm(item) === singularFoodTerm(normalized)));
+  return [...new Set((group || [normalized]).flatMap(item => [semanticNormalize(item), singularFoodTerm(item)]).filter(Boolean))];
+};
+const requestedFoodIdentity = option => {
+  const label = semanticNormalize(option?.text || option?.searchQuery || '');
+  const special = FOOD_MULTIWORD_BASES.find(term => label === term || label.endsWith(` ${term}`));
+  const lastWord = label.split(' ').filter(Boolean).at(-1) || '';
+  const base = special || singularFoodTerm(lastWord);
+  const baseAliases = aliasesForFoodIdentity(base);
+  const modifierWords = label.split(' ').filter(word => word.length > 2 && !FOOD_LABEL_FILLER.has(word) && !baseAliases.some(alias => alias.split(' ').includes(word)));
+  return { label, base, baseAliases, modifierWords };
+};
+const urlFilename = value => {
+  try { return decodeURIComponent(new URL(value).pathname.split('/').filter(Boolean).at(-1) || ''); }
+  catch { return ''; }
+};
+const candidateSemanticMetadata = candidate => {
+  // semanticMetadata lets providers separate source-authored text from query-derived display alt
+  // text, so an injected search phrase cannot prove its own relevance.
+  if (Object.hasOwn(candidate || {}, 'semanticMetadata')) return semanticNormalize([candidate.semanticMetadata, candidate.description, candidate.tags, candidate.pageTitle, candidate.sourceFilename].flat().filter(Boolean).join(' '));
+  const explicit = [candidate?.title, candidate?.description, candidate?.alt, candidate?.tags, candidate?.keywords, candidate?.pageTitle, candidate?.sourceFilename]
+    .flatMap(value => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ');
+  if (explicit.trim()) return semanticNormalize(explicit);
+  return semanticNormalize([urlFilename(candidate?.sourcePageUrl), urlFilename(candidate?.originalImageUrl), urlFilename(candidate?.downloadUrl)].filter(Boolean).join(' '));
+};
+
+export const assessFoodImageSemanticRelevance = (candidate, option) => {
+  const requested = requestedFoodIdentity(option);
+  const metadata = candidateSemanticMetadata(candidate);
+  if (!requested.base || !metadata) return { accepted: true, decision: 'ambiguous', ...requested, metadata, reason: 'metadata is insufficient and has no strong conflict' };
+  const baseMatched = requested.baseAliases.some(alias => phrasePresent(metadata, alias));
+  if (baseMatched) {
+    for (const group of FOOD_EXCLUSIVE_MODIFIER_GROUPS) {
+      const requestedGroupModifiers = requested.modifierWords.filter(word => group.includes(singularFoodTerm(word)));
+      if (!requestedGroupModifiers.length || requestedGroupModifiers.some(word => phrasePresent(metadata, word))) continue;
+      const conflictingModifier = group.find(word => phrasePresent(metadata, word));
+      if (conflictingModifier) return { accepted: false, decision: 'reject', ...requested, metadata, conflictingModifier, reason: `metadata matches requested base food "${requested.base}" but identifies a conflicting modifier (${conflictingModifier})` };
+    }
+    return { accepted: true, decision: 'match', ...requested, metadata, reason: `metadata explicitly matches requested base food "${requested.base}"` };
+  }
+  const matchedModifiers = requested.modifierWords.filter(word => phrasePresent(metadata, word));
+  if (matchedModifiers.length) return { accepted: false, decision: 'reject', ...requested, metadata, matchedModifiers, reason: `requested base food "${requested.base}" is absent; metadata matches modifier only (${matchedModifiers.join(', ')})` };
+  const conflictingFoods = [...FOOD_IDENTITY_TERMS]
+    .filter(term => !requested.baseAliases.some(alias => singularFoodTerm(alias) === singularFoodTerm(term)))
+    .filter(term => phrasePresent(metadata, term));
+  if (conflictingFoods.length) return { accepted: false, decision: 'reject', ...requested, metadata, conflictingFoods, reason: `requested base food "${requested.base}" is absent; metadata identifies a different food (${conflictingFoods.slice(0, 3).join(', ')})` };
+  const nonDishMatch = metadata.match(FOOD_METADATA_NON_DISH_PATTERN)?.[0]?.toLowerCase();
+  if (nonDishMatch) return { accepted: false, decision: 'reject', ...requested, metadata, reason: `requested base food "${requested.base}" is absent; metadata identifies a non-dish subject (${nonDishMatch})` };
+  return { accepted: true, decision: 'ambiguous', ...requested, metadata, reason: 'metadata is ambiguous but does not conflict with the requested food' };
+};
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|line icon|silhouette icon|button icon|symbol icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
 const GENERIC_TECH_ABSTRACTION_PATTERN = /\b(cloud icon|upload icon|download icon|gear icon|network icon|circuit board|abstract technology|digital network|data flow|binary code|matrix code|generic technology|tech background|futuristic background|abstract background|glowing network|node network|connection lines|abstract data|generic diagram|flowchart|pie chart|bar chart|symbol only|isolated symbol|generic symbol)\b/i;
 const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation|handshake|suit|office|meeting|teamwork)\b/i;
@@ -394,6 +499,7 @@ export const assessImageCandidate = (candidate, option) => {
   const hardFormatEvidence = `${searchableText} ${sourceDomain}`;
   const hardRejectionReasons = [];
   const foodOption = String(option?.category || '').trim().toLowerCase() === 'food';
+  const foodSemanticRelevance = foodOption ? assessFoodImageSemanticRelevance(candidate, option) : null;
   if (!Number.isFinite(candidate?.width) || !Number.isFinite(candidate?.height) || candidate.width < 750 || candidate.height < 450) hardRejectionReasons.push('hard-rejected: low-resolution or corrupt candidate (too small for the 750x450 slot)');
   const hardFormatMatches = [...hardFormatEvidence.matchAll(HARD_FORMAT_PATTERN)].map(match => match[0].toLowerCase());
   const hardLayoutMatch = hardFormatEvidence.match(HARD_LAYOUT_PATTERN)?.[0]?.toLowerCase();
@@ -431,6 +537,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (MISLEADING_CONTEXT_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate describes merchandise or a misleading unrelated context');
   if (INAPPROPRIATE_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears inappropriate or sexualized');
   rejectionReasons.push(...assetRejectionReasons);
+  if (foodSemanticRelevance?.decision === 'reject') rejectionReasons.push(`food semantic relevance rejected: ${foodSemanticRelevance.reason}`);
   const concepts = optionConcepts(option); const textTokens = new Set(normalizeWords(candidateText(candidate))); const allTokens = new Set([...textTokens, ...normalizeWords(candidate.keywords)]);
   const textStems = new Set([...textTokens].map(stem)); const allStems = new Set([...allTokens].map(stem));
   // Stem-aware (see `stem` above): a candidate's inflected wording ("riding"/"flying"/"trains")
@@ -517,7 +624,7 @@ export const assessImageCandidate = (candidate, option) => {
   if (!bankGrowthDepicted) pexelsQualityReasons.push('candidate does not depict money or wealth increasing, multiplying, or in dramatic abundance');
   if (weakVisual) pexelsQualityReasons.push('candidate is generic, object-only, clip-art-like, or stock-like');
   if (corporateWeak) pexelsQualityReasons.push('candidate is generic corporate or finance stock imagery for a concept needing a stronger visual');
-  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, formatPass: assetRejectionReasons.length === 0, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, finalScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched), dominantSubjectWords, dominantCoverage };
+  return { accepted, hardRejected: hardRejectionReasons.length > 0, hardRejectionReasons, formatPass: assetRejectionReasons.length === 0, validAsset: assetRejectionReasons.length === 0, relevanceScore, qualityScore, finalScore, conceptClarity, specificity, visualImpact, wyrSuitability, pexelsQualityPassed: accepted && pexelsQualityReasons.length === 0, pexelsQualityReasons, rejectionReasons, matchedConcepts: uniqueWords(coreMatched), dominantSubjectWords, dominantCoverage, foodSemanticRelevance };
 };
 
 const runImageProbe = (binary, args) => new Promise((resolve, reject) => {

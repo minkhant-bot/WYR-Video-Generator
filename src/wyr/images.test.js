@@ -251,9 +251,12 @@ test('literal FOOD-query candidates outrank broader photographic-query ties', ()
 
 test('food-photo recovery queries stay literal and are only generated for food options', () => {
   assert.deepEqual(buildFoodPhotoRecoveryQueries({ category: 'food', text: 'Eat spicy noodles', searchQuery: 'spicy noodles bowl' }), [
-    'spicy noodles bowl food photography',
-    'spicy noodles bowl plated dish close up',
-    'spicy noodles bowl real food photo',
+    'spicy noodles bowl isolated white background product photo no people',
+    'spicy noodles bowl single food close up white background',
+    'spicy noodles bowl isolated food photography no people',
+    'spicy noodles bowl close up food photography no people',
+    'spicy noodles bowl real food photo no people',
+    'spicy noodles bowl plated dish close up no people',
   ]);
   assert.deepEqual(buildFoodPhotoRecoveryQueries({ category: 'travel', text: 'Visit Rome', searchQuery: 'Rome skyline' }), []);
 });
@@ -602,7 +605,7 @@ test('recovery keeps the strict downloaded-image quality gate and reports bounde
 test('strong DuckDuckGo candidates are primary and never call Pexels', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-web-primary-')); let pexelsSearches = 0; let pexelsDownloads = 0;
   const provider = { search: async () => { pexelsSearches += 1; throw new Error('Pexels must remain untouched when DuckDuckGo succeeds'); }, downloadAsset: async () => { pexelsDownloads += 1; } };
-  const webProvider = { name: 'DuckDuckGo Images', search: async query => [{ id: `web-${query}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: query.includes('dragon') ? 'person petting friendly fantasy dragon creature' : 'dramatic cinematic person stepping through a glowing teleportation portal', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, sourceDomain: 'example.test' }], downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
+  const webProvider = { name: 'DuckDuckGo Images', search: async query => [{ id: `web-${query}`, provider: 'DuckDuckGo Images', width: 3000, height: 1800, alt: query.includes('dragon') ? 'candid photograph of a person befriending a friendly dragon creature' : 'dramatic cinematic person stepping through a glowing teleportation portal photograph', originalImageUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, downloadUrl: `https://images.test/${encodeURIComponent(query)}.jpg`, sourceDomain: 'example.test' }], downloadAsset: async (selected, destination) => writeCandidate(selected, destination) };
   const plan = { questions: [{ index: 0, optionA: { text: 'Teleport Anywhere' }, optionB: { text: 'Befriend a Dragon' } }] };
   try {
     const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 1 });

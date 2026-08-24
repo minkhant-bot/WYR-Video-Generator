@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assessFoodEntityLabel } from './food-content.js';
 import { assessQuestionQuality } from './content-engine.js';
-import { FOOD_THEME_SEEDS, auditFoodThemeContent, normalizeFoodOption, validateFoodThemeCollection } from './food-themes.js';
+import { FOOD_THEME_SEEDS, auditFoodThemeContent, auditFoodThemeVisualVariety, normalizeFoodOption, validateFoodThemeCollection } from './food-themes.js';
 
 const TARGET_REUSE_LIMITS = Object.freeze({
   'Potato Chips': 2,
@@ -32,8 +32,32 @@ test('complete static FOOD set has 33 themes, 298 distinct normalized pairs, and
     exact: validation.report.exactDuplicates.length,
     reversed: validation.report.reversedDuplicates.length,
     near: validation.report.nearDuplicatePairs.length,
+    visualVariety: validation.report.visualVariety.totals,
     maximumCompleteVideos: validation.report.maximumCompleteVideos,
-  }, { themes: 33, pairs: 298, uniquePairs: 298, exact: 0, reversed: 0, near: 0, maximumCompleteVideos: 33 });
+  }, { themes: 33, pairs: 298, uniquePairs: 298, exact: 0, reversed: 0, near: 0, visualVariety: { PASS: 33, BORDERLINE: 0, FAIL: 0 }, maximumCompleteVideos: 33 });
+});
+
+test('visual-variety audit flags repeated food forms without penalizing a cohesive varied meal', () => {
+  const makeQuestion = (optionA, optionB) => ({ optionA: { text: optionA }, optionB: { text: optionB } });
+  const makeTheme = (title, pairs) => ({ themeKey: title.toLowerCase(), title, questions: pairs.map(pair => makeQuestion(...pair)) });
+  const report = auditFoodThemeVisualVariety([
+    makeTheme('Same-looking pizza sequence', [
+      ['Pepperoni Pizza', 'Cheese Pizza'], ['Mushroom Pizza', 'Sausage Pizza'], ['Pesto Pizza', 'White Pizza'],
+      ['Chicken Pizza', 'Meatball Pizza'], ['Garlic Pizza', 'Olive Pizza'], ['Thin Pizza', 'Deep Pizza'], ['Veggie Pizza', 'Bacon Pizza'],
+    ]),
+    makeTheme('Cup-heavy cafe sequence', [
+      ['Coffee', 'Tea'], ['Lemonade', 'Cola'], ['Smoothie', 'Milkshake'], ['Bagel', 'Muffin'],
+      ['Sandwich', 'Wrap'], ['Brownies', 'Cookies'], ['Fruit Salad', 'Granola'],
+    ]),
+    makeTheme('Varied taco-night meal', [
+      ['Beef Tacos', 'Chicken Tacos'], ['Cheese Quesadillas', 'Bean Tostadas'], ['Loaded Nachos', 'Curly Fries'],
+      ['Guacamole', 'Tomato Salsa'], ['Tamales', 'Pork Burrito'], ['Cinnamon Churros', 'Caramel Pudding'], ['Lime Soda', 'Fruit Smoothie'],
+    ]),
+  ]);
+  assert.equal(report.themes[0].classification, 'FAIL');
+  assert.match(report.themes[0].reasons.join('; '), /pizza appears in 14/);
+  assert.equal(report.themes[1].classification, 'BORDERLINE');
+  assert.equal(report.themes[2].classification, 'PASS');
 });
 
 test('static FOOD options remain concise recognized foods and targeted repetition stays reduced', () => {

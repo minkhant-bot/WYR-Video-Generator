@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildFoodPhotoRecoveryQueries, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, validateDownloadedImageForRender } from './images.js';
+import { PexelsImageProvider, assessFoodImageSemanticRelevance, assessImageCandidate, buildFoodPhotoRecoveryQueries, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, validateDownloadedImageForRender } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { buildImageQueries, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
@@ -60,6 +60,8 @@ export class PixabayImageProvider {
       height: Number(hit.imageHeight),
       alt: String(hit.tags || ''),
       title: String(hit.tags || ''),
+      tags: String(hit.tags || ''),
+      semanticMetadata: String(hit.tags || ''),
       sourceDomain: 'pixabay.com',
       sourcePageUrl: hit.pageURL,
       originalImageUrl: hit.largeImageURL || hit.webformatURL,
@@ -264,6 +266,7 @@ const logSelectionResult = state => {
 const classifyRejection = checked => {
   if (checked.hardRejected) return 'hardRejected';
   const reasons = checked.rejectionReasons || [];
+  if (reasons.some(reason => reason.includes('food semantic relevance'))) return 'semanticRejected';
   if (reasons.some(reason => reason.includes('dominant subject'))) return 'dominantSubjectRejected';
   if (reasons.some(reason => reason.includes('relevance score') || reason.includes('visual intent'))) return 'semanticRejected';
   return 'otherRejected';
@@ -303,7 +306,7 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
         // dominant-subject/relevance machinery, just pointed at the semantically-translated
         // concept. state.optionText (shown on screen) itself is never modified anywhere.
         const checked = assessForReview(candidateForBrowser(raw), {
-          text: assessmentText || state.optionText,
+          text: String(state.category || '').trim().toLowerCase() === 'food' ? state.requestedFoodText || state.optionText : assessmentText || state.optionText,
           searchQuery: query,
           category: state.category,
         });
@@ -572,6 +575,7 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         // it. displayText itself is never touched -- it still flows separately, unchanged, into
         // the actual rendered video via plan.questions[i].optionA/B.text (see media.js).
         optionText: option.visualSubject || option.searchQuery || option.text,
+        requestedFoodText: String(question.category || '').trim().toLowerCase() === 'food' ? option.text : null,
         // Tier 0's queries: the hand-written DB searchQuery first when present (never pre-empted
         // by a rule-derived guess), then buildImageQueries' short literal fallback queries. The
         // older/broader selectionQueries list is only appended if Tier 0 comes up short.
@@ -770,6 +774,10 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
       if (!provider) { failedKeys.add(candidate.candidateKey); return null; }
       rank += 1;
       try {
+        if (String(state.category || '').trim().toLowerCase() === 'food') {
+          const semantic = assessFoodImageSemanticRelevance(candidate, { text: state.requestedFoodText || item.optionText, searchQuery: candidate.queryUsed, category: 'food' });
+          if (!semantic.accepted) throw new Error(`food semantic relevance rejected before download: ${semantic.reason}`);
+        }
         const { localPath, filename, width, height, framing } = await downloadAndValidateCandidate({ candidate, provider, item, assetsDir, computeCrop });
         const sha256 = createHash('sha256').update(fs.readFileSync(localPath)).digest('hex');
         if (usedContentHashes.has(sha256)) { fs.rmSync(localPath, { force: true }); throw new Error('duplicate image bytes already used for another slot'); }
