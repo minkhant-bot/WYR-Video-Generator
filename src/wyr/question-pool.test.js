@@ -17,13 +17,22 @@ const EIGHT_MIXED = [
   question('money', 'Own a yacht', 'Own a jet'),
   question('luxury', 'Live in a mansion', 'Live in a penthouse'),
   question('travel', 'Backpack Europe', 'Cruise the Caribbean'),
-  question('food', 'Eat at a 5-star restaurant', 'Cook with a chef', 'fine dining restaurant', 'chef cooking kitchen'),
+  question('food', 'Pizza', 'Sushi'),
   question('adventure', 'Skydive', 'Scuba dive'),
   question('space', 'Visit the ISS', 'Visit the moon'),
   question('ocean', 'Swim with sharks', 'Swim with whales'),
   question('fame', 'Be a movie star', 'Be a rock star'),
 ];
-const EIGHT_DIVERSE = EIGHT_MIXED.map(item => ({ ...item, category: 'food' }));
+const EIGHT_DIVERSE = [
+  question('food', 'Cheeseburger', 'Fried Chicken'),
+  question('food', 'Pizza', 'Sushi'),
+  question('food', 'Pancakes', 'Waffles'),
+  question('food', 'Cheesecake', 'Tiramisu'),
+  question('food', 'Onion Rings', 'Mozzarella Sticks'),
+  question('food', 'French Toast', 'Cinnamon Roll'),
+  question('food', 'Chicken Wings', 'Nachos'),
+  question('food', 'Ice Cream', 'Brownies'),
+];
 
 // 16 distinct, non-fantasy questions across 8 distinct content families (2 categories each, at the
 // family cap), so two SEPARATE 6-question selections can each be drawn diversely from whatever is
@@ -46,7 +55,17 @@ const SIXTEEN_MIXED = [
   question('sports', 'Win an olympic gold medal', 'Win a world championship title'),
   question('music', 'Headline a huge festival', 'Record a platinum album'),
 ];
-const SIXTEEN_DIVERSE = SIXTEEN_MIXED.map(item => ({ ...item, category: 'food' }));
+const SIXTEEN_DIVERSE = [
+  ...EIGHT_DIVERSE,
+  question('food', 'Tacos', 'Burritos'),
+  question('food', 'Donuts', 'Croissants'),
+  question('food', 'Lasagna', 'Ravioli'),
+  question('food', 'Bagels', 'Muffins'),
+  question('food', 'Falafel', 'Hummus'),
+  question('food', 'Cupcakes', 'Cookies'),
+  question('food', 'Ramen', 'Noodles'),
+  question('food', 'Milkshakes', 'Smoothies'),
+];
 
 test('countReadyFood is category-scoped while countReady remains the general admin/refill count', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_MIXED);
@@ -105,7 +124,7 @@ test('selectAndReservePlan returns null (not a throw) when the pool cannot fill 
 
 test('concurrent jobs never both reserve the same questions (sequential reservations do not overlap)', () => withFakeDb(async () => {
   await insertQuestions(EIGHT_DIVERSE);
-  await insertQuestions([question('food', 'Survive on canned food', 'Survive on dried food'), question('food', 'Throw a pizza party', 'Host a barbecue dinner')]);
+  await insertQuestions([question('food', 'Tacos', 'Burritos'), question('food', 'Donuts', 'Croissants')]);
   const first = await selectAndReservePlan({ jobId: 'job-a', count: 8, targetTotalSeconds: 999 });
   assert.ok(first);
   const second = await selectAndReservePlan({ jobId: 'job-b', count: 2 });
@@ -201,7 +220,11 @@ test('a DB-selected plan is shaped for the automatic image/TTS/render path with 
   assert.equal(plan.questions.length, 8);
   assert.equal(plan.source, 'database_pool');
   assert.equal('selection' in plan, false);
-  for (const q of plan.questions) { assert.equal(typeof q.optionA.text, 'string'); assert.equal(typeof q.optionA.searchQuery, 'string'); }
+  for (const q of plan.questions) {
+    assert.equal(typeof q.optionA.text, 'string');
+    assert.equal(q.optionA.searchQuery, q.optionA.text, 'FOOD image query must be the validated literal noun label');
+    assert.equal(q.optionB.searchQuery, q.optionB.text, 'FOOD image query must be the validated literal noun label');
+  }
 }));
 // Fixed production policy: every generated video uses exactly 8 questions/scenes. These exercise
 // selectAndReservePlan/selectPlanForJob/commitPlanUsage/releaseReservation via their DEFAULT count
@@ -314,21 +337,48 @@ test('commitPlanUsage is idempotent: calling it twice for the same completed job
 
 test('reserveReplacementQuestion reserves exactly one ready question, excludes already-in-plan ids and motifs, and prefers a stronger eligible dilemma among ties', () => withFakeDb(async () => {
   await insertQuestions([
-    question('food', 'Own a small snack', 'Own a large snack'), // deliberately weak/low-stakes
-    question('food', 'Eat gourmet meals daily', 'Keep every family recipe', 'gourmet meal table', 'family recipe cookbook'), // stronger tradeoff
+    question('food', 'Own a small snack', 'Own a large snack'), // legacy food-category scenario: ineligible
+    question('food', 'Pizza', 'Sushi'),
     question('luxury', 'Own a private island', 'Own a private jet'), // stronger non-food row must remain ineligible
   ]);
   const excludeIds = [];
   const result = await reserveReplacementQuestion({ jobId: 'job-replace-1', excludeIds, inPlanMotifs: new Set() });
   assert.ok(result.candidate, 'expected a replacement candidate to be found');
-  assert.equal(result.candidate.option_a_text, 'Eat gourmet meals daily', 'the stronger eligible food dilemma should be preferred as the replacement');
+  assert.equal(result.candidate.option_a_text, 'Pizza', 'the strict literal-food row should be selected as the replacement');
   assert.equal(result.candidate.category, 'food');
   assert.equal(await countReady(), 2, 'exactly one question must move out of ready');
 }));
 
 test('reserveReplacementQuestion excludes ids already in the plan and returns null when nothing eligible remains', () => withFakeDb(async () => {
-  const inserted = await insertQuestions([question('food', 'Eat pasta in Rome', 'Eat falafel in Cairo', 'rome pasta restaurant', 'cairo falafel restaurant')]);
+  const inserted = await insertQuestions([question('food', 'Pasta', 'Falafel')]);
   const result = await reserveReplacementQuestion({ jobId: 'job-replace-2', excludeIds: inserted.inserted, inPlanMotifs: new Set() });
   assert.equal(result.candidate, null);
   assert.equal(await countReady(), 1, 'an excluded/no-match outcome must never reserve anything');
+}));
+
+test('strict FOOD reservation skips scenario-style legacy rows and reserves only literal food-vs-food pairs', () => withFakeDb(async fake => {
+  const invalid = [
+    question('food', 'Only eat pizza for a year', 'Only eat sushi for a year', 'pizza plated food', 'sushi plated food'),
+    question('food', 'Unlimited street food', 'Master one cuisine perfectly'),
+    question('food', 'Personal barista', 'Personal baker'),
+  ];
+  await insertQuestions([...invalid, ...EIGHT_DIVERSE]);
+  const reservation = await selectAndReservePlan({ jobId: 'strict-food-job', count: 6, candidateWindowSize: 1, targetTotalSeconds: 999 });
+  assert.ok(reservation);
+  assert.equal(reservation.selected.length, 6);
+  assert.ok(reservation.selected.every(row => !invalid.some(raw => raw.optionA.text === row.option_a_text || raw.optionB.text === row.option_b_text)));
+  for (const row of fake.state.questions.values()) {
+    if (invalid.some(raw => raw.optionA.text === row.option_a_text)) assert.equal(row.status, 'ready', `invalid row ${row.id} must never be reserved`);
+  }
+}));
+
+test('strict FOOD reservation fails explicitly when only scenario-style food-category rows remain', () => withFakeDb(async () => {
+  await insertQuestions([
+    question('food', 'Only eat pizza for a year', 'Only eat sushi for a year', 'pizza plated food', 'sushi plated food'),
+    question('food', 'Unlimited street food', 'Master one cuisine perfectly'),
+    question('food', 'Personal barista', 'Personal baker'),
+  ]);
+  const reservation = await selectAndReservePlan({ jobId: 'strict-food-empty', count: 1 });
+  assert.equal(reservation, null);
+  assert.equal(await countReady(), 3, 'rejected legacy rows remain unreserved');
 }));

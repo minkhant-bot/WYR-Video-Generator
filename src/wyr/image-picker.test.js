@@ -78,8 +78,8 @@ test('food-category DB search queries carry food context before reaching image p
     };
     const plan = { questions: [{ index: 0, category: 'food', optionA: { text: 'Mac and Cheese', searchQuery: 'mac and cheese' }, optionB: { text: 'Forest Cake', searchQuery: 'forest cake' } }] };
     const selection = await createImageSelection({ plan, config: { pixabayApiKey: '', pexelsApiKey: 'test-key', timeoutMs: 1000, pexelsConcurrency: 2 } });
-    assert.equal(selection.slots.Q1A.queries[0], 'mac and cheese food');
-    assert.equal(selection.slots.Q1B.queries[0], 'forest cake food');
+    assert.equal(selection.slots.Q1A.queries[0], 'mac and cheese isolated white background product photo no people food');
+    assert.equal(selection.slots.Q1B.queries[0], 'forest cake isolated white background product photo no people food');
     assert.ok(queries.length > 0);
     assert.equal(queries.every(query => /\bfood\b/i.test(query)), true);
   } finally { global.fetch = originalFetch; }
@@ -137,7 +137,9 @@ test('Tier 1 candidates are all hard-rejected (watermarked) for its entire bound
       // Tier 1 is hard-capped at 18 provider calls (MAX_PROVIDER_CALLS_PER_SLOT); every one of
       // those calls returns a shutterstock-watermarked preview (hard-rejected). Only calls beyond
       // that -- which only Tier 2's own extra budget can make -- return a clean, on-subject photo.
-      const clean = callCount > 18;
+      // Tier 0 makes three single-provider calls before Tier 1's 18-call budget. Keep every one
+      // of those 21 calls watermarked so only Tier 2 can see the clean candidate.
+      const clean = callCount > 21;
       const id = clean ? 'clean-1' : `wm-${callCount}`;
       const tags = clean ? 'treehouse forest wooden ladder' : 'treehouse shutterstock watermark preview';
       return { ok: true, async json() { return { hits: [{ id, imageWidth: 1600, imageHeight: 900, tags, pageURL: `https://pixabay.com/images/id-${id}/`, largeImageURL: `https://cdn.pixabay.com/${id}.jpg` }] }; } };

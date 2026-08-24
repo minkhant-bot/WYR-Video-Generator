@@ -166,17 +166,17 @@ export const SEED_QUESTIONS = [
   q('cars', 'Drift a sports car on a track', 'sports car drifting smoke', 'Jump a dirt bike over hills', 'dirt bike jumping hills'),
 
   // food
-  q('food', 'Eat at a five star restaurant', 'fine dining restaurant table', 'Cook with a famous chef', 'chef cooking gourmet kitchen'),
-  q('food', 'Only eat pizza for a year', 'pizza slice cheese closeup', 'Only eat sushi for a year', 'sushi platter chopsticks closeup'),
-  q('food', 'Have unlimited desserts forever', 'dessert table cakes pastries', 'Have unlimited street food forever', 'street food cart vendor'),
-  q('food', 'Cook every meal from scratch', 'home cooking kitchen ingredients', 'Never cook again', 'empty clean kitchen counter'),
-  q('food', 'Try food from every country', 'world cuisine platter spread', 'Master one cuisine perfectly', 'chef mastering dish kitchen'),
-  q('food', 'Eat only spicy food forever', 'spicy food peppers closeup', 'Eat only sweet food forever', 'sweet desserts candy closeup'),
-  q('food', 'Have a personal barista every morning', 'barista making coffee counter', 'Have a personal baker every morning', 'baker fresh bread oven'),
-  q('food', 'Grow your own vegetable garden', 'vegetable garden fresh produce', 'Raise your own farm animals', 'farm animals barn field'),
-  q('food', 'Only eat food you grow yourself', 'farm fresh harvest basket', 'Only eat food from restaurants', 'restaurant table plated meal'),
-  q('food', 'Try a giant seafood feast', 'seafood feast platter table', 'Try a giant barbecue feast', 'barbecue grill meat platter'),
-  q('food', 'Bake fresh bread every morning', 'fresh bread bakery oven', 'Brew fresh coffee every morning', 'fresh coffee brewing cup'),
+  q('food', 'Cheeseburger', 'cheeseburger food photo', 'Fried Chicken', 'fried chicken food photo'),
+  q('food', 'Pizza', 'pizza food photo', 'Sushi', 'sushi food photo'),
+  q('food', 'Pancakes', 'pancakes food photo', 'Waffles', 'waffles food photo'),
+  q('food', 'Cheesecake', 'cheesecake food photo', 'Tiramisu', 'tiramisu food photo'),
+  q('food', 'Onion Rings', 'onion rings food photo', 'Mozzarella Sticks', 'mozzarella sticks food photo'),
+  q('food', 'French Toast', 'french toast food photo', 'Cinnamon Roll', 'cinnamon roll food photo'),
+  q('food', 'Chicken Wings', 'chicken wings food photo', 'Nachos', 'nachos food photo'),
+  q('food', 'Ice Cream', 'ice cream food photo', 'Brownies', 'brownies food photo'),
+  q('food', 'Tacos', 'tacos food photo', 'Burritos', 'burritos food photo'),
+  q('food', 'Donuts', 'donuts food photo', 'Croissants', 'croissants food photo'),
+  q('food', 'Lasagna', 'lasagna food photo', 'Ravioli', 'ravioli food photo'),
 
   // adventure
   q('adventure', 'Skydive over mountains', 'skydiving parachute mountains view', 'Scuba dive a coral reef', 'scuba diving coral reef'),

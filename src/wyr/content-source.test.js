@@ -15,12 +15,12 @@ const withFakeDb = async operation => {
 
 const question = (category, a, b, aq, bq) => ({ category, optionA: { text: a, searchQuery: aq || `${a} scene` }, optionB: { text: b, searchQuery: bq || `${b} scene` } });
 const SIX_FOOD = [
-  question('food', 'Eat at a 5-star restaurant', 'Cook with a chef', 'fine dining restaurant', 'chef cooking kitchen'),
-  question('food', 'Eat pizza for a year', 'Eat sushi for a year', 'pizza slice cheese', 'sushi platter chopsticks'),
-  question('food', 'Choose spicy meals', 'Choose sweet meals', 'spicy meal peppers', 'sweet dessert table'),
-  question('food', 'Have breakfast all day', 'Have dinner all day', 'breakfast plate eggs', 'dinner plate restaurant'),
-  question('food', 'Master Italian cooking', 'Master Indian cooking', 'italian pasta kitchen', 'indian curry kitchen'),
-  question('food', 'Visit a bakery daily', 'Visit a food truck daily', 'bakery bread counter', 'food truck vendor'),
+  question('food', 'Cheeseburger', 'Fried Chicken'),
+  question('food', 'Pizza', 'Sushi'),
+  question('food', 'Pancakes', 'Waffles'),
+  question('food', 'Cheesecake', 'Tiramisu'),
+  question('food', 'Onion Rings', 'Mozzarella Sticks'),
+  question('food', 'Chicken Wings', 'Nachos'),
 ];
 const NON_FOOD = [
   question('money', 'Own a yacht', 'Own a jet'),

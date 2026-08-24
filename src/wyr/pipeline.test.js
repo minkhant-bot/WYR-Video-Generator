@@ -6,7 +6,7 @@ import path from 'node:path';
 import { __resetPoolForTests, __setPoolForTests } from './db.js';
 import { insertQuestions, countReady, releaseReservation } from './question-pool.js';
 import { createJobStore } from './jobs.js';
-import { assertWithinProductionDurationCeiling, PRODUCTION_DURATION_CEILING_SECONDS, runAutomaticPipeline } from './pipeline.js';
+import { assertWithinProductionDurationCeiling, finalizeVerifiedPoolJob, PRODUCTION_DURATION_CEILING_SECONDS, runAutomaticPipeline } from './pipeline.js';
 import { buildSceneTimeline } from './audio.js';
 import { createFakeDb } from './test-fake-db.js';
 
@@ -18,15 +18,10 @@ const withFakeDb = async operation => {
 };
 
 const EIGHT_DIVERSE = [
-  { category: 'money', optionA: { text: 'Own a yacht', searchQuery: 'luxury yacht ocean' }, optionB: { text: 'Own a jet', searchQuery: 'private jet runway' } },
-  { category: 'luxury', optionA: { text: 'Live in a mansion', searchQuery: 'mansion estate exterior' }, optionB: { text: 'Live in a penthouse', searchQuery: 'penthouse city skyline' } },
-  { category: 'travel', optionA: { text: 'Backpack Europe', searchQuery: 'backpacker europe street' }, optionB: { text: 'Cruise the Caribbean', searchQuery: 'cruise ship caribbean' } },
-  { category: 'food', optionA: { text: 'Eat at a fine restaurant', searchQuery: 'fine dining restaurant' }, optionB: { text: 'Cook with a chef', searchQuery: 'chef cooking kitchen' } },
-  { category: 'adventure', optionA: { text: 'Skydive', searchQuery: 'skydiving parachute sky' }, optionB: { text: 'Scuba dive', searchQuery: 'scuba diving reef' } },
-  { category: 'space', optionA: { text: 'Visit the ISS', searchQuery: 'international space station' }, optionB: { text: 'Visit the moon', searchQuery: 'moon surface astronaut' } },
-  { category: 'ocean', optionA: { text: 'Swim with sharks', searchQuery: 'swimming with sharks' }, optionB: { text: 'Swim with whales', searchQuery: 'swimming with whales' } },
-  { category: 'fame', optionA: { text: 'Be a movie star', searchQuery: 'movie star red carpet' }, optionB: { text: 'Be a rock star', searchQuery: 'rock star concert stage' } },
-].map(item => ({ ...item, category: 'food' }));
+  ['Cheeseburger', 'Fried Chicken'], ['Pizza', 'Sushi'], ['Pancakes', 'Waffles'],
+  ['Cheesecake', 'Tiramisu'], ['Onion Rings', 'Mozzarella Sticks'],
+  ['French Toast', 'Cinnamon Roll'], ['Chicken Wings', 'Nachos'], ['Ice Cream', 'Brownies'],
+].map(([a, b]) => ({ category: 'food', optionA: { text: a, searchQuery: `${a} food` }, optionB: { text: b, searchQuery: `${b} food` } }));
 
 const baseConfig = overrides => ({
   questionCount: 6, groqApiKey: '', groqModel: 'openai/gpt-oss-20b', timeoutMs: 500,
@@ -37,6 +32,17 @@ const baseConfig = overrides => ({
   webImageFallbackEnabled: false, edgeVoice: 'en-US-AndrewNeural', edgeVoiceRate: '-10%',
   voicePaddingSeconds: 1.5, ttsTimeoutMs: 5000, ttsConcurrency: 2, sceneRenderConcurrency: 1, ffmpegThreads: 1,
   ...overrides,
+});
+
+test('a usage-commit failure cannot expose a verified job as completed', async () => {
+  const updates = [];
+  await assert.rejects(() => finalizeVerifiedPoolJob({
+    job: { id: 'commit-failed' }, update: changes => updates.push(changes),
+    plan: { questions: Array.from({ length: 7 }, (_, index) => ({ poolId: index + 1 })) },
+    outputPath: '/tmp/final.mp4', verification: { duration: 45 }, timeline: { totalDuration: 45 }, assets: [], poolReserved: true,
+    commitUsage: async () => { throw new Error('database unavailable'); },
+  }), /database unavailable/);
+  assert.equal(updates.some(update => update.status === 'completed'), false);
 });
 
 // Real question selection (fake DB) -> real createImageSelection (mocked network returning zero

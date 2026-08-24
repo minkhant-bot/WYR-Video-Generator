@@ -1,5 +1,5 @@
 import { addIllustrativePercentages } from './content.js';
-import { ContentPoolExhaustedError, countReadyFood, selectPlanForJob } from './question-pool.js';
+import { ContentPoolExhaustedError, countReadyFood, countReadyLiteralFood, selectPlanForJob } from './question-pool.js';
 import { log } from './utils.js';
 
 // Production is DB-first and food-only: select existing ready food rows once, with zero Groq calls.
@@ -9,10 +9,11 @@ export const selectContentPlan = async ({ job, config }) => {
   const plan = await selectPlanForJob({ jobId: job.id, count: config.questionCount, baseDuration: config.secondsPerQuestion });
   if (!plan) {
     const readyFood = await countReadyFood();
-    log('content.food_pool_below_minimum', { readyFood, required: config.questionCount });
+    const readyLiteralFood = await countReadyLiteralFood();
+    log('content.food_pool_below_minimum', { readyFood, readyLiteralFood, required: config.questionCount });
     throw new ContentPoolExhaustedError(
-      `CONTENT_POOL_EMPTY: could not assemble ${config.questionCount} valid food questions from ${readyFood} ready food records. Non-food fallback and automatic generation are disabled.`,
-      { ready: readyFood, readyFood, required: config.questionCount, category: 'food' },
+      `CONTENT_POOL_EMPTY: could not assemble ${config.questionCount} strict literal-food questions from ${readyLiteralFood} valid rows (${readyFood} ready food-category records). Non-food fallback and automatic generation are disabled.`,
+      { ready: readyLiteralFood, readyFood, readyLiteralFood, required: config.questionCount, category: 'food' },
     );
   }
   return addIllustrativePercentages(plan);

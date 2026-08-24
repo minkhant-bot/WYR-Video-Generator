@@ -13,6 +13,8 @@ import { buildSlotDiagnostics, createImageSelection, downloadSelectedCandidates,
 import { rowToQuestion } from './pool-selection.js';
 import { selectContentPlan } from './content-source.js';
 import { commitPlanUsage, releaseQuestionReservation, releaseReservation, reserveReplacementQuestion } from './question-pool.js';
+import { assertStrictFoodPlan } from './food-content.js';
+import { generateHookVoiceover, prependHookToTimeline } from './hook.js';
 
 // Disposable per-job temp artifacts (raw downloaded images, TTS mp3s, rendered scene segments) --
 // always scoped to path.join(job.workspace, ...), never anything outside a job's own directory.
@@ -108,9 +110,14 @@ export const assertWithinProductionDurationCeiling = timeline => {
 // relabeled as a duration problem.
 const buildProductionVoiceTimeline = async ({ plan, config, workspace, onProgress }) => {
   const voiceovers = await generateVoiceovers({ plan, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs, concurrency: config.ttsConcurrency, onProgress });
-  const timeline = buildSceneTimeline({ voiceovers, baseDuration: config.secondsPerQuestion, voicePaddingSeconds: config.voicePaddingSeconds });
+  // Production scenes are content-driven: once narration and the countdown finish, reserve only
+  // the configured result hold plus the unchanged transition tail. A fixed scene-duration floor
+  // otherwise turns into extra dead time after the reveal for shorter questions.
+  const questionTimeline = buildSceneTimeline({ voiceovers, baseDuration: 0, voicePaddingSeconds: config.voicePaddingSeconds });
+  const hookVoiceover = plan.hook ? await generateHookVoiceover({ hook: plan.hook, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs }) : null;
+  const timeline = hookVoiceover ? prependHookToTimeline(questionTimeline, hookVoiceover) : questionTimeline;
   assertWithinProductionDurationCeiling(timeline);
-  return { voiceovers, timeline };
+  return { voiceovers, hookVoiceover, timeline };
 };
 const plainLogValue = value => String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ');
 const logSelectedImageDiagnostics = (assets, jobId) => {
@@ -128,6 +135,13 @@ const logSelectedImageDiagnostics = (assets, jobId) => {
   console.info(`WYR_IMAGE_JOB_SUMMARY | jobId=${plainLogValue(jobId)} | selected=${assets.length} | DuckDuckGo=${selectedCounts.DuckDuckGo} | Pexels=${selectedCounts.Pexels} | rejected=${rejected}`);
 };
 
+export const finalizeVerifiedPoolJob = async ({ job, update, plan, outputPath, verification, timeline, assets, poolReserved, commitUsage = commitPlanUsage }) => {
+  if (poolReserved) await commitUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration });
+  update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification });
+  logSelectedImageDiagnostics(assets, job.id);
+  log('job.completed', { jobId: job.id, outputPath, verification });
+};
+
 export const runPipeline = async ({ job, store, config, preparedPlan = null, selectionState = null, preparedAssets = null, poolReserved = false }) => {
   const update = changes => store.update(job.id, changes);
   try {
@@ -136,7 +150,9 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     const provider = new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs });
     const historyStore = new ContentHistoryStore(config.contentHistoryPath);
     const generated = preparedPlan ? null : await generateProductionPlan({ provider, historyStore, questionCount: config.questionCount, maxAttempts: config.contentGenerationRetries, rateLimitPolicy: { maxRetries: config.groqRateLimitRetries, maxWaitMs: config.groqRateLimitMaxWaitMs } });
-    const plan = preparedPlan || addIllustrativePercentages(generated); writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 14 });
+    const plan = preparedPlan || addIllustrativePercentages(generated);
+    if (plan.questions?.length && plan.questions.every(question => question.category === 'food')) assertStrictFoodPlan(plan);
+    writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 14 });
 
     const imageSelectionStarted = Date.now();
     // preparedAssets is set only by runAutomaticPipeline, which already ran selection AND download
@@ -170,8 +186,9 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     writeJsonAtomic(path.join(job.workspace, 'credits.json'), { provider: providers.length === 1 ? providers[0] : 'Mixed', providers, photos: assets.map(asset => ({ question: asset.questionIndex + 1, slot: asset.slot, id: asset.id, provider: asset.provider, photographer: asset.photographer, photographerUrl: asset.photographerUrl, photoUrl: asset.sourcePageUrl || asset.photoUrl, sourcePageUrl: asset.sourcePageUrl, originalImageUrl: asset.originalImageUrl, sourceDomain: asset.sourceDomain, width: asset.width, height: asset.height, license: asset.license || 'unknown', licenseUrl: asset.licenseUrl || null, usageRights: asset.usageRights || 'unknown', sha256: asset.sha256, queryUsed: asset.queryUsed })) });
 
     update({ status: 'generating_voice', stage: 'generating_voice', progress: 49 });
-    const { voiceovers, timeline } = await buildProductionVoiceTimeline({ plan, config, workspace: job.workspace, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
+    const { voiceovers, hookVoiceover, timeline } = await buildProductionVoiceTimeline({ plan, config, workspace: job.workspace, onProgress: (done, total) => update({ progress: 49 + Math.round(done / total * 16) }) });
     writeJsonAtomic(path.join(job.workspace, 'voiceovers.json'), relativeMetadata(voiceovers, job.workspace));
+    if (hookVoiceover) writeJsonAtomic(path.join(job.workspace, 'hook-voiceover.json'), { ...hookVoiceover, localPath: path.relative(job.workspace, hookVoiceover.localPath) });
 
     update({ status: 'building_timeline', stage: 'building_timeline', progress: 67 });
     log('timeline.built', { jobId: job.id, totalDuration: timeline.totalDuration, sceneCount: timeline.scenes.length, productionDurationCeiling: PRODUCTION_DURATION_CEILING_SECONDS });
@@ -181,14 +198,13 @@ export const runPipeline = async ({ job, store, config, preparedPlan = null, sel
     buildComposition({ plan, assets, timeline, voiceovers, sfx, workspace: job.workspace });
 
     update({ status: 'rendering', stage: 'rendering', progress: 71 });
-    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, sfx, sfxSchedule, countdownSchedule, workspace: job.workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
+    const outputPath = await renderVideo({ plan, assets, timeline, voiceovers, hookVoiceover, sfx, sfxSchedule, countdownSchedule, workspace: job.workspace, sceneConcurrency: config.sceneRenderConcurrency, ffmpegThreads: config.ffmpegThreads, onProgress: (done, total) => update({ progress: 71 + Math.round(done / total * 22) }) });
     update({ status: 'verifying', stage: 'verifying', progress: 95 });
     const verification = await verifyVideo(outputPath, { expectedSceneCount: plan.questions.length, expectedDuration: timeline.totalDuration, renderDir: path.join(job.workspace, 'render'), timeline, sfxSchedule, countdownSchedule });
     writeJsonAtomic(path.join(job.workspace, 'verification.json'), verification);
-    update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification }); logSelectedImageDiagnostics(assets, job.id); log('job.completed', { jobId: job.id, outputPath, verification });
-    // Pool bookkeeping only happens after a verified final MP4 -- a render/verify failure above
-    // never increments used_count, and the reservation is released instead (see the catch block).
-    if (poolReserved) await commitPlanUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration }).catch(error => log('pool.commit_failed', { jobId: job.id, message: error.message }));
+    // Pool bookkeeping only happens after a verified final MP4 -- and must finish before the
+    // in-memory job becomes publicly completed. A commit failure follows the normal failure path.
+    await finalizeVerifiedPoolJob({ job, update, plan, outputPath, verification, timeline, assets, poolReserved });
   } catch (error) {
     await handleJobFailure({ job, store, error, poolReserved });
   }
@@ -282,7 +298,7 @@ const replaceUnfillableQuestions = async ({ job, config, plan, selection, select
     const otherQuestions = currentPlan.questions.filter((_, index) => index !== badIndex);
     const inPlanMotifs = new Set(otherQuestions.flatMap(question => questionMotifs(question)));
     const fantasyCapReached = otherQuestions.some(question => isFantasyQuestion(question));
-    const { candidate: replacementRow, wordingRejectedCount: skippedForWording } = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached });
+    const { candidate: replacementRow, wordingRejectedCount: skippedForWording } = await reserveReplacementQuestion({ jobId: job.id, excludeIds, inPlanMotifs, fantasyCapReached, themeKey: currentPlan.hook?.themeKey });
     wordingRejectedCount += skippedForWording;
     if (!replacementRow) {
       log('content.question_replacement_unavailable', { jobId: job.id, questionIndex: badIndex, attempt: attempts });
@@ -373,6 +389,7 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       update({ status: 'generating_content', stage: 'generating_content', progress: 5 });
       let plan = await selectPlan({ job, config });
       poolReserved = true;
+      assertStrictFoodPlan(plan);
       writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 18 });
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
       let selection = await selectImages({ plan, config });

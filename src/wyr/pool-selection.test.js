@@ -147,6 +147,18 @@ test('selectDiversePlan applies a recent-use cooldown, excluding blocked motifs 
   assert.equal(result.selected.some(r => r.motif_key_a === 'teleportation'), false);
 });
 
+test('selectDiversePlan relaxes the recent-use motif preference only when it is needed to fill the plan', () => {
+  const candidates = [
+    row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', motifA: 'yacht', motifB: 'jet' }),
+    row({ category: 'travel', a: 'Visit Rome', b: 'Visit Cairo', motifA: 'rome', motifB: 'cairo' }),
+    row({ category: 'food', a: 'Eat pizza', b: 'Eat sushi', motifA: 'pizza', motifB: 'sushi' }),
+  ];
+  const result = selectDiversePlan(candidates, { count: 3, blockedMotifs: new Set(['pizza']) });
+  assert.ok(result);
+  assert.equal(result.selected.length, 3);
+  assert.equal(result.recentMotifsRelaxed, true);
+});
+
 test('selectDiversePlan prefers least-recently-used candidates when the caller pre-sorts by last_used_at', () => {
   const stale = row({ category: 'money', a: 'Own a yacht', b: 'Own a jet', lastUsedAt: '2020-01-01T00:00:00.000Z' });
   const fresh = row({ category: 'money', a: 'Own a private jet', b: 'Own a superyacht', lastUsedAt: '2026-08-01T00:00:00.000Z' });

@@ -127,5 +127,15 @@ export const buildImageQueries = (optionText, category = '') => {
   const q0 = phrase.join(' ') || raw.slice(-2).join(' ');
   const q1 = phrase[phrase.length - 1] || q0;
   const q2 = normalize(category);
+  if (q2 === 'food') {
+    const literalFoodSubject = normalize(optionText).split(' ').slice(0, 5).join(' ');
+    return [...new Set([
+      `${literalFoodSubject} isolated white background product photo no people`,
+      `${literalFoodSubject} single food close up white background`,
+      `${literalFoodSubject} isolated food photo no people`,
+      `${literalFoodSubject} close up food photo no people`,
+      literalFoodSubject,
+    ].filter(Boolean))];
+  }
   return [...new Set([q0, q1, q2].filter(Boolean))];
 };

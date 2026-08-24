@@ -2,6 +2,8 @@ import { withClient, withTransaction } from './db.js';
 import { classifyRejectionReasons, computeInsertionFields, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
+import { isStrictFoodPoolRow } from './food-content.js';
+import { canonicalFoodThemeKey, validateFoodTheme } from './food-themes.js';
 import { log, redactConnectionSecrets } from './utils.js';
 
 // Diagnostics only -- max rows actually printed to Railway logs per insert_batch call, so a batch
@@ -48,6 +50,17 @@ export const countReady = async () => {
 export const countReadyFood = async () => {
   const { rows } = await withClient(client => client.query("SELECT count(*)::int AS count FROM wyr_questions WHERE status = 'ready' AND category = 'food'"));
   return rows[0].count;
+};
+
+const FOOD_POOL_SCAN_LIMIT = 5000;
+export const countReadyLiteralFood = async () => {
+  const { rows } = await withClient(client => client.query(
+    `SELECT * FROM wyr_questions WHERE status = 'ready' AND category = 'food'
+     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
+     LIMIT $1`,
+    [FOOD_POOL_SCAN_LIMIT],
+  ));
+  return rows.filter(isStrictFoodPoolRow).length;
 };
 
 // Admin/status-panel read model, sourced entirely from wyr_questions.status. A question that has
@@ -103,6 +116,79 @@ export const insertQuestions = async (rawQuestions, { sourceProvider = 'groq' } 
   return { inserted, rejected };
 });
 
+// Inserts one pre-authored theme and its questions atomically. Questions still pass through the
+// same computeInsertionFields/FOOD gates as every other pool row; the theme metadata only groups
+// them and never supplies content at selection time.
+export const insertFoodTheme = async (rawTheme, { sourceProvider = 'seed' } = {}) => {
+  const theme = validateFoodTheme(rawTheme);
+  if (!theme.valid) return { inserted: 0, skipped: false, rejected: theme.reasons };
+  const prepared = rawTheme.questions.map((raw, index) => ({ raw, index, fields: computeInsertionFields(raw) }));
+  const invalid = prepared.flatMap(item => [
+    ...(!item.fields.accepted ? item.fields.reasons : []),
+    ...(item.raw?.category !== 'food' || !isStrictFoodPoolRow({ category: 'food', option_a_text: item.raw?.optionA?.text, option_b_text: item.raw?.optionB?.text }) ? ['theme question must be a strict FOOD-vs-FOOD pair'] : []),
+  ]);
+  if (invalid.length) return { inserted: 0, skipped: false, rejected: [...new Set(invalid)] };
+  return withTransaction(async client => {
+    let { rows: themeRows } = await client.query(
+      `INSERT INTO wyr_food_themes (theme_key, title, hook_tts_text) VALUES ($1,$2,$3)
+       ON CONFLICT (theme_key) DO NOTHING RETURNING id`,
+      [canonicalFoodThemeKey(theme.title), theme.title, theme.hookTtsText],
+    );
+    const themeInserted = themeRows.length > 0;
+    if (!themeRows.length) {
+      ({ rows: themeRows } = await client.query(
+        'SELECT id FROM wyr_food_themes WHERE theme_key = $1 FOR UPDATE',
+        [theme.themeKey],
+      ));
+    }
+    if (!themeRows.length) return { inserted: 0, reconciled: 0, skipped: true, rejected: ['theme key conflict could not be reconciled'] };
+    const themeId = themeRows[0].id; const inserted = []; let reconciled = 0; const rejected = [];
+    for (const { fields, index } of prepared) {
+      const { rows } = await client.query(
+        `INSERT INTO wyr_questions
+           (category, content_family, motif_key, motif_key_a, motif_key_b,
+            option_a_text, option_a_search_query, option_a_visual_subject,
+            option_b_text, option_b_search_query, option_b_visual_subject,
+            dedupe_key, is_fantasy, hook_score, quality_score, visual_score, source_provider,
+            theme_id, theme_position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
+        [fields.category, fields.contentFamily, fields.motifKey, fields.motifKeyA, fields.motifKeyB,
+          fields.optionAText, fields.optionASearchQuery, fields.optionAVisualSubject,
+          fields.optionBText, fields.optionBSearchQuery, fields.optionBVisualSubject,
+          fields.dedupeKey, fields.isFantasy, fields.hookScore, fields.qualityScore, fields.visualScore, sourceProvider,
+          themeId, index + 1],
+      );
+      if (rows.length) inserted.push(rows[0].id);
+      else {
+        const { rows: existingRows } = await client.query(
+          'SELECT id, theme_id, theme_position, status FROM wyr_questions WHERE dedupe_key = $1 FOR UPDATE',
+          [fields.dedupeKey],
+        );
+        const existing = existingRows[0];
+        if (existing?.theme_id === themeId && Number(existing.theme_position) === index + 1) continue;
+        if (existing?.theme_id == null && existing.status === 'ready') {
+          const { rows: occupied } = await client.query(
+            'SELECT id FROM wyr_questions WHERE theme_id = $1 AND theme_position = $2 FOR UPDATE',
+            [themeId, index + 1],
+          );
+          if (!occupied.length) {
+            const { rows: attached } = await client.query(
+              `UPDATE wyr_questions SET theme_id = $1, theme_position = $2, updated_at = now()
+               WHERE id = $3 AND theme_id IS NULL AND status = 'ready' RETURNING id`,
+              [themeId, index + 1, existing.id],
+            );
+            if (attached.length) { reconciled += 1; continue; }
+          }
+        }
+        rejected.push(`question ${index + 1} conflicts with an existing pool assignment`);
+      }
+    }
+    log('pool.theme_inserted', { themeKey: theme.themeKey, inserted: inserted.length, reconciled, conflictsSkipped: rejected.length });
+    return { inserted: inserted.length, reconciled, skipped: !themeInserted && inserted.length === 0 && reconciled === 0, rejected, themeId };
+  });
+};
+
 const MOTIF_HISTORY_WINDOW_VIDEOS = 50;
 const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VIDEOS) => {
   const { rows } = await client.query(
@@ -115,6 +201,10 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
   const motifs = new Set();
   for (const row of rows) { if (row.motif_key_a) motifs.add(row.motif_key_a); if (row.motif_key_b) motifs.add(row.motif_key_b); }
   return motifs;
+};
+const recentThemesFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VIDEOS) => {
+  const { rows } = await client.query('SELECT theme_key FROM wyr_videos WHERE theme_key IS NOT NULL ORDER BY created_at DESC LIMIT $1', [windowVideos]);
+  return new Set(rows.map(row => row.theme_key).filter(Boolean));
 };
 
 // Atomically reserves exactly `count` diverse, duration-budgeted questions for one job, drawn only
@@ -133,10 +223,12 @@ const recentMotifsFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
 // duration budget using only this candidate window -- that failure must never trigger a Groq call.
 export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration = 7, targetTotalSeconds = DEFAULT_DURATION_BUDGET_TOTAL_SECONDS }) => withTransaction(async client => {
   const { rows: rawCandidates } = await client.query(
-    `SELECT * FROM wyr_questions WHERE status = 'ready' AND category = 'food'
-     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
+    `SELECT q.*, t.theme_key, t.title AS theme_title, t.hook_tts_text
+     FROM wyr_questions q JOIN wyr_food_themes t ON t.id = q.theme_id
+     WHERE q.status = 'ready' AND q.category = 'food'
+     ORDER BY q.last_used_at ASC NULLS FIRST, q.used_count ASC, q.theme_id ASC, q.theme_position ASC
      LIMIT $1 FOR UPDATE SKIP LOCKED`,
-    [candidateWindowSize],
+    [Math.max(candidateWindowSize, FOOD_POOL_SCAN_LIMIT)],
   );
   // Runtime defense-in-depth: assessQuestionQuality/computeInsertionFields already reject this
   // content at insertion time for anything inserted from now on (see content-engine.js's
@@ -147,7 +239,11 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   // if that still isn't feasible, the row is excluded here so selectDiversePlan/repairPlanForDuration
   // below simply never see it, and the existing "choose another ready question from this window"
   // machinery does the rest, with zero new reservation state and zero new DB round-trip.
-  const visuallyFeasible = rawCandidates.filter(row =>
+  // Hard FOOD-mode boundary: historical category='food' rows can still describe scenarios,
+  // services or people. Both labels must pass before ranking and before any reservation UPDATE.
+  const literalFoodCandidates = rawCandidates.filter(isStrictFoodPoolRow);
+  const foodContentRejectedCount = rawCandidates.length - literalFoodCandidates.length;
+  const visuallyFeasible = literalFoodCandidates.filter(row =>
     !isNonPhotographableAbstractOption(row.option_a_text) && !isNonPhotographableAbstractOption(row.option_b_text)
     && isVisualSubjectFeasible(row.option_a_visual_subject || row.option_a_search_query)
     && isVisualSubjectFeasible(row.option_b_visual_subject || row.option_b_search_query));
@@ -162,11 +258,29 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   // Prefer stronger eligible dilemmas first (see pool-selection.js's rankCandidatesByStrength):
   // re-sorts WITHIN each LRU tier only, so a genuinely staler row never loses its fair-rotation
   // priority to a fresher-but-weaker one -- weaker questions stay in the window, just later in it.
-  const candidates = rankCandidatesByStrength(naturalWording);
+  const candidates = naturalWording;
   const blockedMotifs = await recentMotifsFromDb(client);
-  const result = selectDiversePlan(candidates, { count, blockedMotifs });
-  if (!result) return null;
-  const repair = repairPlanForDuration({ selected: result.selected, candidates, blockedMotifs, count, targetTotalSeconds, baseDuration });
+  const blockedThemes = await recentThemesFromDb(client);
+  const groups = new Map();
+  for (const row of candidates) {
+    if (!row.theme_key || blockedThemes.has(row.theme_key)) continue;
+    if (!groups.has(row.theme_key)) groups.set(row.theme_key, []);
+    groups.get(row.theme_key).push(row);
+  }
+  let result = null; let repair = null;
+  for (const rows of groups.values()) {
+    const ordered = [...rows].sort((a, b) => Number(a.theme_position) - Number(b.theme_position));
+    const selected = selectDiversePlan(ordered, { count, blockedMotifs });
+    if (!selected) continue;
+    const effectiveBlockedMotifs = selected.recentMotifsRelaxed ? new Set() : blockedMotifs;
+    const repaired = repairPlanForDuration({ selected: selected.selected, candidates: ordered, blockedMotifs: effectiveBlockedMotifs, count, targetTotalSeconds, baseDuration });
+    if (!repaired.fits) continue;
+    result = selected; repair = repaired; break;
+  }
+  if (!result || !repair) {
+    if (groups.size) throw new DurationBudgetExceededError(`Could not select a complete ${count}-question FOOD theme under the duration budget from the current ready themed pool.`);
+    return null;
+  }
   if (!repair.fits) {
     throw new DurationBudgetExceededError(
       `Could not select ${count} questions projected under ${targetTotalSeconds.toFixed(1)}s using only the current ready pool; the best local substitution still projected ${repair.projectedTotalSeconds.toFixed(1)}s. Seed or refill the pool with more concise questions.`,
@@ -181,8 +295,8 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   );
   const distinctFamilies = new Set(selected.map(row => row.content_family)).size;
   const fantasyCount = selected.filter(row => row.is_fantasy).length;
-  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds, wordingRejectedCount });
-  return { selected, distinctFamilies, fantasyCount, wordingRejectedCount };
+  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds, wordingRejectedCount, foodContentRejectedCount });
+  return { selected, distinctFamilies, fantasyCount, wordingRejectedCount, foodContentRejectedCount };
 });
 
 export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
@@ -190,6 +304,7 @@ export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize =
   if (!reservation) return null;
   const plan = buildPlanFromPoolRows(reservation.selected);
   plan.contentQuality.wordingRejectedCount = reservation.wordingRejectedCount;
+  plan.contentQuality.foodContentRejectedCount = reservation.foodContentRejectedCount;
   return plan;
 };
 
@@ -228,12 +343,13 @@ export const releaseQuestionReservation = async ({ jobId, poolId }) => {
 // { candidate: null, wordingRejectedCount } (never throws) when no valid replacement exists in the
 // current window, so the caller can stop and fail clearly instead of looping forever;
 // wordingRejectedCount is always reported so the caller can fold it into job-level diagnostics.
-export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, candidateWindowSize = 80 }) => withTransaction(async client => {
+export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPlanMotifs = new Set(), fantasyCapReached = false, themeKey, candidateWindowSize = 80 }) => withTransaction(async client => {
   const { rows: rawCandidates } = await client.query(
-    `SELECT * FROM wyr_questions WHERE status = 'ready' AND category = 'food' AND NOT (id = ANY($1::bigint[]))
-     ORDER BY last_used_at ASC NULLS FIRST, used_count ASC, hook_score DESC, id ASC
-     LIMIT $2 FOR UPDATE SKIP LOCKED`,
-    [excludeIds, candidateWindowSize],
+    `SELECT q.*, t.theme_key, t.title AS theme_title, t.hook_tts_text
+     FROM wyr_questions q JOIN wyr_food_themes t ON t.id = q.theme_id
+     WHERE q.status = 'ready' AND q.category = 'food' AND t.theme_key = $1 AND NOT (q.id = ANY($2::bigint[]))
+     ORDER BY q.theme_position ASC LIMIT $3 FOR UPDATE SKIP LOCKED`,
+    [themeKey, excludeIds, Math.max(candidateWindowSize, FOOD_POOL_SCAN_LIMIT)],
   );
   // Same strength-first re-rank as selectAndReservePlan above -- a replacement should prefer a
   // stronger eligible dilemma too, not just whichever ready row happens to sort first on hook_score.
@@ -243,6 +359,7 @@ export const reserveReplacementQuestion = async ({ jobId, excludeIds = [], inPla
     if (row.motif_key_a && inPlanMotifs.has(row.motif_key_a)) return false;
     if (row.motif_key_b && inPlanMotifs.has(row.motif_key_b)) return false;
     if (row.is_fantasy && fantasyCapReached) return false;
+    if (!isStrictFoodPoolRow(row)) return false;
     // Same visual-feasibility check as selectAndReservePlan's candidate window above -- a
     // replacement must not itself be a legacy row with no reliable visual metadata.
     if (isNonPhotographableAbstractOption(row.option_a_text) || isNonPhotographableAbstractOption(row.option_b_text)) return false;
@@ -295,22 +412,38 @@ export const releaseStaleReservations = async (olderThanMs = STALE_RESERVATION_A
 // a duplicated completion callback), the second call finds those rows already at status='used'
 // with reserved_by_job=NULL and updates zero rows, instead of double-incrementing used_count or
 // double-committing usage.
+export const COMMITTED_QUESTION_COUNT = 7;
 export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransaction(async client => {
   const ids = plan.questions.map(question => question.poolId);
-  const { rows: videoRows } = await client.query(
-    `INSERT INTO wyr_videos (job_id, status, duration, topic) VALUES ($1, 'completed', $2, $3)
-     ON CONFLICT (job_id) DO UPDATE SET status = 'completed', duration = EXCLUDED.duration, updated_at = now()
-     RETURNING id`,
-    [jobId, Number.isFinite(duration) ? duration : null, plan.topic],
+  if (ids.length !== COMMITTED_QUESTION_COUNT || new Set(ids).size !== COMMITTED_QUESTION_COUNT || ids.some(id => id == null)) {
+    throw new Error(`Usage commit requires exactly ${COMMITTED_QUESTION_COUNT} distinct reserved questions.`);
+  }
+  const { rows: existingVideos } = await client.query('SELECT id FROM wyr_videos WHERE job_id = $1 FOR UPDATE', [jobId]);
+  if (existingVideos.length) return existingVideos[0].id;
+  const { rows: reservedRows } = await client.query(
+    "SELECT id FROM wyr_questions WHERE id = ANY($1::bigint[]) AND reserved_by_job = $2 AND status = 'reserved' FOR UPDATE",
+    [ids, jobId],
   );
-  const videoId = videoRows[0].id;
-  for (const question of plan.questions) {
-    await client.query('INSERT INTO wyr_video_questions (video_id, question_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [videoId, question.poolId, question.index]);
+  if (reservedRows.length !== COMMITTED_QUESTION_COUNT) {
+    throw new Error(`Usage commit found ${reservedRows.length} of ${COMMITTED_QUESTION_COUNT} reserved questions.`);
   }
   const { rowCount: questionsUpdated } = await client.query(
     "UPDATE wyr_questions SET status = 'used', reserved_by_job = NULL, reserved_at = NULL, used_count = used_count + 1, last_used_at = now(), updated_at = now() WHERE id = ANY($1::bigint[]) AND reserved_by_job = $2 AND status = 'reserved'",
     [ids, jobId],
   );
+  if (questionsUpdated !== COMMITTED_QUESTION_COUNT) {
+    throw new Error(`Usage commit updated ${questionsUpdated} of ${COMMITTED_QUESTION_COUNT} reserved questions.`);
+  }
+  const { rows: videoRows } = await client.query(
+    `INSERT INTO wyr_videos (job_id, status, duration, topic, theme_key, theme_title) VALUES ($1, 'completed', $2, $3, $4, $5)
+     ON CONFLICT (job_id) DO UPDATE SET status = 'completed', duration = EXCLUDED.duration, theme_key = EXCLUDED.theme_key, theme_title = EXCLUDED.theme_title, updated_at = now()
+     RETURNING id`,
+    [jobId, Number.isFinite(duration) ? duration : null, plan.topic, plan.hook?.themeKey || null, plan.hook?.title || null],
+  );
+  const videoId = videoRows[0].id;
+  for (const question of plan.questions) {
+    await client.query('INSERT INTO wyr_video_questions (video_id, question_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [videoId, question.poolId, question.index]);
+  }
   log('pool.usage_committed', { jobId, videoId, count: ids.length, questionsUpdated });
   return videoId;
 });

@@ -11,9 +11,23 @@ test('production timing uses the reference first-scene slide and bounded post-na
   assert.equal(WYR_TEMPLATE.timing.maximumNarrationCountdownGap, 0.2);
 });
 
-test('paper background uses the requested near-white color and visible fixed grain strength', () => {
+test('FOOD gets a clean white canvas while unrelated categories retain the paper background', () => {
   assert.equal(WYR_TEMPLATE.layout.paperColor, '0xF5F5F3');
   assert.equal(WYR_TEMPLATE.layout.paperNoiseStrength, 24);
+  assert.equal(WYR_TEMPLATE.layout.foodPaperColor, '0xFFFFFF');
+  assert.equal(WYR_TEMPLATE.layout.foodPaperNoiseStrength, 0);
+});
+
+test('food panels form a vertically centered stack with balanced outer margins', () => {
+  const { layout, canvas } = WYR_TEMPLATE;
+  assert.deepEqual([layout.imageWidth, layout.imageHeight], [960, 600]);
+  assert.equal(layout.topImageY, 100);
+  assert.equal(layout.bottomImageY + layout.imageHeight, canvas.height - layout.topImageY);
+  assert.equal(layout.textHeight, 160);
+  assert.equal(layout.topTextY, layout.topPercentageY);
+  assert.equal(layout.bottomTextY, layout.bottomPercentageY);
+  assert.equal(layout.topImageY + layout.imageHeight + 8, layout.topTextY);
+  assert.equal(layout.bottomTextY + layout.textHeight + 8, layout.bottomImageY);
 });
 
 test('font fitting keeps preferred size for very short text', async () => {

@@ -44,7 +44,7 @@ export const getConfig = () => {
   return {
     port: integer('WYR_PORT', 3100, 1, 65535),
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
-    questionCount: integer('WYR_QUESTION_COUNT', 6, 6, 8),
+    questionCount: integer('WYR_QUESTION_COUNT', 7, 6, 8),
     // Lightweight flow: 1 initial batched request + at most 1 repair request for whatever's still
     // missing. Do not raise this back toward an unbounded retry-everything loop.
     contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 2, 1, 4),

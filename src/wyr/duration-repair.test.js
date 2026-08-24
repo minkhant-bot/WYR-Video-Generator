@@ -19,27 +19,27 @@ const question = (category, a, aq, b, bq) => ({ category, optionA: { text: a, se
 // duration reproduces the production "61.933s" class of failure -- long enough to clear the
 // budget target, short enough to still pass computeInsertionFields' own quality gate.
 const LONG_QUESTIONS = [
-  question('superpowers', 'Read the minds of every single stranger nearby', 'telepathy mind reading glow', 'Turn completely invisible near every other person', 'invisible person disappearing'),
-  question('time', 'Travel back to relive your entire early childhood', 'child playing park sunny', 'Travel forward to witness the distant unknown future', 'futuristic city scene glowing'),
-  question('dream lifestyle', 'Wake up early and productive every single morning', 'sunrise desk productive morning', 'Sleep in late and relaxed every single day', 'person sleeping bed morning'),
-  question('food', 'Eat wildly spicy curry for every single meal', 'spicy curry bowl closeup', 'Bake sweet pastries for every big family gathering', 'sweet pastries bakery display'),
-  question('travel', 'Backpack through five bustling cities across Europe', 'backpacker european street cobblestone', 'Sail through six remote tropical islands near Asia', 'tropical islands ocean boat'),
-  question('space', 'Float weightlessly inside a real orbiting spacecraft', 'astronaut floating zero gravity', 'Walk slowly across the surface of the moon', 'moon surface astronaut walking'),
-  question('survival-lite', 'Build a small shelter alone deep in a forest', 'wooden shelter forest survival', 'Start a warm fire alone without any matches', 'campfire sparks flint survival'),
-  question('money', 'Own a small private island somewhere in the Pacific', 'private island aerial view', 'Own a tall penthouse somewhere in a big city', 'penthouse city skyline view'),
-].map(item => ({ ...item, category: 'food' }));
+  question('food', 'Dark Chocolate Fudge Nut Cream Layer Cake', 'chocolate layer cake photo', 'Salted Caramel Peanut Butter Fudge Chip Brownies', 'caramel fudge brownies photo'),
+  question('food', 'Crispy Garlic Herb Parmesan Fried Chicken Wings', 'garlic parmesan wings photo', 'Smoky BBQ Bacon Cheddar Pulled Chicken Sandwich', 'pulled chicken sandwich photo'),
+  question('food', 'Berry Cream Cheese Stuffed Brioche French Toast', 'stuffed french toast photo', 'Lemon Ricotta Berry Maple Syrup Stack Pancakes', 'lemon ricotta pancakes photo'),
+  question('food', 'Tomato Basil Mozzarella Pepperoni Deep Dish Pizza', 'deep dish pizza photo', 'Tuna Avocado Tempura Shrimp Dragon Sushi Rolls', 'dragon sushi rolls photo'),
+  question('food', 'Dark Chocolate Raspberry Vanilla Cream Layer Cake', 'raspberry layer cake photo', 'Caramel Pecan Cinnamon Chocolate Swirl Cream Cheesecake', 'caramel pecan cheesecake photo'),
+  question('food', 'Black Truffle Wild Mushroom Garlic Parmesan Risotto', 'mushroom parmesan risotto photo', 'Roasted Garlic Butter Lobster Spinach Cheese Ravioli', 'lobster spinach ravioli photo'),
+  question('food', 'Loaded Bacon Cheddar Jalapeno Sour Cream Fries', 'loaded bacon fries photo', 'Crispy Buffalo Chicken Cheese Guacamole Tray Nachos', 'buffalo chicken nachos photo'),
+  question('food', 'Peanut Butter Dark Chocolate Chip Oatmeal Cookies', 'chocolate oatmeal cookies photo', 'Salted Caramel Fudge Brownie Vanilla Ice Cream', 'caramel brownie ice cream'),
+];
 
 // A short, valid food substitute for each long row above.
 const SHORT_QUESTIONS = [
-  question('superpowers', 'Fly fast', 'person flying sky superhero', 'Turn invisible', 'invisible person disappearing'),
-  question('time', 'Meet your future self', 'two people mirror reflection', 'Meet your past self', 'old photo young person'),
-  question('dream lifestyle', 'Nap daily', 'person napping hammock outdoors', 'Travel monthly', 'suitcase airport terminal walking'),
-  question('food', 'Eat sushi', 'sushi platter chopsticks closeup', 'Eat pizza', 'pizza slice cheese closeup'),
-  question('travel', 'Visit Rome', 'rome colosseum ancient ruins', 'Visit Cairo', 'cairo pyramids desert view'),
-  question('space', 'Visit the ISS', 'international space station interior', 'Visit the moon', 'moon surface astronaut footprint'),
-  question('survival-lite', 'Start a fire', 'campfire sparks flint survival', 'Find fresh water', 'wild stream fresh water'),
-  question('money', 'Own a yacht', 'luxury yacht ocean deck', 'Own a jet', 'private jet runway interior'),
-].map(item => ({ ...item, category: 'food' }));
+  question('food', 'Pizza', 'pizza food photo', 'Sushi', 'sushi food photo'),
+  question('food', 'Pancakes', 'pancakes food photo', 'Waffles', 'waffles food photo'),
+  question('food', 'Cheesecake', 'cheesecake food photo', 'Tiramisu', 'tiramisu food photo'),
+  question('food', 'Onion Rings', 'onion rings photo', 'Mozzarella Sticks', 'mozzarella sticks photo'),
+  question('food', 'French Toast', 'french toast photo', 'Cinnamon Roll', 'cinnamon roll photo'),
+  question('food', 'Chicken Wings', 'chicken wings photo', 'Nachos', 'nachos food photo'),
+  question('food', 'Ice Cream', 'ice cream photo', 'Brownies', 'brownies food photo'),
+  question('food', 'Tacos', 'tacos food photo', 'Burritos', 'burritos food photo'),
+];
 
 // Forces the fake DB's LRU ordering (last_used_at ASC NULLS FIRST, used_count ASC, hook_score
 // DESC, id ASC) to place `rows` before every other ready row, by giving them the lowest

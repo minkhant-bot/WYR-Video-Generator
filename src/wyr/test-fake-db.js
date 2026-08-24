@@ -6,7 +6,7 @@
 let nextId = 1;
 
 export const createFakeDb = () => {
-  const state = { questions: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), nextVideoId: 1 };
+  const state = { questions: new Map(), themes: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), nextThemeId: 1, nextVideoId: 1 };
   const log = [];
 
   const query = async (sql, params = []) => {
@@ -30,6 +30,16 @@ export const createFakeDb = () => {
     if (text.startsWith('SELECT count(*)::int AS count FROM wyr_videos')) {
       return { rows: [{ count: state.videos.size }] };
     }
+    if (text.startsWith('INSERT INTO wyr_food_themes')) {
+      const [themeKey, title, hookTtsText] = params;
+      if ([...state.themes.values()].some(theme => theme.theme_key === themeKey)) return { rows: [] };
+      const id = state.nextThemeId++; state.themes.set(id, { id, theme_key: themeKey, title, hook_tts_text: hookTtsText });
+      return { rows: [{ id }] };
+    }
+    if (text.startsWith('SELECT id FROM wyr_food_themes WHERE theme_key')) {
+      const theme = [...state.themes.values()].find(candidate => candidate.theme_key === params[0]);
+      return { rows: theme ? [{ id: theme.id }] : [] };
+    }
     if (text.startsWith('INSERT INTO wyr_questions')) {
       // Column order must mirror question-pool.js's real INSERT exactly (17 columns, including the
       // option_a_visual_subject/option_b_visual_subject pair added by migration 003) -- a stale,
@@ -38,7 +48,7 @@ export const createFakeDb = () => {
       // hook_score/is_fantasy/quality_score/visual_score/source_provider for every fake-db test
       // without ever throwing, since JS destructuring past the real param list just yields extra
       // undefineds rather than an error.
-      const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionAVisualSubject, optionBText, optionBSearchQuery, optionBVisualSubject, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider] = params;
+      const [category, contentFamily, motifKey, motifKeyA, motifKeyB, optionAText, optionASearchQuery, optionAVisualSubject, optionBText, optionBSearchQuery, optionBVisualSubject, dedupeKey, isFantasy, hookScore, qualityScore, visualScore, sourceProvider, themeId = null, themePosition = null] = params;
       const existing = [...state.questions.values()].find(row => row.dedupe_key === dedupeKey);
       if (existing) return { rows: [] };
       const id = nextId++;
@@ -47,9 +57,26 @@ export const createFakeDb = () => {
         option_a_text: optionAText, option_a_search_query: optionASearchQuery, option_a_visual_subject: optionAVisualSubject,
         option_b_text: optionBText, option_b_search_query: optionBSearchQuery, option_b_visual_subject: optionBVisualSubject,
         dedupe_key: dedupeKey, is_fantasy: isFantasy, hook_score: hookScore, quality_score: qualityScore, visual_score: visualScore,
-        source_provider: sourceProvider, status: 'ready', used_count: 0, last_used_at: null, reserved_by_job: null, reserved_at: null,
+        source_provider: sourceProvider, theme_id: themeId, theme_position: themePosition, status: 'ready', used_count: 0, last_used_at: null, reserved_by_job: null, reserved_at: null,
       });
       return { rows: [{ id }] };
+    }
+    if (text.startsWith('SELECT q.*, t.theme_key')) {
+      const replacement = text.includes('t.theme_key = $1');
+      const [themeKey, excludeIds, limit] = replacement ? params : [null, [], params[0]];
+      const excluded = new Set(excludeIds || []);
+      const rows = [...state.questions.values()].filter(row => row.status === 'ready' && row.category === 'food' && row.theme_id && !excluded.has(row.id))
+        .flatMap(row => { const theme = state.themes.get(row.theme_id); return theme && (!replacement || theme.theme_key === themeKey) ? [{ ...row, theme_key: theme.theme_key, theme_title: theme.title, hook_tts_text: theme.hook_tts_text }] : []; })
+        .sort((a, b) => a.theme_id - b.theme_id || a.theme_position - b.theme_position);
+      return { rows: rows.slice(0, limit) };
+    }
+    if (text.startsWith('SELECT id, theme_id, theme_position, status FROM wyr_questions WHERE dedupe_key')) {
+      const row = [...state.questions.values()].find(candidate => candidate.dedupe_key === params[0]);
+      return { rows: row ? [{ id: row.id, theme_id: row.theme_id, theme_position: row.theme_position, status: row.status }] : [] };
+    }
+    if (text.startsWith('SELECT id FROM wyr_questions WHERE theme_id')) {
+      const row = [...state.questions.values()].find(candidate => candidate.theme_id === params[0] && candidate.theme_position === params[1]);
+      return { rows: row ? [{ id: row.id }] : [] };
     }
     if (text.startsWith('SELECT * FROM wyr_questions')) {
       // Two real callers share this prefix: selectAndReservePlan's plain candidate window (params =
@@ -74,6 +101,10 @@ export const createFakeDb = () => {
       });
       return { rows };
     }
+    if (text.startsWith('SELECT theme_key FROM wyr_videos')) {
+      const [windowVideos] = params;
+      return { rows: [...state.videos.values()].filter(video => video.theme_key).sort((a, b) => b.created_at - a.created_at).slice(0, windowVideos).map(video => ({ theme_key: video.theme_key })) };
+    }
     if (text.startsWith("UPDATE wyr_questions SET status = 'reserved'")) {
       // Two real callers share this prefix: selectAndReservePlan's batch reservation (id = ANY($2::
       // bigint[]), an array) and reserveReplacementQuestion's single-row reservation (id = $2, a
@@ -82,6 +113,13 @@ export const createFakeDb = () => {
       const ids = Array.isArray(idsOrId) ? idsOrId : [idsOrId];
       for (const id of ids) { const row = state.questions.get(id); if (row) { row.status = 'reserved'; row.reserved_by_job = jobId; row.reserved_at = new Date(); } }
       return { rows: [], rowCount: ids.length };
+    }
+    if (text.startsWith('UPDATE wyr_questions SET theme_id')) {
+      const [themeId, themePosition, identifier] = params;
+      const row = [...state.questions.values()].find(candidate => (text.includes('WHERE id = $3') ? candidate.id === identifier : candidate.dedupe_key === identifier) && candidate.theme_id == null && candidate.status === 'ready');
+      if (!row) return { rows: [], rowCount: 0 };
+      row.theme_id = themeId; row.theme_position = themePosition;
+      return { rows: [{ id: row.id }], rowCount: 1 };
     }
     if (text.startsWith("UPDATE wyr_questions SET status = 'ready', reserved_by_job = NULL, reserved_at = NULL, updated_at = now() WHERE reserved_by_job")) {
       const [jobId] = params;
@@ -97,11 +135,22 @@ export const createFakeDb = () => {
       return { rows: [], rowCount: count };
     }
     if (text.startsWith('INSERT INTO wyr_videos')) {
-      const [jobId, duration, topic] = params;
+      const [jobId, duration, topic, themeKey = null, themeTitle = null] = params;
       let video = [...state.videos.values()].find(v => v.job_id === jobId);
-      if (!video) { video = { id: state.nextVideoId++, job_id: jobId, status: 'completed', duration, topic, created_at: new Date(Date.now() + state.nextVideoId) }; state.videos.set(video.id, video); }
-      else { video.status = 'completed'; video.duration = duration; }
+      if (!video) { video = { id: state.nextVideoId++, job_id: jobId, status: 'completed', duration, topic, theme_key: themeKey, theme_title: themeTitle, created_at: new Date(Date.now() + state.nextVideoId) }; state.videos.set(video.id, video); }
+      else { video.status = 'completed'; video.duration = duration; video.theme_key = themeKey; video.theme_title = themeTitle; }
       return { rows: [{ id: video.id }] };
+    }
+    if (text.startsWith('SELECT id FROM wyr_videos WHERE job_id')) {
+      const video = [...state.videos.values()].find(candidate => candidate.job_id === params[0]);
+      return { rows: video ? [{ id: video.id }] : [] };
+    }
+    if (text.startsWith('SELECT id FROM wyr_questions WHERE id = ANY')) {
+      const [ids, jobId] = params;
+      return { rows: ids.flatMap(id => {
+        const row = state.questions.get(id);
+        return row?.reserved_by_job === jobId && row.status === 'reserved' ? [{ id }] : [];
+      }) };
     }
     if (text.startsWith('INSERT INTO wyr_video_questions')) {
       const [videoId, questionId, position] = params;

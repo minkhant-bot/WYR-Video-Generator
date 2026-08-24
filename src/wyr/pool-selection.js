@@ -6,6 +6,7 @@ import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, 
 import { computeDilemmaStrengthScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
+import { assessFoodPair } from './food-content.js';
 
 // The 20 Groq-facing categories bucketed into broader "content families" purely locally -- Groq
 // never supplies or needs to know about this grouping. Chosen so a normal 8-question selection can
@@ -126,16 +127,15 @@ export const rankCandidatesByStrength = rows => {
 };
 
 // Diversity selection over a candidate window of "ready" rows, already ordered least-recently-used
-// first by the caller's SQL. Hard rules (fantasy cap, motif cooldown/duplication) are never
-// relaxed; the content-family cap is relaxed only if the window can't otherwise fill `count`, so a
-// thin pool degrades gracefully instead of blocking a job the inventory could still service.
+// first by the caller's SQL. Within-plan motif duplication and the fantasy cap stay hard. Motifs
+// seen in recent completed videos are preferred away from, then relaxed only when necessary.
 export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new Set() } = {}) => {
-  const attempt = relaxFamilyCap => {
+  const attempt = (relaxFamilyCap, relaxRecentMotifs) => {
     const familyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const selected = [];
     for (const row of candidates) {
       if (selected.length >= count) break;
-      if (row.motif_key_a && blockedMotifs.has(row.motif_key_a)) continue;
-      if (row.motif_key_b && blockedMotifs.has(row.motif_key_b)) continue;
+      if (!relaxRecentMotifs && row.motif_key_a && blockedMotifs.has(row.motif_key_a)) continue;
+      if (!relaxRecentMotifs && row.motif_key_b && blockedMotifs.has(row.motif_key_b)) continue;
       if (row.motif_key_a && usedMotifs.has(row.motif_key_a)) continue;
       if (row.motif_key_b && usedMotifs.has(row.motif_key_b)) continue;
       if (row.is_fantasy && fantasyCount >= 1) continue;
@@ -146,10 +146,12 @@ export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new S
       if (row.motif_key_a) usedMotifs.add(row.motif_key_a);
       if (row.motif_key_b) usedMotifs.add(row.motif_key_b);
     }
-    return { selected, distinctFamilies: familyCounts.size, fantasyCount };
+    return { selected, distinctFamilies: familyCounts.size, fantasyCount, recentMotifsRelaxed: relaxRecentMotifs };
   };
-  let result = attempt(false);
-  if (result.selected.length < count) result = attempt(true);
+  let result = attempt(false, false);
+  if (result.selected.length < count) result = attempt(true, false);
+  if (result.selected.length < count) result = attempt(false, true);
+  if (result.selected.length < count) result = attempt(true, true);
   if (result.selected.length < count) return null;
   return result;
 };
@@ -246,21 +248,36 @@ export const arrangeForHook = rows => {
 // inserted before that column existed falls back to its own search query (deriveVisualSubject's
 // same rule, inlined here since a DB row's snake_case shape isn't the {searchQuery} shape that
 // helper expects), never re-derived by stripping words out of display text.
-export const rowToQuestion = (row, index) => ({
-  index, category: row.category,
-  optionA: { text: row.option_a_text, searchQuery: row.option_a_search_query, visualSubject: row.option_a_visual_subject || row.option_a_search_query },
-  optionB: { text: row.option_b_text, searchQuery: row.option_b_search_query, visualSubject: row.option_b_visual_subject || row.option_b_search_query },
-  poolId: row.id,
-});
+export const rowToQuestion = (row, index) => {
+  if (row.category === 'food') {
+    const food = assessFoodPair(row.option_a_text, row.option_b_text);
+    if (food.valid) {
+      return {
+        index, category: row.category,
+        optionA: { text: food.optionA.label, searchQuery: food.optionA.literalFood, visualSubject: food.optionA.literalFood },
+        optionB: { text: food.optionB.label, searchQuery: food.optionB.literalFood, visualSubject: food.optionB.literalFood },
+        poolId: row.id,
+      };
+    }
+  }
+  return {
+    index, category: row.category,
+    optionA: { text: row.option_a_text, searchQuery: row.option_a_search_query, visualSubject: row.option_a_visual_subject || row.option_a_search_query },
+    optionB: { text: row.option_b_text, searchQuery: row.option_b_search_query, visualSubject: row.option_b_visual_subject || row.option_b_search_query },
+    poolId: row.id,
+  };
+};
 
 export const buildPlanFromPoolRows = rows => {
-  const arranged = arrangeForHook(rows);
+  const themed = Boolean(rows[0]?.theme_key);
+  const arranged = themed ? [...rows].sort((a, b) => Number(a.theme_position) - Number(b.theme_position)) : arrangeForHook(rows);
   const questions = arranged.map((row, index) => rowToQuestion(row, index));
   return {
     version: 1,
     topic: deriveTopic(questions),
     percentages: null,
     source: 'database_pool',
+    hook: themed ? { themeKey: arranged[0].theme_key, title: arranged[0].theme_title, ttsText: arranged[0].hook_tts_text } : null,
     contentQuality: {
       source: 'database_pool',
       distinctFamilies: new Set(rows.map(row => row.content_family)).size,

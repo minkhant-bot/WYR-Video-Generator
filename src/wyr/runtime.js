@@ -11,7 +11,7 @@ export const DEFAULT_DATA_DIR = path.join(PROJECT_ROOT, 'data');
 export const FONT_PATH = path.resolve(process.env.WYR_FONT_PATH || path.join(PROJECT_ROOT, 'assets', 'fonts', 'Baloo2-ExtraBold.ttf'));
 export const resolveProjectPath = value => path.isAbsolute(value) ? value : path.resolve(PROJECT_ROOT, value);
 export const REQUIRED_FFMPEG_FILTERS = Object.freeze([
-  'drawtext', 'bbox', 'scale', 'crop', 'setsar', 'format', 'fade', 'drawbox', 'overlay', 'color', 'geq', 'setrange', 'noise',
+  'drawtext', 'bbox', 'scale', 'crop', 'eq', 'unsharp', 'setsar', 'format', 'fade', 'drawbox', 'overlay', 'color', 'geq', 'setrange', 'noise',
   'aevalsrc', 'highpass', 'lowpass', 'afade', 'anullsrc', 'atrim', 'aresample', 'aformat', 'volume', 'adelay', 'asplit', 'amix', 'alimiter',
 ]);
 export const REQUIRED_FFMPEG_ENCODERS = Object.freeze(['libx264', 'aac']);

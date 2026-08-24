@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveFfmpegPath } from './runtime.js';
-import { computeSubjectAwareCrop } from './framing.js';
+import { computeSubjectAwareCrop, renderableCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
 
 const questions = [
@@ -96,7 +96,7 @@ export const createFixtureAssets = async ({ assetsDir, count = questions.length,
     // so the local 6-scene fixture render exercises the real framing logic end-to-end instead of
     // always taking buildFramedImageChain's plain-center fallback.
     const framing = await computeCrop({ localPath: jpg, sourceWidth: width, sourceHeight: height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight, ffmpegPath });
-    assets.push({ questionIndex: Math.floor(index / 2), slot: index % 2 === 0 ? 'A' : 'B', localPath: jpg, filename: path.basename(jpg), provider: 'fixture', id: `fixture-${index + 1}`, width, height, photographer: 'Local fixture', photographerUrl: null, photoUrl: null, queryUsed: 'fixture', subjectKind: kind, framing: framing.safe ? { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight } : undefined });
+    assets.push({ questionIndex: Math.floor(index / 2), slot: index % 2 === 0 ? 'A' : 'B', localPath: jpg, filename: path.basename(jpg), provider: 'fixture', id: `fixture-${index + 1}`, width, height, photographer: 'Local fixture', photographerUrl: null, photoUrl: null, queryUsed: 'fixture', subjectKind: kind, framing: framing.safe ? renderableCrop(framing) : undefined });
   }
   return assets;
 };

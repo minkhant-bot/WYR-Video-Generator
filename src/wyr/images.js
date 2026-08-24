@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fetchWithTimeout, log, mapWithConcurrency, retry, writeJsonAtomic } from './utils.js';
 import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
-import { computeSubjectAwareCrop } from './framing.js';
+import { computeSubjectAwareCrop, renderableCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
 import { coreSubjectWords, NON_VISUAL_MODIFIER_WORDS } from './image-query.js';
 
@@ -97,6 +97,18 @@ const normalizeWords = value => String(value || '').toLowerCase().replace(/[^a-z
 const uniqueWords = words => [...new Set(words)];
 export const buildImageQueries = option => {
   const optionWords = normalizeWords(option.text); const supplied = normalizeWords(option.searchQuery);
+  if (String(option?.category || '').trim().toLowerCase() === 'food') {
+    const subject = (supplied.length ? supplied : optionWords).slice(0, 5).join(' ');
+    return [...new Set([
+      `${subject} isolated white background product photo no people`,
+      `${subject} single food close up white background`,
+      `${subject} isolated food photography no people`,
+      `${subject} close up food photography no people`,
+      `${subject} real food photo no people`,
+      `${subject} plated dish close up no people`,
+      subject,
+    ].filter(query => query.length >= 3))];
+  }
   const expanded = uniqueWords(optionWords.flatMap(word => [word, ...(VISUAL_EXPANSIONS[word] || [])]));
   const has = word => optionWords.includes(word); let visualQueries = [];
   if (has('minds') || has('mind')) visualQueries = ['telepathy person reading thoughts', 'two people psychic mind connection', 'person seeing another person thoughts'];
@@ -139,9 +151,31 @@ export const buildAlternateImageQueries = option => {
   ].map(query => query.trim()).filter(query => query.length >= 3))];
 };
 
+// FOOD-specific product-photo ladder. Clean isolated searches lead, while broader real-food and
+// plated-dish phrases remain later fallbacks so a scarce subject never fails solely because an
+// ideal white-background photograph was unavailable.
+export const buildFoodPhotoRecoveryQueries = option => {
+  if (String(option?.category || '').trim().toLowerCase() !== 'food') return [];
+  const supplied = normalizeWords(option?.searchQuery || '').slice(0, 5);
+  const literal = normalizeWords(option?.text || '').filter(word => !CONTROL_WORDS.has(word)).slice(0, 5);
+  const subject = (supplied.length ? supplied : literal).join(' ');
+  if (!subject) return [];
+  return [...new Set([
+    `${subject} isolated white background product photo no people`,
+    `${subject} single food close up white background`,
+    `${subject} isolated food photography no people`,
+    `${subject} close up food photography no people`,
+    `${subject} real food photo no people`,
+    `${subject} plated dish close up no people`,
+  ])];
+};
+
 const candidateText = candidate => `${candidate.alt || ''} ${candidate.title || ''} ${candidate.credit || ''}`.toLowerCase();
-const WATERMARK_PATTERN = /\b(watermark|watermarked|shutterstock|alamy|i\s*stock|dreamstime|depositphotos|123rf|getty images?|adobe stock|stock photo|freepik premium|impossible images)\b/i;
-const WATERMARK_HOST_PATTERN = /(^|\.)(shutterstock\.com|alamy\.com|istockphoto\.com|dreamstime\.com|depositphotos\.com|123rf\.com|gettyimages\.com|stock\.adobe\.com|freepik\.com|vectorstock\.com|vecteezy\.com|craiyon\.com|impossibleimages\.ai|stablediffusionweb\.com)$/i;
+const WATERMARK_PATTERN = /\b(watermark|watermarked|shutterstock|alamy|i\s*stock|istock|dreamstime|depositphotos|123rf|getty\s*images?|gettyimages|adobe stock|stock photo|freepik premium|impossible images)\b/i;
+// Preview libraries use regional storefronts (for example gettyimages.co.uk) and separate CDN
+// hosts. Matching only the .com storefront allowed an obviously watermarked Getty preview into
+// the rendered food sample.
+const WATERMARK_HOST_PATTERN = /(^|\.)(shutterstock\.com|alamy\.com|istockphoto\.com|dreamstime\.com|depositphotos\.com|123rf\.com|gettyimages\.(?:com|[a-z]{2}|co\.[a-z]{2})|media\.gettyimages\.com|stock\.adobe\.com|freepik\.com|vectorstock\.com|vecteezy\.com|craiyon\.com|impossibleimages\.ai|stablediffusionweb\.com)$/i;
 const UNSUITABLE_SOURCE_HOST_PATTERN = /(^|\.)(youtube\.com|rivalskins\.com)$/i;
 const UI_OR_TEXT_PATTERN = /\b(screenshot|user interface|dashboard|webpage|mobile app|social media post|meme|template|infographic|quote poster|text banner|logo design|typography)\b/i;
 const MISLEADING_CONTEXT_PATTERN = /\b(camera|lens|olympus|t-?shirt|merchandise|product mockup|for sale|shop now|phone case|coffee mug|costume|toy|figurine|rageon|metaverse|second life|bargain center|grunge sign)\b/i;
@@ -158,6 +192,28 @@ const HARD_FORMAT_PATTERN = /\b(article|news|blog|thumbnail|video|youtube|watch|
 const ILLUSTRATION_ART_PATTERN = /\b(illustration|illustrated|clip[ -]?art|cartoon|line art|line drawing|vector art|vector graphic)\b/i;
 const HARD_DOMAIN_PATTERN = /(^|\.)(etsy|scale\.jobs|jobs|careers|marketplace|auction|auctions|01net|cbs8)(\.|$)|(^|\.)(auctions\.)?yahoo\.co\.jp$/i;
 const HARD_LAYOUT_PATTERN = /\b(card layout|text graphic|text-heavy|text heavy|graphic design|social post|press release|promo image|article image)\b/i;
+// Search engines frequently return app-store/product screenshots for food prompts. These are
+// colorful and detailed enough to pass pixel statistics, so reject explicit game/UI evidence in
+// metadata before it can compete with real food photography.
+const GAME_GRAPHIC_PATTERN = /\b(video game|mobile game|cooking game|restaurant game|chef game|food game|gameplay|game screenshot|game app|simulator game|kitchen crush|master chef game|jeux? de cuisine|jeu de restaurant)\b/i;
+// Question/article thumbnails may use a photograph underneath but still carry large editorial
+// copy. Keep this narrow to headline phrasing that strongly signals embedded text.
+const EMBEDDED_TEXT_GRAPHIC_PATTERN = /\b(what if (?:we|you)|would you rather|did you know)\b/i;
+// FOOD videos have a much narrower visual contract than the general/fantasy generator: the image
+// must be a literal food photograph, with the dish itself as the subject. Provider metadata is the
+// only semantic evidence available before download, so reject strong evidence of the failure
+// classes observed in real renders instead of allowing a repeated food keyword to score them to
+// 100. These rules are deliberately FOOD-only; fantasy/non-food options retain their existing art
+// and human-scene behavior.
+const FOOD_NON_PHOTO_PATTERN = /\b(ai[ -]?generated|generative ai|nightcafe|surreal|emoji|emoticon|sticker|clip[ -]?art|cartoon|illustration|illustrated|vector|digital art|concept art|3d render|rendered|cgi|painting|drawing|art print|wall art|fine art|wallpapers?|backgrounds? free download)\b/i;
+const FOOD_HUMAN_PATTERN = /\b(person|people|man|men|woman|women|boy|girl|child|children|family|couple|crowd|chef|cook|baker|barista|waiter|waitress|hands?|holding|eating|biting|drinking)\b/i;
+const FOOD_VENUE_PATTERN = /\b(storefront|shopfront|restaurant|cafe|café|diner|dining room|sushi bar|food truck|market stall|vendor|commercial kitchen|restaurant interior|display case|waffle house|shop|outlet|branch|nagar)\b/i;
+const FOOD_EDITORIAL_PATTERN = /\b(wedding|bride|groom|wedding film|production still|movie scene|film still|logo|headline|typography|text overlay|menu board|editorial graphic)\b/i;
+const FOOD_PRODUCT_PATTERN = /\b(marketplace|product packaging|packaged food|retail package|boxed product|packet|wrapper|grocery product|product listing|for sale|buy online|shop now|merchandise|burger king|mcdonald'?s|wendy'?s|restaurant chain)\b/i;
+const FOOD_CLEAN_STUDIO_PATTERN = /\b(isolated|white background|off[ -]?white background|neutral background|plain background|transparent background|transparent png|png cutout|food cutout|product photo|product photography|product shot|single food|studio photo|close[ -]?up)\b/i;
+const FOOD_VISIBLE_BACKGROUND_PATTERN = /\b(restaurant table|table setting|dining table|wooden table|rustic table|plate on table|kitchen counter|kitchen interior|room interior|restaurant interior|food spread|buffet|scenery|outdoors?)\b/i;
+const FOOD_CONFLICTING_DISH_PATTERN = /\b(poutine|tater tots?|combo platter|sampler platter|novelty cake|funny style|affogato|rhubarb|pistachio and raspberry|batter|waffle iron|raw dough|uncooked)\b/i;
+const FOOD_UNSUITABLE_HOST_PATTERN = /(^|\.)(nightcafe\.studio|fineartamerica\.com|emojis\.com|redbubble\.com|deviantart\.com|artstation\.com|citypng\.com|pngtree\.com|designbundles\.net|wallpapers\.com|wallpapercrafter\.com|wallpapercave\.com|wallpaperflare\.com|etsy\.com|walmart\.com|target\.com|ebay\.(?:com|co\.[a-z]{2}|[a-z]{2})|alibaba\.com|aliexpress\.com|instacart\.com|amazon\.(?:com(?:\.[a-z]{2})?|co\.[a-z]{2}|[a-z]{2}))$/i;
 const WEAK_VISUAL_PATTERN = /\b(clip[ -]?art|simple icon|flat icon|vector icon|line icon|silhouette icon|button icon|symbol icon|diagram|infographic|isolated product|product shot|corporate illustration|generic illustration|generic stock|wallet|calculator|credit card|bank card|card reader|brain model|brain in (?:a )?box)\b/i;
 const GENERIC_TECH_ABSTRACTION_PATTERN = /\b(cloud icon|upload icon|download icon|gear icon|network icon|circuit board|abstract technology|digital network|data flow|binary code|matrix code|generic technology|tech background|futuristic background|abstract background|glowing network|node network|connection lines|abstract data|generic diagram|flowchart|pie chart|bar chart|symbol only|isolated symbol|generic symbol)\b/i;
 const CORPORATE_WEAK_PATTERN = /\b(corporate|business meeting|office team|businessman at desk|finance illustration|corporate stock|generic office|financial presentation|handshake|suit|office|meeting|teamwork)\b/i;
@@ -203,7 +259,7 @@ const HUMAN_ACTION_VERBS = new Set(['wear', 'wears', 'wearing', 'ride', 'rides',
 // Explicit multi-person context: an option naming friends/family/group/together implies the
 // candidate should show more than one person, not a single isolated subject.
 const GROUP_CONTEXT_WORDS = new Set(['friends', 'friend', 'family', 'group', 'team', 'together', 'crowd', 'partner', 'couple']);
-const computeSemanticRankAdjustment = (optionWords, searchableText, headNounMatched = false) => {
+const computeSemanticRankAdjustment = (optionWords, searchableText, headNounMatched = false, foodOption = false) => {
   let adjustment = 0;
   // Off-topic filler imagery (flowers, generic animals, arrows, abstract/metaphorical art) is only
   // penalized when the OPTION's own words never actually call for it, so a genuine "explore a
@@ -223,7 +279,11 @@ const computeSemanticRankAdjustment = (optionWords, searchableText, headNounMatc
   // rejection, so it can't cause a slot to come up empty the way strengthening a hard-reject
   // pattern could.
   if (PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment += 6;
-  else if (NON_PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText)) adjustment -= 32;
+  else if (NON_PHOTOGRAPHIC_EVIDENCE_PATTERN.test(searchableText) && !(foodOption && FOOD_CLEAN_STUDIO_PATTERN.test(searchableText))) adjustment -= 32;
+  if (foodOption) {
+    if (FOOD_CLEAN_STUDIO_PATTERN.test(searchableText)) adjustment += 24;
+    if (FOOD_VISIBLE_BACKGROUND_PATTERN.test(searchableText)) adjustment -= 22;
+  }
   // Literal-subject bonus: reward a candidate whose tags/alt-text literally contain the head noun
   // of the search query that actually found it (e.g. "supercars" should beat an "engine" close-up
   // for "Have a garage of supercars"; "clothes" should beat a "sewing machine" for "Have a room of
@@ -333,19 +393,41 @@ export const assessImageCandidate = (candidate, option) => {
   const sourceDomain = String(candidate.sourceDomain || '').toLowerCase();
   const hardFormatEvidence = `${searchableText} ${sourceDomain}`;
   const hardRejectionReasons = [];
+  const foodOption = String(option?.category || '').trim().toLowerCase() === 'food';
   if (!Number.isFinite(candidate?.width) || !Number.isFinite(candidate?.height) || candidate.width < 750 || candidate.height < 450) hardRejectionReasons.push('hard-rejected: low-resolution or corrupt candidate (too small for the 750x450 slot)');
   const hardFormatMatches = [...hardFormatEvidence.matchAll(HARD_FORMAT_PATTERN)].map(match => match[0].toLowerCase());
   const hardLayoutMatch = hardFormatEvidence.match(HARD_LAYOUT_PATTERN)?.[0]?.toLowerCase();
   if (hardFormatMatches.length || hardLayoutMatch) hardRejectionReasons.push(`hard-rejected: candidate metadata indicates ${[...new Set([...hardFormatMatches, hardLayoutMatch].filter(Boolean))].join(', ')} / text-heavy or promotional format`);
-  const illustrationMatch = hardFormatEvidence.match(ILLUSTRATION_ART_PATTERN)?.[0]?.toLowerCase();
-  if (illustrationMatch) hardRejectionReasons.push(`hard-rejected: candidate is flat/vector/hand-drawn art (${illustrationMatch}), not a real photograph`);
   if (HARD_DOMAIN_PATTERN.test(sourceDomain)) hardRejectionReasons.push(`hard-rejected: high-risk source domain ${sourceDomain}`);
   if (WATERMARK_PATTERN.test(hardFormatEvidence) || WATERMARK_HOST_PATTERN.test(sourceDomain)) hardRejectionReasons.push('hard-rejected: obvious watermark or stock-preview source');
+  if (foodOption) {
+    const illustrationMatch = hardFormatEvidence.match(ILLUSTRATION_ART_PATTERN)?.[0]?.toLowerCase();
+    if (illustrationMatch) hardRejectionReasons.push(`hard-rejected: food candidate is flat/vector/hand-drawn art (${illustrationMatch}), not a real food photograph`);
+    const gameGraphicMatch = hardFormatEvidence.match(GAME_GRAPHIC_PATTERN)?.[0]?.toLowerCase();
+    if (gameGraphicMatch) hardRejectionReasons.push(`hard-rejected: food candidate is a game/app graphic (${gameGraphicMatch}), not food photography`);
+    const embeddedTextMatch = hardFormatEvidence.match(EMBEDDED_TEXT_GRAPHIC_PATTERN)?.[0]?.toLowerCase();
+    if (embeddedTextMatch) hardRejectionReasons.push(`hard-rejected: food candidate metadata indicates an embedded-text editorial graphic (${embeddedTextMatch})`);
+    if (FOOD_UNSUITABLE_HOST_PATTERN.test(sourceDomain)) hardRejectionReasons.push(`hard-rejected: food candidate comes from an art, emoji, or marketplace source (${sourceDomain})`);
+    const nonPhotoMatch = hardFormatEvidence.match(FOOD_NON_PHOTO_PATTERN)?.[0]?.toLowerCase();
+    if (nonPhotoMatch) hardRejectionReasons.push(`hard-rejected: food candidate is non-photographic (${nonPhotoMatch})`);
+    const humanMatch = hardFormatEvidence.match(FOOD_HUMAN_PATTERN)?.[0]?.toLowerCase();
+    if (humanMatch) hardRejectionReasons.push(`hard-rejected: food candidate includes a person or eating interaction (${humanMatch})`);
+    const venueMatch = hardFormatEvidence.match(FOOD_VENUE_PATTERN)?.[0]?.toLowerCase();
+    if (venueMatch) hardRejectionReasons.push(`hard-rejected: food candidate depicts a venue rather than the literal dish (${venueMatch})`);
+    const editorialMatch = hardFormatEvidence.match(FOOD_EDITORIAL_PATTERN)?.[0]?.toLowerCase();
+    if (editorialMatch) hardRejectionReasons.push(`hard-rejected: food candidate has editorial or unrelated scene context (${editorialMatch})`);
+    const productMatch = hardFormatEvidence.match(FOOD_PRODUCT_PATTERN)?.[0]?.toLowerCase();
+    if (productMatch) hardRejectionReasons.push(`hard-rejected: food candidate is marketplace or product-packaging imagery (${productMatch})`);
+    const conflictingDishMatch = hardFormatEvidence.match(FOOD_CONFLICTING_DISH_PATTERN)?.[0]?.toLowerCase();
+    if (conflictingDishMatch && !String(option?.text || '').toLowerCase().includes(conflictingDishMatch)) hardRejectionReasons.push(`hard-rejected: food candidate is a mixed, novelty, or conflicting dish (${conflictingDishMatch}), not a clear literal photo of the requested food`);
+  }
   rejectionReasons.push(...hardRejectionReasons);
   if (hardRejectionReasons.length) return { accepted: false, hardRejected: true, hardRejectionReasons, formatPass: false, validAsset: assetRejectionReasons.length === 0, relevanceScore: 0, qualityScore: 0, finalScore: 0, conceptClarity: 0, specificity: 0, visualImpact: 0, wyrSuitability: 0, pexelsQualityPassed: false, pexelsQualityReasons: hardRejectionReasons, rejectionReasons, matchedConcepts: [] };
   if (WATERMARK_PATTERN.test(searchableText) || WATERMARK_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('obvious stock or website watermark risk detected');
   if (UNSUITABLE_SOURCE_HOST_PATTERN.test(String(candidate.sourceDomain || ''))) assetRejectionReasons.push('candidate source is likely a UI thumbnail or merchandise result');
-  if (UI_OR_TEXT_PATTERN.test(searchableText) || SOURCE_QUALITY_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears to be a meme, infographic, screenshot, UI, ad, template, or text-dominated graphic');
+  const sourceQualityRisk = SOURCE_QUALITY_PATTERN.test(searchableText);
+  const cleanFoodProductPhoto = foodOption && FOOD_CLEAN_STUDIO_PATTERN.test(searchableText) && !FOOD_PRODUCT_PATTERN.test(searchableText);
+  if (UI_OR_TEXT_PATTERN.test(searchableText) || (sourceQualityRisk && !cleanFoodProductPhoto)) assetRejectionReasons.push('candidate appears to be a meme, infographic, screenshot, UI, ad, template, or text-dominated graphic');
   if (MISLEADING_CONTEXT_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate describes merchandise or a misleading unrelated context');
   if (INAPPROPRIATE_PATTERN.test(searchableText)) assetRejectionReasons.push('candidate appears inappropriate or sexualized');
   rejectionReasons.push(...assetRejectionReasons);
@@ -392,7 +474,8 @@ export const assessImageCandidate = (candidate, option) => {
   const targetRatio = 750 / 450; const ratio = candidate.width / candidate.height;
   const cropFit = Math.max(0, 1 - Math.abs(Math.log(ratio / targetRatio)) / 1.5);
   const resolution = Math.min(1, Math.min(candidate.width / 1600, candidate.height / 900));
-  const weakVisual = WEAK_VISUAL_PATTERN.test(searchableText) || GENERIC_TECH_ABSTRACTION_PATTERN.test(searchableText);
+  const weakVisual = (WEAK_VISUAL_PATTERN.test(searchableText) || GENERIC_TECH_ABSTRACTION_PATTERN.test(searchableText))
+    && !(foodOption && FOOD_CLEAN_STUDIO_PATTERN.test(searchableText));
   // See BUSINESS_CONTEXT_PATTERN above: a genuinely business/work-themed option is exempt from the
   // generic-stock-business penalty, checked against both the display text and the search query.
   const queryIsBusinessRelated = BUSINESS_CONTEXT_PATTERN.test(`${option.text || ''} ${option.searchQuery || ''}`);
@@ -419,7 +502,7 @@ export const assessImageCandidate = (candidate, option) => {
   // the ranking composite sortPool (image-picker.js) sorts by first -- it never appears in
   // rejectionReasons/accepted, so this cannot loosen or tighten what counts as a valid candidate,
   // only which already-valid candidate wins ordering.
-  const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText, headNounMatched);
+  const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText, headNounMatched, foodOption);
   const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30 + semanticRankAdjustment);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
@@ -477,7 +560,7 @@ export const computeFlatBackgroundFraction = ({ bins, sampleCount }, tolerance =
   return best / sampleCount;
 };
 export const FLAT_BACKGROUND_FRACTION_THRESHOLD = 0.7;
-export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev, flatBackgroundFraction }) => {
+export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, stdev, flatBackgroundFraction }, { foodMode = false } = {}) => {
   const reasons = [];
   if (!Number.isFinite(width) || !Number.isFinite(height)) reasons.push('hard-rejected: decoded dimensions were unavailable (corrupt image)');
   else if (width < 750 || height < 450) reasons.push('hard-rejected: decoded image is too small for the 750x450 slot');
@@ -493,16 +576,16 @@ export const classifyImageStats = ({ width, height, yMin, yMax, yAvg, edgeYAvg, 
     const aspectRatio = width / height;
     if (aspectRatio >= 2.2 && edgeYAvg > 1.1) reasons.push('hard-rejected: pixel layout resembles a dense text/banner graphic');
     if (Number.isFinite(stdev) && stdev < 18 && edgeYAvg > 0.6) reasons.push('hard-rejected: near-uniform background with text-like high-contrast foreground');
-    if (Number.isFinite(flatBackgroundFraction) && flatBackgroundFraction >= FLAT_BACKGROUND_FRACTION_THRESHOLD) reasons.push(`hard-rejected: ${Math.round(flatBackgroundFraction * 100)}% of the frame is a single flat background color -- looks like clipart, an isolated product cutout, or a text/percentage graphic rather than a real-world photographic scene`);
+    if (Number.isFinite(flatBackgroundFraction) && flatBackgroundFraction >= (foodMode ? 0.9 : FLAT_BACKGROUND_FRACTION_THRESHOLD)) reasons.push(`hard-rejected: ${Math.round(flatBackgroundFraction * 100)}% of the frame is a single flat background color -- the visible subject is too small or the image resembles a text/graphic placeholder`);
   }
   return { valid: reasons.length === 0, reasons, width, height, yMin, yMax, yAvg, edgeYAvg, stdev, flatBackgroundFraction };
 };
-export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpegPath() } = {}) => {
+export const inspectDownloadedImage = async (localPath, { binary = resolveFfmpegPath(), foodMode = false } = {}) => {
   const rawOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'info', '-i', localPath, '-vf', 'signalstats,metadata=print:file=-,showinfo', '-frames:v', '1', '-f', 'null', '-']);
   const edgeOutput = await runImageProbe(binary, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', 'edgedetect=low=0.1:high=0.4,signalstats,metadata=print:file=-', '-frames:v', '1', '-f', 'null', '-']);
   const dimensions = probeDimensions(rawOutput) || {};
   const histogram = await readGrayscaleHistogram(localPath, { binary });
-  return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]), flatBackgroundFraction: computeFlatBackgroundFraction(histogram) });
+  return classifyImageStats({ ...dimensions, yMin: statValue(rawOutput, 'YMIN'), yMax: statValue(rawOutput, 'YMAX'), yAvg: statValue(rawOutput, 'YAVG'), edgeYAvg: statValue(edgeOutput, 'YAVG'), stdev: Number(rawOutput.match(/stdev:\[(-?[0-9.]+)/)?.[1]), flatBackgroundFraction: computeFlatBackgroundFraction(histogram) }, { foodMode });
 };
 
 const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency, retrySearch, phase = 'normal' }) => {
@@ -522,7 +605,10 @@ const collectCandidateJobs = async ({ jobs, provider, providerLabel, concurrency
     state.searchAttempts.push({ phase, provider: providerLabel, query, candidateCount: candidates.length, error: null });
     for (const candidate of candidates) {
       const assessment = assessImageCandidate(candidate, state.option);
-      const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, finalScore: assessment.finalScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
+      const foodLiteralQueryRank = String(state.option.category || '').trim().toLowerCase() === 'food'
+        ? Math.max(0, 100 - Math.max(0, state.queries.indexOf(query)))
+        : 0;
+      const enriched = { ...candidate, provider: candidate.provider || providerLabel, query, foodLiteralQueryRank, relevanceScore: assessment.relevanceScore, qualityScore: assessment.qualityScore, finalScore: assessment.finalScore, conceptClarity: assessment.conceptClarity, specificity: assessment.specificity, visualImpact: assessment.visualImpact, wyrSuitability: assessment.wyrSuitability, pexelsQualityPassed: assessment.pexelsQualityPassed, pexelsQualityReasons: assessment.pexelsQualityReasons, matchedConcepts: assessment.matchedConcepts };
       state.candidateDiagnostics.push({ provider: enriched.provider, id: enriched.id, query, sourceDomain: enriched.sourceDomain, width: enriched.width, height: enriched.height, formatPass: assessment.formatPass, qualityScore: enriched.qualityScore, relevanceScore: enriched.relevanceScore, finalScore: enriched.finalScore, accepted: assessment.accepted, validAsset: assessment.validAsset, reasons: assessment.rejectionReasons });
       if (assessment.hardRejected) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${enriched.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : enriched.provider} | domain=${enriched.sourceDomain || 'unknown'} | query="${String(query).replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${assessment.hardRejectionReasons.join('; ')}"`);
       if (assessment.validAsset) state.validCandidates.push(enriched);
@@ -548,6 +634,7 @@ const collectCandidates = async ({ states, provider, providerLabel, concurrency,
 const providerRank = provider => IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider) < 0 ? IMAGE_SELECTION_DEFAULTS.providerOrder.length : IMAGE_SELECTION_DEFAULTS.providerOrder.indexOf(provider);
 const sizeScore = candidate => Math.min(1, Math.min(Number(candidate.width) / 1600, Number(candidate.height) / 900));
 export const compareImageCandidates = (left, right) => {
+  const literalFoodQuery = Number(right.foodLiteralQueryRank || 0) - Number(left.foodLiteralQueryRank || 0); if (literalFoodQuery) return literalFoodQuery;
   const finalScore = Number(right.finalScore || 0) - Number(left.finalScore || 0); if (finalScore) return finalScore;
   const quality = Number(right.qualityScore || 0) - Number(left.qualityScore || 0); if (quality) return quality;
   const relevance = Number(right.relevanceScore || 0) - Number(left.relevanceScore || 0); if (relevance) return relevance;
@@ -578,8 +665,11 @@ const chooseStrongCandidate = (state, candidates, used) => {
   return top;
 };
 
-export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = inspectDownloadedImage, computeCrop = computeSubjectAwareCrop, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
-  const options = plan.questions.flatMap(question => [{ questionIndex: question.index, slot: 'A', ...question.optionA }, { questionIndex: question.index, slot: 'B', ...question.optionB }]);
+export const findAndDownloadImages = async ({ plan, provider, webProvider = null, visualQueryProvider = null, assetsDir, maxRetries, concurrency = 4, onProgress, imageInspector = (localPath, _candidate, option) => inspectDownloadedImage(localPath, { foodMode: String(option?.category || '').trim().toLowerCase() === 'food' }), computeCrop = computeSubjectAwareCrop, recovery = IMAGE_RECOVERY_DEFAULTS }) => {
+  const options = plan.questions.flatMap(question => [
+    { questionIndex: question.index, slot: 'A', category: question.category, ...question.optionA },
+    { questionIndex: question.index, slot: 'B', category: question.category, ...question.optionB },
+  ]);
   const recoveryConfig = { ...IMAGE_RECOVERY_DEFAULTS, ...recovery };
   const states = options.map((option, index) => ({ index, option, queries: buildImageQueries(option).slice(0, Math.max(4, maxRetries + 1)), candidates: [], validCandidates: [], webCandidates: [], selected: null, pool: [], failedKeys: new Set(), searchAttempts: [], providerErrors: [], webProviderErrors: [], rejections: [], candidateDiagnostics: [], providerRequestCount: 0, recoveryQueries: [], providerAttemptOrder: [...IMAGE_SELECTION_DEFAULTS.providerOrder], webProviderAttempted: false, fallbackReason: null }));
   const used = new Set();
@@ -589,6 +679,10 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
     for (const state of states) { state.webProviderAttempted = true; state.webCandidates = rankedUnique(state.candidates.filter(candidate => candidate.provider !== 'Pexels')).slice(0, MAX_RANKED_CANDIDATES); }
   }
   for (const state of states) {
+    // Curated stock-photo results are more reliable for literal FOOD imagery than unrestricted web
+    // results. Keep the already-fetched web candidates as recovery candidates, but let Pexels win
+    // first refusal for FOOD slots. Non-food provider ordering is unchanged.
+    if (String(state.option.category || '').trim().toLowerCase() === 'food') continue;
     const strongWeb = chooseStrongCandidate(state, state.webCandidates || [], used);
     if (strongWeb) { state.selected = strongWeb; reserve(strongWeb, used); }
   }
@@ -627,7 +721,7 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
         const filename = `q${String(state.option.questionIndex + 1).padStart(2, '0')}-${state.option.slot.toLowerCase()}-${selected.provider === 'Pexels' ? 'pexels' : 'web'}-${safeId}.jpg`; const localPath = path.join(assetsDir, filename);
         try {
           await downloader.downloadAsset(selected, localPath);
-          const inspection = await imageInspector(localPath, selected);
+          const inspection = await imageInspector(localPath, selected, state.option);
           if (!inspection?.valid) throw new Error(`downloaded image rejected: ${inspection?.reasons?.join('; ') || 'image failed visual-content validation'}`);
           if (Number.isFinite(inspection.width)) selected.width = inspection.width;
           if (Number.isFinite(inspection.height)) selected.height = inspection.height;
@@ -638,7 +732,7 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
           // to the next ranked candidate instead of ever rendering a bad crop.
           const framing = await computeCrop({ localPath, sourceWidth: selected.width, sourceHeight: selected.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
           if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
-          selected.framing = { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight };
+          selected.framing = renderableCrop(framing);
           return { ok: true, state, filename, localPath, contentHash: fileHash(localPath), inspection };
         }
         catch (error) { fs.rmSync(localPath, { force: true }); if (/hard-rejected/i.test(error.message)) console.info(`WYR_IMAGE_HARD_REJECT | question=${state.option.questionIndex + 1} | slot=${state.option.slot} | provider=${selected.provider === 'DuckDuckGo Images' ? 'DuckDuckGo' : selected.provider} | domain=${selected.sourceDomain || 'unknown'} | query="${String(selected.query || '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}" | rejectionReason="${error.message.replaceAll('"', '\\"').replaceAll(/\r?\n/g, ' ')}"`); return { ok: false, state, error }; }
@@ -691,7 +785,10 @@ export const findAndDownloadImages = async ({ plan, provider, webProvider = null
       await downloadSelections([state]);
       return Boolean(state.localPath);
     };
-    const alternateQueries = buildAlternateImageQueries(state.option).slice(0, recoveryConfig.alternateQueryRounds);
+    const alternateQueries = [...new Set([
+      ...buildFoodPhotoRecoveryQueries(state.option),
+      ...buildAlternateImageQueries(state.option),
+    ])].slice(0, recoveryConfig.alternateQueryRounds);
     for (const query of alternateQueries) {
       if (!canRecover()) break;
       state.recoveryQueries.push(query);

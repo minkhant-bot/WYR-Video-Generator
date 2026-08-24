@@ -250,7 +250,7 @@ test('a framing-safe candidate carries its computed crop offset onto the final a
 // finally giving up, so a slot doesn't fail just because every candidate the ORIGINAL query
 // phrasing turned up happened to break at the download/framing stage.
 // ---------------------------------------------------------------------------------------------
-const pixabayUrl = (q, page = 1) => `https://pixabay.com/api/?key=test-pixabay-key&q=${encodeURIComponent(q).replace(/%20/g, '+')}&page=${page}&per_page=40&safesearch=true&orientation=horizontal&image_type=all`;
+const pixabayUrl = (q, page = 1) => `https://pixabay.com/api/?key=test-pixabay-key&q=${encodeURIComponent(q).replace(/%20/g, '+')}&page=${page}&per_page=40&safesearch=true&orientation=horizontal&image_type=photo&min_width=1280`;
 const searchResponse = hits => () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ hits }) });
 
 test('download failures exhaust the known pool AND the first widened search -- a Tier 3 subject-preserving broadened query still succeeds', () => {

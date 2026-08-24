@@ -50,10 +50,10 @@ test('assessCropSafety rejects both an overly extreme aspect ratio and a window 
   assert.equal(assessCropSafety({ excessFraction: 0.1, retainedFraction: 0.9 }).safe, true);
 });
 
-test('computeSubjectAwareCrop skips analysis entirely (and is always safe) when the source aspect ratio already matches the slot', async () => {
+test('computeSubjectAwareCrop analyzes a matching-aspect source so adaptive zoom is still source-derived', async () => {
   let analyzed = false;
   const result = await computeSubjectAwareCrop({ localPath: '/nonexistent.jpg', sourceWidth: 1500, sourceHeight: 900, targetWidth: 750, targetHeight: 450, readEnergyProfile: async () => { analyzed = true; return { profile: [], analysisWidth: 0, analysisHeight: 0 }; } });
-  assert.equal(result.safe, true); assert.equal(result.axis, 'none'); assert.equal(analyzed, false);
+  assert.equal(result.safe, true); assert.equal(result.axis, 'none'); assert.equal(analyzed, true);
   assert.equal(result.x, 0); assert.equal(result.y, 0);
 });
 
@@ -62,6 +62,16 @@ test('computeSubjectAwareCrop rejects an extreme aspect ratio purely from geomet
   const result = await computeSubjectAwareCrop({ localPath: '/nonexistent.jpg', sourceWidth: 300, sourceHeight: 1500, targetWidth: 750, targetHeight: 450, readEnergyProfile: async () => { analyzed = true; return { profile: new Array(480).fill(1), analysisWidth: 187, analysisHeight: 480 }; } });
   assert.equal(result.safe, false);
   assert.match(result.reason, /framing rejected/);
+});
+
+test('adaptive food zoom uses 1.10x for a compact center subject and disables zoom for edge-spanning arrangements', async () => {
+  const concentrated = new Array(100).fill(0); for (let index = 35; index < 65; index += 1) concentrated[index] = 10;
+  const edgeSpanning = new Array(100).fill(0); for (let index = 0; index < 12; index += 1) edgeSpanning[index] = 10; for (let index = 88; index < 100; index += 1) edgeSpanning[index] = 10;
+  const analyze = safety => async () => ({ profile: concentrated, safetyProfile: safety, xProfile: concentrated, yProfile: concentrated, safetyXProfile: safety, safetyYProfile: safety, analysisWidth: 100, analysisHeight: 100, averageLuma: 120 });
+  const compact = await computeSubjectAwareCrop({ localPath: '/not-read.jpg', sourceWidth: 1600, sourceHeight: 1000, targetWidth: 960, targetHeight: 600, readEnergyProfile: analyze(concentrated) });
+  const platter = await computeSubjectAwareCrop({ localPath: '/not-read.jpg', sourceWidth: 1600, sourceHeight: 1000, targetWidth: 960, targetHeight: 600, readEnergyProfile: analyze(edgeSpanning) });
+  assert.equal(compact.zoom, 1.1); assert.deepEqual([compact.coverWidth, compact.coverHeight], [1056, 660]);
+  assert.equal(platter.zoom, 1); assert.deepEqual([platter.coverWidth, platter.coverHeight], [960, 600]);
 });
 
 test('computeSubjectAwareCrop keeps a synthetic head band inside the crop window on a real image via real ffmpeg edge analysis', async () => {

@@ -1,21 +1,18 @@
 import { spawn } from 'node:child_process';
 import { resolveFfmpegPath } from './runtime.js';
 
-// Subject-aware crop: instead of always centering the crop window on the geometric center of the
-// scaled ("cover") image, this scores where the visual detail (edge energy) actually is along the
-// axis that must be cropped, and places the window there instead. Vertical crops (portrait/square
-// sources squeezed into the landscape 750x450 slot -- the case most likely to behead a person) get
-// an extra bias toward the top of the frame, since a head/face is overwhelmingly more likely to sit
-// in the upper portion of a photo than the lower portion, and losing legs/background is far less
-// damaging than losing a head. This is a heuristic, not real face detection: there is no ML face
-// detector available in this pipeline, so `assessCropSafety` exists as a backstop -- when an image's
-// aspect ratio is too extreme, or even the best-scoring window keeps too little of the image's
-// detail, the candidate is rejected outright rather than forcing a crop that likely mutilates the
-// subject (see images.js's use of this to fall back to the next ranked candidate).
+// Food-aware crop: compute a cheap photographic saliency map from decoded source pixels, suppress
+// peripheral props/table detail, and favor the central colorful/textured subject. Crop coordinates
+// are always recomputed against the source-derived cover dimensions; no already-cropped bitmap is
+// ever enlarged. The existing geometry/detail safety gate remains the final fallback authority.
 export const ANALYSIS_MAX_DIMENSION = 480;
 export const TOP_BIAS_STRENGTH = 0.6;
 export const MAX_EXCESS_FRACTION = 0.6;
 export const MIN_RETAINED_ENERGY_FRACTION = 0.35;
+export const FOOD_PHOTO_ZOOM = 1.1;
+export const MIN_FOOD_PHOTO_ZOOM = 1.08;
+const ZOOM_CANDIDATES = Object.freeze([FOOD_PHOTO_ZOOM, MIN_FOOD_PHOTO_ZOOM, 1]);
+const MIN_ZOOM_RETAINED_SALIENCY = 0.88;
 const AXIS_TOLERANCE_PX = 2;
 
 const assertPositive = (value, label) => { if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${label} must be a positive finite number.`); };
@@ -89,17 +86,76 @@ export const readEdgeEnergyProfile = async ({ localPath, coverWidth, coverHeight
   const scaleFactor = Math.min(1, ANALYSIS_MAX_DIMENSION / Math.max(coverWidth, coverHeight));
   const analysisWidth = Math.max(2, Math.round(coverWidth * scaleFactor));
   const analysisHeight = Math.max(2, Math.round(coverHeight * scaleFactor));
-  const child = spawn(ffmpegPath, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', `scale=${analysisWidth}:${analysisHeight}:flags=area,edgedetect=low=0.1:high=0.4,format=gray`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-frames:v', '1', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(ffmpegPath, ['-hide_banner', '-v', 'error', '-i', localPath, '-vf', `scale=${analysisWidth}:${analysisHeight}:flags=area,format=rgb24`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-frames:v', '1', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
   const buffer = await readStdout(child);
-  const expected = analysisWidth * analysisHeight;
+  const expected = analysisWidth * analysisHeight * 3;
   if (buffer.length < expected) throw new Error(`Edge-energy analysis produced ${buffer.length} bytes, expected ${expected} for ${analysisWidth}x${analysisHeight}.`);
-  const profile = new Array(axis === 'vertical' ? analysisHeight : analysisWidth).fill(0);
-  if (axis === 'vertical') {
-    for (let y = 0; y < analysisHeight; y += 1) { let sum = 0; const rowOffset = y * analysisWidth; for (let x = 0; x < analysisWidth; x += 1) sum += buffer[rowOffset + x]; profile[y] = sum; }
-  } else {
-    for (let y = 0; y < analysisHeight; y += 1) { const rowOffset = y * analysisWidth; for (let x = 0; x < analysisWidth; x += 1) profile[x] += buffer[rowOffset + x]; }
+  const xProfile = new Array(analysisWidth).fill(0); const yProfile = new Array(analysisHeight).fill(0);
+  const safetyXProfile = new Array(analysisWidth).fill(0); const safetyYProfile = new Array(analysisHeight).fill(0);
+  let lumaTotal = 0;
+  const channel = (x, y, component) => buffer[(Math.max(0, Math.min(analysisHeight - 1, y)) * analysisWidth + Math.max(0, Math.min(analysisWidth - 1, x))) * 3 + component];
+  for (let y = 0; y < analysisHeight; y += 1) {
+    const ny = (y + 0.5) / analysisHeight - 0.5;
+    for (let x = 0; x < analysisWidth; x += 1) {
+      const nx = (x + 0.5) / analysisWidth - 0.5;
+      const i = (y * analysisWidth + x) * 3; const r = buffer[i]; const g = buffer[i + 1]; const b = buffer[i + 2];
+      const maximum = Math.max(r, g, b); const minimum = Math.min(r, g, b);
+      const saturation = maximum > 0 ? (maximum - minimum) / maximum : 0;
+      const neighborContrast = (
+        Math.abs(r - channel(x - 1, y, 0)) + Math.abs(g - channel(x - 1, y, 1)) + Math.abs(b - channel(x - 1, y, 2))
+        + Math.abs(r - channel(x, y - 1, 0)) + Math.abs(g - channel(x, y - 1, 1)) + Math.abs(b - channel(x, y - 1, 2))
+      ) / 6;
+      // Broad colorful regions and meaningful texture score; thin high-contrast utensil/table lines
+      // no longer dominate merely because they create a strong edge. A soft radial prior makes a
+      // central dish win over equally detailed props without hard-locking the crop to dead center.
+      const rawSaliency = 0.25 + neighborContrast * (0.75 + saturation * 0.5) + saturation * 12;
+      const centralPrior = 0.22 + 0.78 * Math.exp(-((nx * nx) / 0.12 + (ny * ny) / 0.16));
+      const focalSaliency = rawSaliency * centralPrior;
+      xProfile[x] += focalSaliency; yProfile[y] += focalSaliency;
+      safetyXProfile[x] += rawSaliency; safetyYProfile[y] += rawSaliency;
+      lumaTotal += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
   }
-  return { profile, analysisWidth, analysisHeight };
+  return {
+    profile: axis === 'vertical' ? yProfile : xProfile,
+    safetyProfile: axis === 'vertical' ? safetyYProfile : safetyXProfile,
+    xProfile, yProfile, safetyXProfile, safetyYProfile, analysisWidth, analysisHeight,
+    averageLuma: lumaTotal / (analysisWidth * analysisHeight),
+  };
+};
+
+const profileCenter = profile => {
+  if (!profile?.length) return 0.5;
+  const total = profile.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return 0.5;
+  return profile.reduce((sum, value, index) => sum + value * ((index + 0.5) / profile.length), 0) / total;
+};
+
+// Keep render metadata compact while allowing old/test crop doubles that only return x/y/cover
+// dimensions to remain byte-for-byte compatible with the existing pipeline.
+export const renderableCrop = framing => {
+  const crop = { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight };
+  for (const key of ['zoom', 'brightness', 'gamma', 'focalX', 'focalY']) if (Number.isFinite(framing?.[key])) crop[key] = framing[key];
+  return crop;
+};
+
+const retainedAt = ({ profile, center, windowFraction }) => {
+  if (!profile?.length) return { retainedFraction: 1, startFraction: 0, endFraction: 1 };
+  const size = Math.max(1, Math.min(profile.length, Math.round(profile.length * windowFraction)));
+  const start = Math.max(0, Math.min(profile.length - size, Math.round(center * profile.length - size / 2)));
+  const total = profile.reduce((sum, value) => sum + value, 0);
+  const retained = profile.slice(start, start + size).reduce((sum, value) => sum + value, 0);
+  return { retainedFraction: total > 0 ? retained / total : 1, startFraction: start / profile.length, endFraction: (start + size) / profile.length };
+};
+
+const chooseAdaptiveZoom = ({ cover, targetWidth, targetHeight, focalX, focalY, safetyXProfile, safetyYProfile }) => {
+  if (!safetyXProfile?.length || !safetyYProfile?.length) return 1;
+  for (const zoom of ZOOM_CANDIDATES) {
+    const x = retainedAt({ profile: safetyXProfile, center: focalX, windowFraction: targetWidth / (cover.coverWidth * zoom) });
+    const y = retainedAt({ profile: safetyYProfile, center: focalY, windowFraction: targetHeight / (cover.coverHeight * zoom) });
+    if (x.retainedFraction >= MIN_ZOOM_RETAINED_SALIENCY && y.retainedFraction >= MIN_ZOOM_RETAINED_SALIENCY) return zoom;
+  }
+  return 1;
 };
 
 // Full orchestration used by images.js at download time. `readEnergyProfile` is injectable so tests
@@ -108,16 +164,30 @@ export const computeSubjectAwareCrop = async ({ localPath, sourceWidth, sourceHe
   const cover = computeCoverDimensions({ sourceWidth, sourceHeight, targetWidth, targetHeight });
   const axis = determineCropAxis({ coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, targetWidth, targetHeight });
   const centeredX = Math.round((cover.coverWidth - targetWidth) / 2); const centeredY = Math.round((cover.coverHeight - targetHeight) / 2);
-  if (axis === 'none') return { x: centeredX, y: centeredY, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: true, reason: null, retainedFraction: 1, excessFraction: 0 };
   const excessFraction = computeExcessFraction({ coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, targetWidth, targetHeight, axis });
-  const { profile, analysisWidth, analysisHeight } = await readEnergyProfile({ localPath, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, ffmpegPath });
+  if (excessFraction > MAX_EXCESS_FRACTION) {
+    const safety = assessCropSafety({ excessFraction, retainedFraction: 1 });
+    return { x: centeredX, y: centeredY, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: false, reason: safety.reason, retainedFraction: 1, excessFraction, zoom: 1 };
+  }
+  const analysis = await readEnergyProfile({ localPath, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis: axis === 'none' ? 'horizontal' : axis, ffmpegPath });
+  const { profile, safetyProfile = profile, analysisWidth, analysisHeight } = analysis;
   const analysisLength = axis === 'vertical' ? analysisHeight : analysisWidth;
   const coverLength = axis === 'vertical' ? cover.coverHeight : cover.coverWidth;
   const targetLength = axis === 'vertical' ? targetHeight : targetWidth;
   const windowLength = Math.max(1, Math.round(analysisLength * (targetLength / coverLength)));
-  const chosen = chooseCropOffset({ profile, axis, windowLength });
+  const chosen = axis === 'none'
+    ? { bestIndex: 0, offsetFraction: 0, retainedFraction: 1, windowLength: analysisLength, analysisLength }
+    : chooseCropOffset({ profile, axis, windowLength, topBiasStrength: 0.08 });
   let winner = chosen;
-  let safety = assessCropSafety({ excessFraction, retainedFraction: chosen.retainedFraction });
+  const safetyAt = choice => {
+    if (axis === 'none') return 1;
+    const length = choice.windowLength; const start = choice.bestIndex;
+    const total = safetyProfile.reduce((sum, value) => sum + value, 0);
+    const retained = safetyProfile.slice(start, start + length).reduce((sum, value) => sum + value, 0);
+    return total > 0 ? retained / total : 1;
+  };
+  let retainedFraction = safetyAt(chosen);
+  let safety = assessCropSafety({ excessFraction, retainedFraction });
   // Safe-alternative-crop recovery: the top bias (vertical axis only) trades some raw retained
   // energy for a better chance of keeping a head/face in frame, so it's possible for the SAME
   // image's plain maximum-energy window (topBiasStrength=0 -- mathematically >= the biased choice's
@@ -128,12 +198,21 @@ export const computeSubjectAwareCrop = async ({ localPath, sourceWidth, sourceHe
   // could ever satisfy the floor for this image, and the candidate is correctly rejected below.
   if (!safety.safe && axis === 'vertical') {
     const unbiased = chooseCropOffset({ profile, axis, windowLength, topBiasStrength: 0 });
-    const unbiasedSafety = assessCropSafety({ excessFraction, retainedFraction: unbiased.retainedFraction });
-    if (unbiasedSafety.safe) { winner = unbiased; safety = unbiasedSafety; }
+    const unbiasedRetained = safetyAt(unbiased);
+    const unbiasedSafety = assessCropSafety({ excessFraction, retainedFraction: unbiasedRetained });
+    if (unbiasedSafety.safe) { winner = unbiased; retainedFraction = unbiasedRetained; safety = unbiasedSafety; }
   }
-  const maxOffsetPixels = coverLength - targetLength;
-  const offsetPixels = Math.round(winner.offsetFraction * maxOffsetPixels);
-  const x = axis === 'horizontal' ? offsetPixels : centeredX;
-  const y = axis === 'vertical' ? offsetPixels : centeredY;
-  return { x, y, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: safety.safe, reason: safety.reason, retainedFraction: winner.retainedFraction, excessFraction };
+  if (!safety.safe) return { x: centeredX, y: centeredY, coverWidth: cover.coverWidth, coverHeight: cover.coverHeight, axis, safe: false, reason: safety.reason, retainedFraction, excessFraction, zoom: 1 };
+  const axisCenter = analysisLength ? (winner.bestIndex + winner.windowLength / 2) / analysisLength : 0.5;
+  const focalX = axis === 'horizontal' ? axisCenter : profileCenter(analysis.xProfile);
+  const focalY = axis === 'vertical' ? axisCenter : profileCenter(analysis.yProfile);
+  const zoom = chooseAdaptiveZoom({ cover, targetWidth, targetHeight, focalX, focalY, safetyXProfile: analysis.safetyXProfile, safetyYProfile: analysis.safetyYProfile });
+  const coverWidth = Math.max(targetWidth, Math.round(cover.coverWidth * zoom));
+  const coverHeight = Math.max(targetHeight, Math.round(cover.coverHeight * zoom));
+  const x = Math.round(Math.max(0, Math.min(coverWidth - targetWidth, focalX * coverWidth - targetWidth / 2)));
+  const y = Math.round(Math.max(0, Math.min(coverHeight - targetHeight, focalY * coverHeight - targetHeight / 2)));
+  const averageLuma = Number(analysis.averageLuma);
+  const brightness = Number.isFinite(averageLuma) ? averageLuma < 82 ? 0.015 : averageLuma < 150 ? 0.008 : averageLuma > 205 ? -0.004 : 0.003 : 0.006;
+  const gamma = Number.isFinite(averageLuma) ? averageLuma < 105 ? 1.025 : averageLuma < 175 ? 1.012 : 1 : 1.01;
+  return { x, y, coverWidth, coverHeight, axis, safe: true, reason: null, retainedFraction, excessFraction, zoom, brightness, gamma, focalX, focalY };
 };

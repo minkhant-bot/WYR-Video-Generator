@@ -1,5 +1,6 @@
 node_modules/
 data/
+output/
 # Regenerated on demand from config/audio-spec.json (see sfx-synth.js) -- deterministic, cheap to
 # rebuild, and fingerprinted against the spec, so the cached wavs don't need to be committed.
 assets/sfx/generated-cache/

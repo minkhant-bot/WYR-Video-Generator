@@ -7,6 +7,7 @@ import { fitOptionText, WYR_TEMPLATE } from './template.js';
 import { assertFontAvailable, resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildSfxSchedule, SFX_EVENT_TYPES } from './audio.js';
 import { getAudioSpec } from './audio-spec.js';
+import { hookAssets } from './hook.js';
 
 const ffmpegPath = resolveFfmpegPath();
 const ffprobePath = resolveFfprobePath();
@@ -41,20 +42,29 @@ const createTextMeasurer = ({ renderDir, font, namespace }) => {
   };
 };
 const activeAlpha = ({ start, fadeIn, end, fadeOut }) => `'clip((t-${start})/${fadeIn},0,1)*clip((${end}-t)/${fadeOut},0,1)'`;
+const framedScaleAndCrop = ({ width, height, crop }) => {
+  const hasCrop = crop && Number.isFinite(crop.coverWidth) && Number.isFinite(crop.coverHeight) && Number.isFinite(crop.x) && Number.isFinite(crop.y);
+  return hasCrop
+    ? `scale=${Math.round(crop.coverWidth)}:${Math.round(crop.coverHeight)},crop=${width}:${height}:${Math.round(crop.x)}:${Math.round(crop.y)}`
+    : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2`;
+};
 // Single-layer, subject-aware framing: scale to fully cover the slot (preserving aspect ratio, never
 // stretching) and crop exactly once. When a `crop` offset was already computed for this asset (see
-// framing.js/images.js -- the offset that keeps the most on-image detail, biased to protect a
-// head/face on vertical crops), scale to that exact cover size and cut the window at that offset. If
+// framing.js/images.js -- the food-centered offset plus any safe adaptive zoom), scale to that exact
+// source-derived cover size and cut the window at that offset. If
 // no crop was computed (e.g. a locked asset from an older run, or a test double), fall back to a
 // plain centered crop -- still single-layer, still no blur/letterbox, just not subject-aware.
 export const buildFramedImageChain = ({ input, width, height, fps, outLabel, chainId, crop = null }) => {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new TypeError('Framed image chain requires a positive width and height.');
-  const hasCrop = crop && Number.isFinite(crop.coverWidth) && Number.isFinite(crop.coverHeight) && Number.isFinite(crop.x) && Number.isFinite(crop.y);
-  const scaleAndCrop = hasCrop
-    ? `scale=${Math.round(crop.coverWidth)}:${Math.round(crop.coverHeight)},crop=${width}:${height}:${Math.round(crop.x)}:${Math.round(crop.y)}`
-    : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2`;
+  const scaleAndCrop = framedScaleAndCrop({ width, height, crop });
+  const brightness = Number.isFinite(crop?.brightness) ? Math.max(-0.01, Math.min(0.02, crop.brightness)) : 0.006;
+  const gamma = Number.isFinite(crop?.gamma) ? Math.max(0.98, Math.min(1.03, crop.gamma)) : 1.01;
+  // A deliberately restrained, identical food-photo treatment for both slots. gamma_weight keeps
+  // the small midtone lift away from highlights; the low unsharp amount restores crispness lost in
+  // scaling without producing visible halos.
+  const enhancement = `eq=saturation=1.07:contrast=1.025:brightness=${brightness.toFixed(3)}:gamma=${gamma.toFixed(3)}:gamma_weight=0.85,unsharp=5:5:0.30:3:3:0`;
   return [
-    `[${input}]loop=loop=-1:size=1:start=0,setpts=N/${fps}/TB,${scaleAndCrop},setsar=1,format=rgba[${outLabel}]`,
+    `[${input}]loop=loop=-1:size=1:start=0,setpts=N/${fps}/TB,${scaleAndCrop},${enhancement},setsar=1,format=rgba[${outLabel}]`,
   ];
 };
 export const buildStillImageInputArgs = (localPath, fps = WYR_TEMPLATE.canvas.fps) => {
@@ -85,6 +95,9 @@ const renderSegment = async ({ question, nextQuestion = null, assets, index, dur
   let naText = null; let nbText = null;
   if (nextQuestion) { naText = `${prefix}-next-a.txt`; nbText = `${prefix}-next-b.txt`; fs.writeFileSync(naText, naFit.text); fs.writeFileSync(nbText, nbFit.text); }
   const { canvas, layout, timing, typography } = WYR_TEMPLATE;
+  const foodVisualStyle = String(question.category || '').trim().toLowerCase() === 'food';
+  const paperColor = foodVisualStyle ? layout.foodPaperColor : layout.paperColor;
+  const paperNoiseStrength = foodVisualStyle ? layout.foodPaperNoiseStrength : layout.paperNoiseStrength;
   const output = path.join(renderDir, `segment-${String(index).padStart(2, '0')}.mp4`);
   const contentEnd = timeline?.contentEnd ?? Math.min(timing.transitionOutStart, duration - timing.transitionOutDuration);
   const revealTime = timeline?.revealTime ?? timing.percentageReveal;
@@ -142,7 +155,7 @@ const renderSegment = async ({ question, nextQuestion = null, assets, index, dur
     // pattern from ffmpeg's noise filter -- 'u' without 't' keeps the same grain on every frame
     // instead of flickering film-grain static, and restricting it to c0 (luma) avoids the colored
     // speckling that noising the chroma planes of a yuv420p frame would cause.
-    `color=c=${layout.paperColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},format=yuv420p,noise=c0s=${layout.paperNoiseStrength}:c0f=u[base]`,
+    `color=c=${paperColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},format=yuv420p,noise=c0s=${paperNoiseStrength}:c0f=u[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
     ...(nextQuestion ? [
@@ -197,7 +210,7 @@ export const buildConcatSegmentList = ({ segments, timeline, gapSegmentPath }) =
   return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapPathFor(index)] : [segment]);
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, hook: plan.hook ? { ...plan.hook, timeline: timeline?.hook || null } : null, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
 const assertReadableNonEmptyFile = (localPath, label) => {
@@ -251,6 +264,128 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
     completed += 1; onProgress?.(completed, plan.questions.length); return segment;
   });
 };
+
+const HOOK_ANALYSIS_WIDTH = 320;
+const HOOK_ANALYSIS_HEIGHT = 200;
+const HOOK_SUBJECT_PADDING = 0.12;
+
+const percentile = (values, fraction) => values[Math.floor((values.length - 1) * fraction)];
+const medianChannel = (samples, channel) => {
+  const values = samples.map(sample => sample[channel]).sort((left, right) => left - right);
+  return values[Math.floor(values.length / 2)];
+};
+
+// Hook-only normalization for the already-approved isolated-food style. Estimate the canvas color
+// from the four corners, find the non-background food pixels, then return a padded crop with the
+// same aspect ratio as a collage cell. Quantiles ignore isolated JPEG/noise pixels; expanding the
+// detected bounds before fitting the cell ensures the food is never clipped. A non-isolated fallback
+// naturally resolves to the full frame because most pixels differ from the corner background.
+export const computeHookSubjectCropFromRgb = ({ buffer, width = HOOK_ANALYSIS_WIDTH, height = HOOK_ANALYSIS_HEIGHT, outputWidth = WYR_TEMPLATE.layout.imageWidth, outputHeight = WYR_TEMPLATE.layout.imageHeight, tileWidth = 460, tileHeight = 288 }) => {
+  if (!Buffer.isBuffer(buffer) || buffer.length < width * height * 3) return null;
+  const cornerSize = Math.max(4, Math.round(Math.min(width, height) * 0.06));
+  const corners = [];
+  for (const [startX, startY] of [[0, 0], [width - cornerSize, 0], [0, height - cornerSize], [width - cornerSize, height - cornerSize]]) {
+    for (let y = startY; y < startY + cornerSize; y += 1) for (let x = startX; x < startX + cornerSize; x += 1) {
+      const offset = (y * width + x) * 3;
+      corners.push([buffer[offset], buffer[offset + 1], buffer[offset + 2]]);
+    }
+  }
+  const background = [medianChannel(corners, 0), medianChannel(corners, 1), medianChannel(corners, 2)];
+  const backgroundLuma = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2];
+  const xs = []; const ys = [];
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const offset = (y * width + x) * 3; const r = buffer[offset]; const g = buffer[offset + 1]; const b = buffer[offset + 2];
+    const colorDistance = Math.hypot(r - background[0], g - background[1], b - background[2]);
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (colorDistance > 18 || luma < backgroundLuma - 16) { xs.push(x); ys.push(y); }
+  }
+  if (xs.length < width * height * 0.002) return null;
+  xs.sort((left, right) => left - right); ys.sort((left, right) => left - right);
+  let left = percentile(xs, 0.005); let right = percentile(xs, 0.995);
+  let top = percentile(ys, 0.005); let bottom = percentile(ys, 0.995);
+  const subjectWidth = Math.max(1, right - left + 1); const subjectHeight = Math.max(1, bottom - top + 1);
+  left -= subjectWidth * HOOK_SUBJECT_PADDING; right += subjectWidth * HOOK_SUBJECT_PADDING;
+  top -= subjectHeight * HOOK_SUBJECT_PADDING; bottom += subjectHeight * HOOK_SUBJECT_PADDING;
+  let cropWidth = right - left + 1; let cropHeight = bottom - top + 1;
+  const targetAspect = tileWidth / tileHeight;
+  if (cropWidth / cropHeight > targetAspect) cropHeight = cropWidth / targetAspect;
+  else cropWidth = cropHeight * targetAspect;
+  cropWidth = Math.min(width, cropWidth); cropHeight = Math.min(height, cropHeight);
+  const centerX = (left + right) / 2; const centerY = (top + bottom) / 2;
+  const startX = Math.max(0, Math.min(width - cropWidth, centerX - cropWidth / 2));
+  const startY = Math.max(0, Math.min(height - cropHeight, centerY - cropHeight / 2));
+  const scaleX = outputWidth / width; const scaleY = outputHeight / height;
+  const crop = { x: Math.round(startX * scaleX), y: Math.round(startY * scaleY), width: Math.round(cropWidth * scaleX), height: Math.round(cropHeight * scaleY) };
+  if (crop.width >= outputWidth * 0.96 && crop.height >= outputHeight * 0.96) return null;
+  return crop;
+};
+
+const readHookAnalysisFrame = ({ asset, width = WYR_TEMPLATE.layout.imageWidth, height = WYR_TEMPLATE.layout.imageHeight }) => new Promise((resolve, reject) => {
+  const scaleAndCrop = framedScaleAndCrop({ width, height, crop: asset.framing });
+  const child = spawn(ffmpegPath, ['-hide_banner', '-v', 'error', '-i', asset.localPath, '-vf', `${scaleAndCrop},scale=${HOOK_ANALYSIS_WIDTH}:${HOOK_ANALYSIS_HEIGHT}:flags=area,format=rgb24`, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks = []; let stderr = '';
+  child.stdout.on('data', chunk => chunks.push(chunk));
+  child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-4000); });
+  child.once('error', reject);
+  child.once('close', code => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`Hook subject analysis exited with code ${code}: ${stderr}`)));
+});
+
+const measureHookSubjectCrop = async ({ asset, tileWidth, tileHeight }) => {
+  try {
+    const buffer = await readHookAnalysisFrame({ asset });
+    return computeHookSubjectCropFromRgb({ buffer, tileWidth, tileHeight });
+  } catch {
+    // Image selection has already validated the asset. If hook-only analysis is unavailable, retain
+    // its existing framing instead of turning a cosmetic normalization into a render failure.
+    return null;
+  }
+};
+
+const renderHookVisual = async ({ plan, assets, renderDir, duration, output, ffmpegThreads = 4, still = false }) => {
+  const selected = hookAssets(assets, 4);
+  if (!plan.hook || selected.length < 2) throw new Error('A hook title and at least two validated food images are required.');
+  fs.mkdirSync(renderDir, { recursive: true });
+  const font = assertFontAvailable(); const titleFile = path.join(renderDir, 'hook-title.txt');
+  fs.writeFileSync(titleFile, plan.hook.title);
+  const measureText = createTextMeasurer({ renderDir, font, namespace: 'hook' });
+  const titleFit = await fitOptionText({ text: plan.hook.title, measureText, maxWidth: 920, maxHeight: 170, preferredFontSize: 76, minimumFontSize: 52 });
+  fs.writeFileSync(titleFile, titleFit.text);
+  const twoImageLayout = selected.length === 2;
+  const tileWidth = twoImageLayout ? 860 : 460; const tileHeight = twoImageLayout ? 538 : 288;
+  const positions = twoImageLayout
+    ? [[110, 650], [110, 1200]]
+    : selected.length === 3 ? [[60, 680], [560, 680], [310, 1000]] : [[60, 680], [560, 680], [60, 1000], [560, 1000]];
+  const subjectCrops = await Promise.all(selected.map(asset => measureHookSubjectCrop({ asset, tileWidth, tileHeight })));
+  const chains = selected.flatMap((asset, index) => [
+    ...buildFramedImageChain({ input: `${index}:v`, width: WYR_TEMPLATE.layout.imageWidth, height: WYR_TEMPLATE.layout.imageHeight, fps: WYR_TEMPLATE.canvas.fps, outLabel: `hookfull${index}`, chainId: `hook${index}`, crop: asset.framing }),
+    subjectCrops[index]
+      ? `[hookfull${index}]crop=${subjectCrops[index].width}:${subjectCrops[index].height}:${subjectCrops[index].x}:${subjectCrops[index].y},scale=${tileWidth}:${tileHeight}[hooktile${index}]`
+      : `[hookfull${index}]scale=${tileWidth}:${tileHeight}[hooktile${index}]`,
+  ]);
+  const baseDuration = Math.max(0.04, duration);
+  const overlays = selected.map((_, index) => {
+    const input = index === 0 ? 'hookbase' : `hookoverlay${index - 1}`;
+    const outputLabel = index === selected.length - 1 ? 'hookimages' : `hookoverlay${index}`;
+    return `[${input}][hooktile${index}]overlay=x=${positions[index][0]}:y=${positions[index][1]}:format=auto[${outputLabel}]`;
+  });
+  const filter = [
+    ...chains,
+    `color=c=${WYR_TEMPLATE.layout.foodPaperColor}:s=1080x1920:r=30:d=${baseDuration},format=yuv420p[hookbase]`,
+    ...overlays,
+    `[hookimages]drawtext=fontfile=${font}:text='THIS OR THAT':fontsize=108:fontcolor=black:x=(w-text_w)/2:y=245,drawtext=fontfile=${font}:textfile='${filterPath(titleFile)}':expansion=none:fontsize=${titleFit.fontSize}:line_spacing=${WYR_TEMPLATE.typography.lineSpacing}:fontcolor=black:x=(w-text_w)/2:y=420+(170-text_h)/2,setrange=limited,format=yuv420p[hookout]`,
+  ].join(';');
+  const inputs = selected.flatMap(asset => buildStillImageInputArgs(asset.localPath));
+  const args = ['-y', ...inputs, '-filter_complex', filter, '-map', '[hookout]', '-an'];
+  if (still) args.push('-frames:v', '1', output);
+  else {
+    const encode = getAudioSpec().encode;
+    args.push('-r', '30', '-c:v', 'libx264', '-threads', String(ffmpegThreads), '-preset', 'veryfast', '-profile:v', encode.profile, '-level', encode.level, '-b:v', encode.videoBitrate, '-maxrate', encode.maxrate, '-bufsize', encode.bufsize, '-t', String(duration), output);
+  }
+  await run(ffmpegPath, args, still ? 'render hook preview' : 'render hook segment');
+  return output;
+};
+
+export const renderHookPreviewFrame = ({ plan, assets, workspace, output = path.join(workspace, 'hook-preview.png') }) => renderHookVisual({ plan, assets, renderDir: path.join(workspace, 'hook-preview-render'), duration: 0.04, output, still: true });
 // Pure (no ffmpeg spawn) construction of the narration+SFX mix filter graph -- deliberately
 // extracted from renderVideo so the input ordering, adelay timestamps, and amix label wiring can
 // be verified deterministically in tests against ANY scene count, without needing a real ffmpeg
@@ -261,15 +396,19 @@ export const renderSceneSegments = async ({ plan, assets, duration, timeline, re
 // weights is what
 // keeps narration and SFX at their intended target levels instead of amix auto-attenuating
 // everything as more inputs are added.
-export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [], loudnessTarget = getAudioSpec().mix }) => {
+export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes = [], hookVoiceover = null, hookVoiceoverVolume = 1, loudnessTarget = getAudioSpec().mix }) => {
   const inputOrder = ['video'];
   const filters = [`anullsrc=r=48000:cl=stereo,atrim=duration=${totalDuration}[bed]`];
   const mixLabels = ['[bed]'];
+  if (hookVoiceover) {
+    const hookInputIndex = inputOrder.length; inputOrder.push('hookVoiceover');
+    filters.push(`[${hookInputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${hookVoiceoverVolume},adelay=delays=0:all=1[hookvoice]`); mixLabels.push('[hookvoice]');
+  }
   for (let index = 0; index < voiceoverCount; index += 1) {
-    inputOrder.push(`voiceover${index}`);
+    const inputIndex = inputOrder.length; inputOrder.push(`voiceover${index}`);
     const delay = Math.round((timeline.scenes[index].start + timeline.scenes[index].voiceStart) * 1000);
     const volume = voiceoverVolumes[index] ?? 1;
-    filters.push(`[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${volume},adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
+    filters.push(`[${inputIndex}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${volume},adelay=delays=${delay}:all=1[v${index}]`); mixLabels.push(`[v${index}]`);
   }
   const sfxInputIndexByType = {};
   for (const type of SFX_EVENT_TYPES) {
@@ -302,24 +441,29 @@ export const buildAudioMixPlan = ({ voiceoverCount, timeline, sfx, schedule, cou
   return { inputOrder, filters, mixLabels, sfxInputIndexByType, countdownInputIndex };
 };
 
-export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, narrationPeakDbfs = -3 }) => {
+export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers = [], hookVoiceover = null, sfx = null, sfxSchedule = null, countdownSchedule = null, workspace, sceneConcurrency = 2, ffmpegThreads = 4, onProgress, narrationPeakDbfs = -3 }) => {
   assertLockedImageAssets(assets);
   const renderDir = path.join(workspace, 'render');
   const segments = await renderSceneSegments({ plan, assets, duration, timeline, renderDir, sceneConcurrency, ffmpegThreads, onProgress });
   const gapIndices = timeline?.scenes ? timeline.scenes.flatMap((scene, index) => scene.gapAfter > 0 ? [index] : []) : [];
   const gapSegmentByIndex = {};
   for (const index of gapIndices) gapSegmentByIndex[index] = await buildFreezeGapSegment({ renderDir, sourceSegment: segments[index], seconds: timeline.blankGapSeconds, index, ffmpegThreads });
-  const concatSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath: index => gapSegmentByIndex[index] });
+  const questionSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath: index => gapSegmentByIndex[index] });
+  const hookSegment = plan.hook ? await renderHookVisual({ plan, assets, renderDir, duration: timeline.hook.duration, output: path.join(renderDir, 'hook.mp4'), ffmpegThreads }) : null;
+  const concatSegments = hookSegment ? [hookSegment, ...questionSegments] : questionSegments;
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${concatSegments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
   if (voiceovers.length || (timeline && sfx)) {
     assertProductionAudioInputs({ plan, voiceovers, timeline, sfx });
+    if (plan.hook) assertReadableNonEmptyFile(hookVoiceover?.localPath, 'hook voiceover');
     const schedule = sfxSchedule || buildSfxSchedule(timeline); assertCompleteSfxSchedule({ timeline, events: schedule.events });
     const countdown = countdownSchedule || buildCountdownSchedule(timeline); assertCompleteCountdownSchedule({ timeline, events: countdown.events });
     const voiceoverVolumes = computeNarrationVolumes(voiceovers, narrationPeakDbfs);
-    const mixPlan = buildAudioMixPlan({ voiceoverCount: voiceovers.length, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes });
+    const hookVoiceoverVolume = hookVoiceover ? computeNarrationVolumes([hookVoiceover], narrationPeakDbfs)[0] : 1;
+    const mixPlan = buildAudioMixPlan({ voiceoverCount: voiceovers.length, timeline, sfx, schedule, countdown, totalDuration, voiceoverVolumes, hookVoiceover, hookVoiceoverVolume });
     const inputs = ['-y', '-i', silentVideo];
+    if (hookVoiceover) inputs.push('-i', hookVoiceover.localPath);
     for (const voiceover of voiceovers) inputs.push('-i', voiceover.localPath);
     for (const type of SFX_EVENT_TYPES) inputs.push('-i', sfx[type].localPath);
     inputs.push('-i', sfx.countdownSequence.localPath);

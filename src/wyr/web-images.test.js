@@ -24,6 +24,36 @@ test('DuckDuckGo provider preserves web-wide provenance and marks rights unknown
   assert.equal(candidates[0].license, 'unknown'); assert.match(candidates[0].usageRights, /verify with the source owner/);
 });
 
+test('food-photo searches prefer literal full-resolution Wikimedia Commons files without weakening web fallback', async () => {
+  let duckRequests = 0;
+  const pages = Object.fromEntries(Array.from({ length: 5 }, (_, index) => [index + 1, {
+    title: `File:Fried chicken plate ${index + 1}.jpg`,
+    imageinfo: [{ width: 2400, height: 1600, mime: 'image/jpeg', url: `https://upload.wikimedia.org/chicken-${index + 1}.jpg`, descriptionurl: `https://commons.wikimedia.org/wiki/File:Chicken-${index + 1}.jpg`, extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, LicenseUrl: { value: 'https://creativecommons.org/licenses/by-sa/4.0/' } } }],
+  }]));
+  const provider = new DuckDuckGoImageProvider({ fetcher: async url => {
+    if (String(url).startsWith('https://commons.wikimedia.org/')) return new Response(JSON.stringify({ query: { pages } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    duckRequests += 1; throw new Error('DuckDuckGo must not be needed when Commons has enough literal food photos');
+  } });
+  const candidates = await provider.search('fried chicken plated dish close up no people');
+  assert.equal(candidates.length, 5);
+  assert.equal(candidates.every(candidate => candidate.providerSource === 'Wikimedia Commons'), true);
+  assert.equal(candidates.every(candidate => candidate.width === 2400 && candidate.sourceDomain === 'commons.wikimedia.org'), true);
+  assert.equal(duckRequests, 0);
+});
+
+test('isolated FOOD searches ask Commons for the literal subject on a white background', async () => {
+  let requestUrl = '';
+  const pages = { 1: { title: 'File:Croissant white background.jpg', imageinfo: [{ width: 2000, height: 1200, mime: 'image/jpeg', url: 'https://upload.wikimedia.org/croissant.jpg' }] } };
+  const provider = new DuckDuckGoImageProvider({ fetcher: async url => {
+    requestUrl = String(url);
+    return new Response(JSON.stringify({ query: { pages } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const candidates = await provider.search('croissant isolated white background product photo no people');
+  assert.match(decodeURIComponent(requestUrl), /gsrsearch=croissant\+white\+background/);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].providerSource, 'Wikimedia Commons');
+});
+
 test('DuckDuckGo provider detects CAPTCHA and HTTP blocking without retrying', async () => {
   let calls = 0;
   const captcha = new DuckDuckGoImageProvider({ fetcher: async () => { calls += 1; return new Response('Verify you are human CAPTCHA', { status: 200 }); } });

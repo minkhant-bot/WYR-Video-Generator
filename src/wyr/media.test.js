@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertLockedImageAssets, buildAudioMixPlan, buildConcatSegmentList, buildFramedImageChain, buildStillImageInputArgs, DurationVerificationError, measureIntegratedLoudness, renderSceneSegments, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
+import { assertLockedImageAssets, buildAudioMixPlan, buildConcatSegmentList, buildFramedImageChain, buildStillImageInputArgs, computeHookSubjectCropFromRgb, DurationVerificationError, measureIntegratedLoudness, renderSceneSegments, renderVideo, SHORTS_DURATION_LIMIT_SECONDS, verifyVideo } from './media.js';
 import { buildCountdownSchedule, buildSceneTimeline, buildSfxSchedule, createLocalSfx, SFX_EVENT_TYPES } from './audio.js';
 import { resolveFfmpegPath, resolveFfprobePath } from './runtime.js';
 import { WYR_TEMPLATE } from './template.js';
@@ -21,6 +21,18 @@ const measureRmsDb = (mediaPath, startSeconds, windowSeconds) => {
   const last = matches[matches.length - 1][1];
   return last === '-inf' ? -Infinity : Number(last);
 };
+
+test('hook subject normalization enlarges a small isolated food without clipping its bounds', () => {
+  const width = 320; const height = 200; const buffer = Buffer.alloc(width * height * 3, 255);
+  for (let y = 82; y <= 132; y += 1) for (let x = 84; x <= 236; x += 1) {
+    const offset = (y * width + x) * 3; buffer[offset] = 120; buffer[offset + 1] = 45; buffer[offset + 2] = 20;
+  }
+  const crop = computeHookSubjectCropFromRgb({ buffer, width, height, outputWidth: 960, outputHeight: 600, tileWidth: 460, tileHeight: 288 });
+  assert.ok(crop.width < 960 && crop.height < 600, 'a compact isolated subject should be enlarged inside its hook cell');
+  assert.ok(crop.x <= 84 * 3 && crop.x + crop.width >= 237 * 3, 'the padded crop must retain the complete horizontal subject extent');
+  assert.ok(crop.y <= 82 * 3 && crop.y + crop.height >= 133 * 3, 'the padded crop must retain the complete vertical subject extent');
+  assert.ok(Math.abs(crop.width / crop.height - 460 / 288) < 0.01, 'the hook crop must preserve the collage-cell aspect ratio');
+});
 
 test('scene rendering enforces concurrency and preserves concat order', async () => {
   const plan = { questions: Array.from({ length: 6 }, (_, index) => ({ index })) };
@@ -80,7 +92,7 @@ test('framed image chain is single-layer: no blur, no letterbox, no foreground/b
   const joined = chain.join(';');
   assert.equal(/gblur|split=2|overlay=/.test(joined), false, `expected no blur/duplicate-layer/overlay compositing in the framing chain; got: ${joined}`);
   // No precomputed crop offset -> falls back to a plain, still single-layer, center crop.
-  assert.match(joined, /^\[0:v\]loop=loop=-1:size=1:start=0,setpts=N\/30\/TB,scale=750:450:force_original_aspect_ratio=increase,crop=750:450:\(iw-750\)\/2:\(ih-450\)\/2,setsar=1,format=rgba\[aimg\]$/);
+  assert.match(joined, /^\[0:v\]loop=loop=-1:size=1:start=0,setpts=N\/30\/TB,scale=750:450:force_original_aspect_ratio=increase,crop=750:450:\(iw-750\)\/2:\(ih-450\)\/2,eq=saturation=1\.07:contrast=1\.025:brightness=0\.006:gamma=1\.010:gamma_weight=0\.85,unsharp=5:5:0\.30:3:3:0,setsar=1,format=rgba\[aimg\]$/);
 });
 
 test('framed image chain applies a precomputed subject-aware crop offset instead of centering', () => {
@@ -88,7 +100,7 @@ test('framed image chain applies a precomputed subject-aware crop offset instead
   const joined = chain.join(';');
   assert.equal(chain.length, 1);
   assert.equal(/gblur|split=2|overlay=/.test(joined), false);
-  assert.match(joined, /scale=900:450,crop=750:450:40:0,setsar=1,format=rgba\[aimg\]/);
+  assert.match(joined, /scale=900:450,crop=750:450:40:0,eq=saturation=1\.07:contrast=1\.025:brightness=0\.006:gamma=1\.010:gamma_weight=0\.85,unsharp=5:5:0\.30:3:3:0,setsar=1,format=rgba\[aimg\]/);
 });
 
 test('subject-aware framing keeps a detected head/subject region inside the rendered crop instead of cutting through it', async () => {

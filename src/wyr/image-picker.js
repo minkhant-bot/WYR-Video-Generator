@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PexelsImageProvider, assessImageCandidate, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
+import { PexelsImageProvider, assessImageCandidate, buildFoodPhotoRecoveryQueries, buildImageQueries as buildFallbackImageQueries, dominantSubjectWordsFor, firstVisualSynonym, inspectDownloadedImage } from './images.js';
 import { fetchWithTimeout, mapWithConcurrency, log, retry } from './utils.js';
 import { buildImageQueries, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 import { isFantasyQuestion } from './content-engine.js';
-import { computeSubjectAwareCrop } from './framing.js';
+import { computeSubjectAwareCrop, renderableCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
 import { GroqContentProvider } from './content.js';
 
@@ -148,6 +148,13 @@ const concreteSubjectQuery = optionText => dominantSubjectWordsFor(optionText).m
 
 const selectionQueries = (option, { category = '', fantasy = false } = {}) => {
   const deterministic = deterministicImageQueries(option, { category });
+  if (String(category || '').trim().toLowerCase() === 'food') {
+    return [...new Set([
+      String(option.searchQuery || '').trim(),
+      ...deterministic,
+      ...buildFoodPhotoRecoveryQueries({ ...option, category }),
+    ].map(query => withFoodSearchContext(query, category)).filter(query => query && query.length >= 3))].slice(0, 8);
+  }
   const built = buildFallbackImageQueries(option);
   const simple = simpleVisualQuery(option);
   const subject = simple.split(' ').slice(-4).join(' ');
@@ -225,6 +232,7 @@ const reviewUsable = candidate =>
   Number(candidate.height) >= 450;
 
 const sortPool = candidates => candidates.sort((a, b) =>
+  (Number(b.foodLiteralQueryRank || 0) - Number(a.foodLiteralQueryRank || 0)) ||
   (b.finalScore - a.finalScore) ||
   (b.relevanceScore - a.relevanceScore) ||
   (b.qualityScore - a.qualityScore) ||
@@ -297,6 +305,7 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
         const checked = assessForReview(candidateForBrowser(raw), {
           text: assessmentText || state.optionText,
           searchQuery: query,
+          category: state.category,
         });
         const key = identity(checked);
         if (seen.has(key)) { state.diagnostics.duplicatesRejected += 1; continue; }
@@ -311,6 +320,9 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
           candidateKey: key,
           providerName: provider.name,
           queryUsed: query,
+          foodLiteralQueryRank: String(state.category || '').trim().toLowerCase() === 'food'
+            ? Math.max(0, 100 - Math.max(0, state.queries.indexOf(query)))
+            : 0,
         });
       }
       sortPool(state.candidates);
@@ -409,7 +421,13 @@ const fillUnfilledSlot = async (state, providers, config, visualQueryProvider = 
   await runTier('tier2_deeper_pages');
   // Tier 3: broadened, dominant-subject-preserving query variants (bare subject, single head noun,
   // generic photographic suffixes) -- never drops the mandatory subject noun(s).
-  if (!state.selectedId) await runTier('tier3_broadened_subject_queries', broadenedSubjectQueries(state.optionText).slice(0, queryRounds + 2));
+  if (!state.selectedId) {
+    const recoveryQueries = [
+      ...broadenedSubjectQueries(state.optionText),
+      ...buildFoodPhotoRecoveryQueries({ text: state.optionText, searchQuery: state.optionText, category: state.category }),
+    ];
+    await runTier('tier3_broadened_subject_queries', [...new Set(recoveryQueries)].slice(0, queryRounds + 2));
+  }
   // Tier 4: one further round on top of tier 3's now-larger query set, in case a genuinely usable
   // candidate exists but only turns up on a later page of the broadened queries themselves.
   if (!state.selectedId) await runTier('tier4_broadened_deeper_pages');
@@ -557,10 +575,16 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         // Tier 0's queries: the hand-written DB searchQuery first when present (never pre-empted
         // by a rule-derived guess), then buildImageQueries' short literal fallback queries. The
         // older/broader selectionQueries list is only appended if Tier 0 comes up short.
-        queries: [...new Set([
-          withFoodSearchContext(option.searchQuery, question.category),
-          ...buildImageQueries(option.visualSubject || option.text, question.category),
-        ].map(query => withFoodSearchContext(query, question.category)).filter(Boolean))],
+        queries: [...new Set((String(question.category || '').trim().toLowerCase() === 'food'
+          ? [
+              ...buildImageQueries(option.visualSubject || option.text, question.category),
+              withFoodSearchContext(option.searchQuery, question.category),
+            ]
+          : [
+              withFoodSearchContext(option.searchQuery, question.category),
+              ...buildImageQueries(option.visualSubject || option.text, question.category),
+            ])
+          .map(query => withFoodSearchContext(query, question.category)).filter(Boolean))],
         queryIndex: 0,
         providerIndex: 0,
         pages: {},
@@ -696,11 +720,11 @@ const downloadAndValidateCandidate = async ({ candidate, provider, item, assetsD
   const localPath = path.join(assetsDir, filename);
   try {
     await provider.downloadAsset(candidate, localPath);
-    const inspection = await inspectDownloadedImage(localPath);
+    const inspection = await inspectDownloadedImage(localPath, { foodMode: String(item.category || '').trim().toLowerCase() === 'food' });
     if (!inspection.valid) throw new Error(`failed validation: ${inspection.reasons.join('; ')}`);
     const framing = await computeCrop({ localPath, sourceWidth: inspection.width, sourceHeight: inspection.height, targetWidth: WYR_TEMPLATE.layout.imageWidth, targetHeight: WYR_TEMPLATE.layout.imageHeight });
     if (!framing?.safe) throw new Error(framing?.reason || 'framing rejected: could not compute a safe crop for this image');
-    return { localPath, filename, framing: { x: framing.x, y: framing.y, coverWidth: framing.coverWidth, coverHeight: framing.coverHeight } };
+    return { localPath, filename, framing: renderableCrop(framing) };
   } catch (error) {
     fs.rmSync(localPath, { force: true });
     throw error;
@@ -783,7 +807,10 @@ export const downloadSelectedCandidates = async ({ selection, assetsDir, config,
       // audit: failed downloads and framing rejections must trigger replacement searches, not an
       // immediate failure). Broaden to subject-preserving queries -- guaranteed to still satisfy
       // the dominant-subject gate -- for one more bounded round before finally giving up.
-      const extraQueries = broadenedSubjectQueries(item.optionText)
+      const extraQueries = [
+        ...broadenedSubjectQueries(item.optionText),
+        ...buildFoodPhotoRecoveryQueries({ text: item.optionText, searchQuery: item.optionText, category: state.category }),
+      ]
         .map(query => withFoodSearchContext(query, state.category))
         .filter(query => !(state.queries || []).includes(query));
       if (extraQueries.length) {

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assessImageCandidate, buildAlternateImageQueries, buildImageQueries, classifyImageStats, compareImageCandidates, computeFlatBackgroundFraction, createImageReviewArtifacts, findAndDownloadImages, inspectDownloadedImage, lockSelectedImageAssets, readGrayscaleHistogram } from './images.js';
+import { assessImageCandidate, buildAlternateImageQueries, buildFoodPhotoRecoveryQueries, buildImageQueries, classifyImageStats, compareImageCandidates, computeFlatBackgroundFraction, createImageReviewArtifacts, findAndDownloadImages, inspectDownloadedImage, lockSelectedImageAssets, readGrayscaleHistogram } from './images.js';
 import { assertFontAvailable, resolveFfmpegPath } from './runtime.js';
 import { buildNarration } from './audio.js';
 
@@ -102,6 +102,27 @@ test('strong specific Pexels visual passes and a specific photograph is not reje
   assert.ok(assessment.qualityScore >= 72);
 });
 
+test('FOOD isolated product photography outranks an equally relevant photo with a visible table background', () => {
+  const option = { text: 'Croissant', searchQuery: 'Croissant', category: 'food' };
+  const isolated = assessImageCandidate({ id: 'isolated', width: 1800, height: 1200, alt: 'croissant isolated product photo close up on white background', downloadUrl: 'https://images.test/croissant-isolated.jpg' }, option);
+  const table = assessImageCandidate({ id: 'table', width: 1800, height: 1200, alt: 'croissant food photograph on a rustic wooden table in a room interior', downloadUrl: 'https://images.test/croissant-table.jpg' }, option);
+  assert.equal(isolated.accepted, true, isolated.rejectionReasons.join('; '));
+  assert.equal(table.accepted, true, table.rejectionReasons.join('; '));
+  assert.ok(isolated.finalScore > table.finalScore, `${isolated.finalScore} should outrank ${table.finalScore}`);
+});
+
+test('FOOD isolated photos may use transparent-looking backgrounds without being classified as non-photographic art', () => {
+  const assessment = assessImageCandidate({ id: 'cutout', width: 1800, height: 1200, alt: 'croissant real food photography png cutout transparent background', downloadUrl: 'https://images.test/croissant.png' }, { text: 'Croissant', searchQuery: 'Croissant', category: 'food' });
+  assert.equal(assessment.accepted, true, assessment.rejectionReasons.join('; '));
+  assert.equal(assessment.hardRejected, false);
+});
+
+test('FOOD pixel validation permits a substantial isolated subject on a clean field but retains the general flat-background guard', () => {
+  const stats = { width: 1600, height: 1000, yMin: 18, yMax: 255, yAvg: 218, edgeYAvg: 0.8, stdev: 42, flatBackgroundFraction: 0.8 };
+  assert.equal(classifyImageStats(stats).valid, false);
+  assert.equal(classifyImageStats(stats, { foodMode: true }).valid, true);
+});
+
 test('a fantasy illustration is accepted and not penalized merely for being illustration or AI-generated', () => {
   const option = { text: 'Befriend a Dragon' };
   const illustration = assessImageCandidate({ id: 'dragon-art', width: 2400, height: 1400, alt: 'digital fantasy art illustration of a person petting a friendly dragon', downloadUrl: 'https://images.test/dragon-art.jpg' }, option);
@@ -142,6 +163,98 @@ test('candidate relevance gate rejects weak, undersized, and watermarked results
   assert.match(screenshot.rejectionReasons.join(' '), /screenshot/);
   const sexualized = assessImageCandidate({ id: 'adult', width: 2400, height: 1400, alt: 'sexy woman petting a dragon', downloadUrl: 'https://images.test/dragon.jpg' }, option);
   assert.match(sexualized.rejectionReasons.join(' '), /inappropriate/);
+});
+
+test('FOOD sample failure classes are hard-rejected before download: regional Getty previews, embedded-text thumbnails, and cooking-game graphics', () => {
+  const option = { text: 'Spicy Curry', searchQuery: 'spicy curry dish', category: 'food' };
+  const getty = assessImageCandidate({ id: 'getty', width: 1600, height: 900, alt: 'street food cart at night', sourceDomain: 'www.gettyimages.co.uk', sourcePageUrl: 'https://www.gettyimages.co.uk/detail/photo/example', downloadUrl: 'https://media.gettyimages.com/id/123/photo/example.jpg?w=gi' }, option);
+  const editorial = assessImageCandidate({ id: 'editorial', width: 1600, height: 900, alt: 'What if we only eat spicy food?', sourceDomain: 'example.org', downloadUrl: 'https://example.org/what-if-we-eat-spicy-food.jpg' }, option);
+  const game = assessImageCandidate({ id: 'game', width: 1920, height: 1080, alt: 'Kitchen Crush jeux de cuisine restaurant Master Chef Game', sourceDomain: 'amazon.fr', downloadUrl: 'https://example.org/kitchen-game.jpg' }, { text: 'Spicy Curry', searchQuery: 'spicy curry', category: 'food' });
+  const product = assessImageCandidate({ id: 'cart-product', width: 1600, height: 900, alt: 'Amazon.com: packaged spicy curry product listing', sourceDomain: 'www.amazon.com', sourcePageUrl: 'https://www.amazon.com/example/dp/B123', downloadUrl: 'https://m.media-amazon.com/images/example.jpg' }, { text: 'Spicy Curry', searchQuery: 'spicy curry', category: 'food' });
+  assert.equal(getty.hardRejected, true); assert.match(getty.hardRejectionReasons.join(' '), /watermark/);
+  assert.equal(editorial.hardRejected, true); assert.match(editorial.hardRejectionReasons.join(' '), /embedded-text/);
+  assert.equal(game.hardRejected, true); assert.match(game.hardRejectionReasons.join(' '), /game\/app/);
+  assert.equal(product.hardRejected, true); assert.match(product.hardRejectionReasons.join(' '), /art, emoji, or marketplace|product-packaging/);
+});
+
+test('FOOD candidates reject the four observed false-positive classes while preserving literal dish photos', () => {
+  const cases = [
+    [{ text: 'Fried Chicken', searchQuery: 'Fried Chicken', category: 'food' }, { id: 'nightcafe', width: 1600, height: 900, alt: 'A bucket of fried chicken - Surreal Fried Chicken Scene', sourceDomain: 'creator.nightcafe.studio', downloadUrl: 'https://images.nightcafe.studio/fried-chicken.jpg' }],
+    [{ text: 'Sushi', searchQuery: 'Sushi', category: 'food' }, { id: 'fine-art', width: 1600, height: 900, alt: 'A Cinematic Production Still Of A Sushi Bar', sourceDomain: 'fineartamerica.com', downloadUrl: 'https://images.fineartamerica.com/sushi-bar.jpg' }],
+    [{ text: 'Cheesecake', searchQuery: 'Cheesecake', category: 'food' }, { id: 'wedding', width: 1600, height: 900, alt: 'Cinematic Wedding Films - The Cheesecake Project - Wedding Photography', sourceDomain: 'thecheesecakeproject.com', downloadUrl: 'https://example.test/wedding.jpg' }],
+    [{ text: 'Tiramisu', searchQuery: 'Tiramisu', category: 'food' }, { id: 'emoji', width: 1600, height: 900, alt: 'Tiramisu cinematic realistic dessert emoji', sourceDomain: 'www.emojis.com', downloadUrl: 'https://imgproxy.attic.sh/tiramisu.jpg' }],
+  ];
+  for (const [option, candidate] of cases) {
+    const result = assessImageCandidate(candidate, option);
+    assert.equal(result.accepted, false, `${option.text} false positive must be rejected`);
+    assert.equal(result.hardRejected, true);
+  }
+
+  for (const label of ['Fried Chicken', 'Sushi', 'Cheesecake', 'Tiramisu']) {
+    const result = assessImageCandidate({ id: label, width: 2400, height: 1400, alt: `clear photograph of ${label} plated dish close up`, sourceDomain: 'pexels.com', downloadUrl: `https://images.pexels.com/${encodeURIComponent(label)}.jpg` }, { text: label, searchQuery: label, category: 'food' });
+    assert.equal(result.accepted, true, result.rejectionReasons.join('; '));
+  }
+  const packaged = assessImageCandidate({ id: 'retail-box', width: 2400, height: 1400, alt: 'Farm Rich Breaded Mozzarella Cheese Sticks 48 oz Frozen Snacks', sourceDomain: 'www.walmart.com', downloadUrl: 'https://i5.walmartimages.com/mozzarella-sticks.jpeg' }, { text: 'Mozzarella Sticks', searchQuery: 'Mozzarella Sticks', category: 'food' });
+  assert.equal(packaged.hardRejected, true);
+  assert.match(packaged.hardRejectionReasons.join(' '), /marketplace/);
+
+  const transparentCutout = assessImageCandidate({ id: 'cutout', width: 2400, height: 1400, alt: 'Chicken wings transparent PNG cutout', sourceDomain: 'citypng.com', downloadUrl: 'https://citypng.com/chicken-wings.png' }, { text: 'Chicken Wings', searchQuery: 'Chicken Wings', category: 'food' });
+  assert.equal(transparentCutout.hardRejected, true);
+  assert.match(transparentCutout.hardRejectionReasons.join(' '), /non-photographic|art, emoji, or marketplace/);
+
+  const brandedNewsImage = assessImageCandidate({ id: 'brand', width: 2400, height: 1400, alt: 'Burger King launches a new cheeseburger', sourceDomain: 'abc11.com', downloadUrl: 'https://cdn.abc11.com/burger-king.jpg' }, { text: 'Cheeseburger', searchQuery: 'Cheeseburger', category: 'food' });
+  assert.equal(brandedNewsImage.hardRejected, true);
+  assert.match(brandedNewsImage.hardRejectionReasons.join(' '), /marketplace or product-packaging/);
+
+  const wrongMixedDish = assessImageCandidate({ id: 'poutine', width: 2400, height: 1400, alt: 'Mozzarella sticks and tater tots poutine covered in gravy', sourceDomain: 'commons.wikimedia.org', downloadUrl: 'https://upload.wikimedia.org/poutine.jpg' }, { text: 'Mozzarella Sticks', searchQuery: 'Mozzarella Sticks', category: 'food' });
+  assert.equal(wrongMixedDish.hardRejected, true);
+  assert.match(wrongMixedDish.hardRejectionReasons.join(' '), /conflicting dish/);
+
+  const mislabeledWallpaper = assessImageCandidate({ id: 'wallpaper', width: 2400, height: 1400, alt: 'tiramisu 4k wallpapers backgrounds free download', sourceDomain: 'wallpapercrafter.com', downloadUrl: 'https://wallpapercrafter.com/fresh-fruit-cake-food-tiramisu.jpg' }, { text: 'Tiramisu', searchQuery: 'Tiramisu', category: 'food' });
+  assert.equal(mislabeledWallpaper.hardRejected, true);
+  assert.match(mislabeledWallpaper.hardRejectionReasons.join(' '), /non-photographic|art, emoji, or marketplace/);
+
+  const ambiguousDessert = assessImageCandidate({ id: 'affogato', width: 2400, height: 1400, alt: "Rhubarb and ginger 'tiramisu'", sourceDomain: 'bbc.co.uk', downloadUrl: 'https://ichef.bbci.co.uk/tiramisu_affogato.jpg' }, { text: 'Tiramisu', searchQuery: 'Tiramisu', category: 'food' });
+  assert.equal(ambiguousDessert.hardRejected, true);
+  assert.match(ambiguousDessert.hardRejectionReasons.join(' '), /conflicting dish/);
+
+  const storefrontNamedForFood = assessImageCandidate({ id: 'shop', width: 2772, height: 1716, alt: 'Belgian Waffles, RR Nagar (2024)', sourceDomain: 'commons.wikimedia.org', downloadUrl: 'https://upload.wikimedia.org/Belgian_Waffles_RR_Nagar.jpg' }, { text: 'Waffles', searchQuery: 'Waffles', category: 'food' });
+  assert.equal(storefrontNamedForFood.hardRejected, true);
+  assert.match(storefrontNamedForFood.hardRejectionReasons.join(' '), /venue/);
+
+  for (const alt of ['Pistachio and raspberry waffle', 'Waffle batter in the waffle iron', 'Waffles display case near Grand-Place']) {
+    const ambiguousWaffle = assessImageCandidate({ id: alt, width: 2400, height: 1400, alt, sourceDomain: 'commons.wikimedia.org', downloadUrl: `https://upload.wikimedia.org/${encodeURIComponent(alt)}.jpg` }, { text: 'Waffles', searchQuery: 'Waffles', category: 'food' });
+    assert.equal(ambiguousWaffle.hardRejected, true, alt);
+  }
+});
+
+test('FOOD query construction stays literal and photographic without cinematic scene fallbacks', () => {
+  const queries = buildImageQueries({ text: 'Fried Chicken', searchQuery: 'Fried Chicken', category: 'food' });
+  assert.deepEqual(queries, [
+    'fried chicken isolated white background product photo no people',
+    'fried chicken single food close up white background',
+    'fried chicken isolated food photography no people',
+    'fried chicken close up food photography no people',
+    'fried chicken real food photo no people',
+    'fried chicken plated dish close up no people',
+    'fried chicken',
+  ]);
+  assert.equal(queries.some(query => /cinematic|scene|surreal/i.test(query)), false);
+});
+
+test('literal FOOD-query candidates outrank broader photographic-query ties', () => {
+  const literal = { id: 'literal', provider: 'DuckDuckGo Images', width: 1600, height: 900, finalScore: 90, qualityScore: 85, relevanceScore: 90, foodLiteralQueryRank: 100, downloadUrl: 'https://example.test/literal.jpg' };
+  const broader = { id: 'broader', provider: 'DuckDuckGo Images', width: 2400, height: 1400, finalScore: 100, qualityScore: 95, relevanceScore: 100, foodLiteralQueryRank: 99, downloadUrl: 'https://example.test/broader.jpg' };
+  assert.equal(compareImageCandidates(literal, broader) < 0, true);
+});
+
+test('food-photo recovery queries stay literal and are only generated for food options', () => {
+  assert.deepEqual(buildFoodPhotoRecoveryQueries({ category: 'food', text: 'Eat spicy noodles', searchQuery: 'spicy noodles bowl' }), [
+    'spicy noodles bowl food photography',
+    'spicy noodles bowl plated dish close up',
+    'spicy noodles bowl real food photo',
+  ]);
+  assert.deepEqual(buildFoodPhotoRecoveryQueries({ category: 'travel', text: 'Visit Rome', searchQuery: 'Rome skyline' }), []);
 });
 
 test('final image filter rejects memes, infographics, screenshots, and generic corporate finance art', () => {
@@ -412,6 +525,31 @@ test('selected image files are hash-locked and review contact sheet uses the loc
     const review = await createImageReviewArtifacts({ assets: locked, workspace }); assert.ok(fs.statSync(review.contactSheetPath).size > 0); assert.equal(path.basename(review.selectedImagesDir), 'selected-images');
     const manifest = JSON.parse(fs.readFileSync(path.join(workspace, 'review', 'selected-images.json'))); assert.deepEqual(manifest.map(asset => asset.sha256), locked.map(asset => asset.sha256));
   } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('food recovery skips game/text candidates and finds valid literal food photographs without exhausting slots', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-food-photo-recovery-')); const searches = [];
+  const provider = { search: async () => [], downloadAsset: async () => {} };
+  const webProvider = {
+    name: 'DuckDuckGo Images',
+    search: async query => {
+      searches.push(query);
+      if (query.includes('food photography')) {
+        const sweet = query.includes('pancake');
+        return [{ id: sweet ? 'pancake-photo' : 'noodle-photo', provider: 'DuckDuckGo Images', width: 2400, height: 1400, alt: sweet ? 'photograph of sweet pancakes stacked on a plate food' : 'photograph of a bowl of spicy noodles plated with chili food', sourceDomain: 'example.test', originalImageUrl: `https://images.example.test/${sweet ? 'pancakes' : 'noodles'}.jpg`, downloadUrl: `https://images.example.test/${sweet ? 'pancakes' : 'noodles'}.jpg` }];
+      }
+      return [{ id: `game-${query}`, provider: 'DuckDuckGo Images', width: 1920, height: 1080, alt: `${query} cooking game screenshot gameplay`, sourceDomain: 'example.test', originalImageUrl: `https://images.example.test/${encodeURIComponent(query)}-game.jpg`, downloadUrl: `https://images.example.test/${encodeURIComponent(query)}-game.jpg` }];
+    },
+    downloadAsset: async (selected, destination) => writeCandidate(selected, destination),
+  };
+  const plan = { questions: [{ index: 0, category: 'food', optionA: { text: 'Eat spicy noodles', searchQuery: 'spicy noodles bowl' }, optionB: { text: 'Eat sweet pancakes', searchQuery: 'sweet pancakes stack' } }] };
+  try {
+    const assets = await findAndDownloadImages({ plan, provider, webProvider, assetsDir: dir, maxRetries: 0, concurrency: 1, recovery: { alternateQueryRounds: 3, maxProviderRequests: 24, maxWallClockMs: 5000 } });
+    assert.equal(assets.length, 2);
+    assert.equal(assets.every(asset => asset.provider === 'DuckDuckGo Images'), true);
+    assert.ok(searches.some(query => query.includes('food photography')));
+    assert.ok(assets.every(asset => asset.recoveryQueries.some(query => query.includes('food photography'))));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('normal image failure recovers one slot with bounded alternate visual queries and preserves accepted slots', async () => {

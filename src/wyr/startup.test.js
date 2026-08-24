@@ -25,6 +25,11 @@ test('runStartupMigrations is idempotent across repeated startups', () => withFa
   assert.ok(second.every(result => result.applied === false));
 }));
 
+test('runStartupMigrations does not abort startup when FOOD theme seeding is incomplete', () => withFakeDb(async () => {
+  const results = await runStartupMigrations({ seedThemes: async () => { throw new Error('existing question belongs to another theme'); } });
+  assert.ok(results.every(result => result.applied));
+}));
+
 test('runStartupMigrations surfaces a clear, wrapped error when a migration fails', () => withFakeDb(async fake => {
   const originalQuery = fake.client.query;
   fake.client.query = async (sql, params) => { if (sql.includes('CREATE TABLE IF NOT EXISTS wyr_questions')) throw new Error('permission denied for schema public'); return originalQuery(sql, params); };

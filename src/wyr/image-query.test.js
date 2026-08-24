@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { coreSubjectQuery, coreSubjectWords, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
+import { buildImageQueries, coreSubjectQuery, coreSubjectWords, deterministicImageQueries, withFoodSearchContext } from './image-query.js';
 
 test('"Live in a treehouse" produces a treehouse-specific query, not a generic trees query', () => {
   const query = coreSubjectQuery('Live in a treehouse');
@@ -51,6 +51,13 @@ test('food search context disambiguates food names without changing other catego
   assert.equal(withFoodSearchContext('mac and cheese', 'food'), 'mac and cheese food');
   assert.equal(withFoodSearchContext('mac and cheese food', 'food'), 'mac and cheese food');
   assert.equal(withFoodSearchContext('mac pro computer', 'future technology'), 'mac pro computer');
+});
+
+test('FOOD isolated-style queries lead with product photography while preserving literal fallbacks', () => {
+  const queries = buildImageQueries('Croissant', 'food');
+  assert.match(queries[0], /croissant isolated white background product photo no people/);
+  assert.ok(queries.some(query => query === 'croissant'));
+  assert.ok(queries.every(query => /croissant/i.test(query)));
 });
 
 // ---------------------------------------------------------------------------------------------
