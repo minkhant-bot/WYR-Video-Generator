@@ -2,11 +2,12 @@
 // from question-pool.js (which only does I/O: run a query, hand rows to these functions, write
 // the result back) so the actual diversity/hook/fantasy rules are unit-testable without a
 // database, and reused identically by both insertion (refill) and selection (video generation).
-import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, questionMotifs } from './content-engine.js';
+import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, optionSimilarity, questionMotifs } from './content-engine.js';
 import { computeDilemmaStrengthScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
 import { assessFoodPair } from './food-content.js';
+import { normalizeFoodOption, unorderedPairKey } from './food-themes.js';
 
 // The 20 Groq-facing categories bucketed into broader "content families" purely locally -- Groq
 // never supplies or needs to know about this grouping. Chosen so a normal 8-question selection can
@@ -22,6 +23,18 @@ export const CONTENT_FAMILY_BY_CATEGORY = Object.freeze({
   'survival-lite': 'survival',
 });
 export const contentFamilyForCategory = category => CONTENT_FAMILY_BY_CATEGORY[category] || 'other';
+
+// Canonical "A vs B" == "B vs A" pair key for a raw DB row, reusing food-themes.js's food-aware
+// normalization (singularizes, strips punctuation/case) rather than inventing a second normalizer.
+// This is deliberately MORE aggressive than the DB's own dedupe_key (content-engine.js's
+// canonicalDilemma, used for the UNIQUE constraint at insert time): dedupe_key already makes exact
+// literal duplicates and reversed pairs structurally impossible among 'ready' rows, but two
+// different themes can still each contain their own row for what a viewer would recognize as the
+// same matchup once minor wording/pluralization is normalized away (see food-themes.js's
+// auditFoodThemeContent, which already reports this as crossThemeOptionOverlap/nearDuplicatePairs).
+// Selecting across multiple themes in one video (see question-pool.js's selectAndReservePlan) makes
+// that latent overlap reachable within a single video for the first time, so it's re-checked here.
+export const canonicalFoodPairKey = row => unorderedPairKey([normalizeFoodOption(row.option_a_text), normalizeFoodOption(row.option_b_text)]);
 
 // Everything a raw {category, optionA, optionB} candidate (from Groq or a fixture) needs before it
 // can be inserted as a wyr_questions row: hard quality gate, motif fingerprints, content family,
@@ -129,25 +142,36 @@ export const rankCandidatesByStrength = rows => {
 // Diversity selection over a candidate window of "ready" rows, already ordered least-recently-used
 // first by the caller's SQL. Within-plan motif duplication and the fantasy cap stay hard. Motifs
 // seen in recent completed videos are preferred away from, then relaxed only when necessary.
-export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new Set() } = {}) => {
-  const attempt = (relaxFamilyCap, relaxRecentMotifs) => {
-    const familyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const selected = [];
+export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new Set(), blockedPairKeys = new Set() } = {}) => {
+  const attempt = (relaxFamilyCap, relaxRecent) => {
+    const familyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const usedPairKeys = new Set(); const selected = [];
     for (const row of candidates) {
       if (selected.length >= count) break;
-      if (!relaxRecentMotifs && row.motif_key_a && blockedMotifs.has(row.motif_key_a)) continue;
-      if (!relaxRecentMotifs && row.motif_key_b && blockedMotifs.has(row.motif_key_b)) continue;
+      const pairKey = canonicalFoodPairKey(row);
+      // Hard, never-relaxed: two rows that normalize to the same "A vs B"/"B vs A" pair can never
+      // both land in one video, regardless of how thin the remaining candidate window is.
+      if (usedPairKeys.has(pairKey)) continue;
+      if (!relaxRecent && blockedPairKeys.has(pairKey)) continue;
+      if (!relaxRecent && row.motif_key_a && blockedMotifs.has(row.motif_key_a)) continue;
+      if (!relaxRecent && row.motif_key_b && blockedMotifs.has(row.motif_key_b)) continue;
       if (row.motif_key_a && usedMotifs.has(row.motif_key_a)) continue;
       if (row.motif_key_b && usedMotifs.has(row.motif_key_b)) continue;
       if (row.is_fantasy && fantasyCount >= 1) continue;
       const familyCount = familyCounts.get(row.content_family) || 0;
       if (!relaxFamilyCap && familyCount >= 2) continue;
       selected.push(row); familyCounts.set(row.content_family, familyCount + 1);
+      usedPairKeys.add(pairKey);
       if (row.is_fantasy) fantasyCount += 1;
       if (row.motif_key_a) usedMotifs.add(row.motif_key_a);
       if (row.motif_key_b) usedMotifs.add(row.motif_key_b);
     }
-    return { selected, distinctFamilies: familyCounts.size, fantasyCount, recentMotifsRelaxed: relaxRecentMotifs };
+    return { selected, distinctFamilies: familyCounts.size, fantasyCount, recentMotifsRelaxed: relaxRecent };
   };
+  // Same 4-tier relax ladder as before, now also covering the pair-key cooldown: never relax the
+  // hard within-plan pair-uniqueness rule, but recently-used pairs/motifs are only a soft
+  // deprioritization that gives way once the family cap and then the recency cooldowns themselves
+  // would otherwise leave the plan short (see the instruction to never hard-fail purely because the
+  // eligible pool is temporarily too small).
   let result = attempt(false, false);
   if (result.selected.length < count) result = attempt(true, false);
   if (result.selected.length < count) result = attempt(false, true);
@@ -180,6 +204,14 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
   const canSubstitute = (candidate, outgoing) => {
     if (working.some(row => row.id === candidate.id)) return false;
     if (candidate.content_family !== outgoing.content_family) return false;
+    // A duration swap must never reintroduce a canonical-pair duplicate against the rest of the
+    // plan (see selectDiversePlan's hard pair-uniqueness rule above -- this is the same guarantee,
+    // just re-checked because repairPlanForDuration draws from the full candidate window, not just
+    // the already-deduplicated `selected` set).
+    const outgoingPairKey = canonicalFoodPairKey(outgoing);
+    const candidatePairKey = canonicalFoodPairKey(candidate);
+    if (working.some(row => row.id !== outgoing.id && canonicalFoodPairKey(row) === candidatePairKey)) return false;
+    if (candidatePairKey === outgoingPairKey && candidate.id !== outgoing.id) return false;
     if (candidate.motif_key_a && blockedMotifs.has(candidate.motif_key_a)) return false;
     if (candidate.motif_key_b && blockedMotifs.has(candidate.motif_key_b)) return false;
     const motifsElsewhereInPlan = new Set();
@@ -244,6 +276,43 @@ export const arrangeForHook = rows => {
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
 };
 
+// Full-plan ordering for the 10-question pacing test ("select first, order second" -- raw
+// theme_position is no longer authoritative once a plan can be merged from more than one theme, see
+// question-pool.js's selectAndReservePlan). Q1 reuses arrangeForHook's existing rule (strongest
+// hook_score food row leads). The closing slot(s) go to whichever pair(s) read as the CLOSEST/hardest
+// call, using optionSimilarity as the difficulty proxy: content-engine.js's assessQuestionQuality
+// already hard-rejects anything at/above the 0.8 near-duplicate similarity ceiling, so the accepted
+// range just below that ceiling is exactly the "genuinely hard to pick a favorite" zone -- the same
+// signal scoring.js's computeDistinctnessBonus already rewards being LOW for a strong Scene 1, reused
+// here in reverse for the strongest close. Everything between Q1 and the closing tier is
+// tone-interleaved (deriveToneBucket/interleaveByTone, already used to vary a same-LRU-tier
+// selection window) over rank-score order, so the middle of the video doesn't front-load every
+// remaining strong hook. Never calls Groq/AI; only reuses a stored field (hook_score) or existing
+// pure functions (computeDilemmaRankScore, optionSimilarity, interleaveByTone) -- no new scoring
+// system.
+const byClosenessThenStrengthDesc = (left, right) => {
+  const closeness = optionSimilarity(right.option_a_text, right.option_b_text) - optionSimilarity(left.option_a_text, left.option_b_text);
+  if (closeness) return closeness;
+  const strength = computeDilemmaRankScore(right) - computeDilemmaRankScore(left);
+  if (strength) return strength;
+  return Number(left.id) - Number(right.id);
+};
+export const arrangeFoodPlanOrder = rows => {
+  if (rows.length <= 3) return arrangeForHook(rows);
+  const [q1, ...restAfterHook] = arrangeForHook(rows);
+  // A 10-question plan closes on 3 progressively-harder slots (Q8, Q9, Q10); a shorter plan just
+  // closes on its single hardest pair.
+  const closingTierSize = rows.length >= 10 ? 3 : 1;
+  const closingTier = [...restAfterHook].sort(byClosenessThenStrengthDesc).slice(0, closingTierSize);
+  const closingIds = new Set(closingTier.map(row => row.id));
+  const middle = restAfterHook.filter(row => !closingIds.has(row.id));
+  const orderedMiddle = interleaveByTone([...middle].sort((left, right) => computeDilemmaRankScore(right) - computeDilemmaRankScore(left)));
+  // Ramp UP within the closing tier itself so the single hardest pair lands last (e.g. Q8 -> Q9 -> Q10).
+  const orderedClosing = [...closingTier].sort((left, right) =>
+    optionSimilarity(left.option_a_text, left.option_b_text) - optionSimilarity(right.option_a_text, right.option_b_text));
+  return [q1, ...orderedMiddle, ...orderedClosing];
+};
+
 // option_a_visual_subject/option_b_visual_subject are nullable (see migration 003) -- a row
 // inserted before that column existed falls back to its own search query (deriveVisualSubject's
 // same rule, inlined here since a DB row's snake_case shape isn't the {searchQuery} shape that
@@ -270,7 +339,7 @@ export const rowToQuestion = (row, index) => {
 
 export const buildPlanFromPoolRows = rows => {
   const themed = Boolean(rows[0]?.theme_key);
-  const arranged = themed ? [...rows].sort((a, b) => Number(a.theme_position) - Number(b.theme_position)) : arrangeForHook(rows);
+  const arranged = themed ? arrangeFoodPlanOrder(rows) : arrangeForHook(rows);
   const questions = arranged.map((row, index) => rowToQuestion(row, index));
   return {
     version: 1,

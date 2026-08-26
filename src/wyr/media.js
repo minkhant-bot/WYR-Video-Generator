@@ -95,9 +95,6 @@ const renderSegment = async ({ question, nextQuestion = null, assets, index, dur
   let naText = null; let nbText = null;
   if (nextQuestion) { naText = `${prefix}-next-a.txt`; nbText = `${prefix}-next-b.txt`; fs.writeFileSync(naText, naFit.text); fs.writeFileSync(nbText, nbFit.text); }
   const { canvas, layout, timing, typography } = WYR_TEMPLATE;
-  const foodVisualStyle = String(question.category || '').trim().toLowerCase() === 'food';
-  const paperColor = foodVisualStyle ? layout.foodPaperColor : layout.paperColor;
-  const paperNoiseStrength = foodVisualStyle ? layout.foodPaperNoiseStrength : layout.paperNoiseStrength;
   const output = path.join(renderDir, `segment-${String(index).padStart(2, '0')}.mp4`);
   const contentEnd = timeline?.contentEnd ?? Math.min(timing.transitionOutStart, duration - timing.transitionOutDuration);
   const revealTime = timeline?.revealTime ?? timing.percentageReveal;
@@ -143,19 +140,15 @@ const renderSegment = async ({ question, nextQuestion = null, assets, index, dur
   const percentPopDuration = 0.22;
   const percentFontSize = popFontSize(typography.percentageSize, revealTime, percentPopDuration, 1.18);
   const textLayer = ({ textFile, fontSize, x, y, alphaExpression }) => [
-    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=black:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
+    `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${fontSize}:line_spacing=${typography.lineSpacing}:fontcolor=white:x=${x}:y=${y}+(${layout.textHeight}-text_h)/2:boxw=${layout.textWidth}:text_align=C:alpha=${alphaExpression}`,
   ];
-  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${percentFontSize}:fontcolor=${winner ? '0x1FAE55' : 'black'}:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
+  const percentLayer = ({ textFile, winner, y, motion }) => `drawtext=fontfile=${font}:textfile='${filterPath(textFile)}':expansion=none:fontsize=${percentFontSize}:fontcolor=${winner ? layout.accentColor : 'white'}:x='(w-text_w)/2+${motion}':y=${y}+(${layout.textHeight}-text_h)/2:alpha=${percentAlpha}`;
   const filter = [
     ...buildFramedImageChain({ input: '0:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'aimg', chainId: 'a', crop: a.framing }),
     ...buildFramedImageChain({ input: '1:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'bimg', chainId: 'b', crop: b.framing }),
     ...(nextQuestion ? buildFramedImageChain({ input: '2:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'naimg', chainId: 'na', crop: na.framing }) : []),
     ...(nextQuestion ? buildFramedImageChain({ input: '3:v', width: layout.imageWidth, height: layout.imageHeight, fps: canvas.fps, outLabel: 'nbimg', chainId: 'nb', crop: nb.framing }) : []),
-    // Procedural paper texture: a flat off-white plate plus a fixed (non-temporal, luma-only) grain
-    // pattern from ffmpeg's noise filter -- 'u' without 't' keeps the same grain on every frame
-    // instead of flickering film-grain static, and restricting it to c0 (luma) avoids the colored
-    // speckling that noising the chroma planes of a yuv420p frame would cause.
-    `color=c=${paperColor}:s=${canvas.width}x${canvas.height}:r=${canvas.fps}:d=${duration},format=yuv420p,noise=c0s=${paperNoiseStrength}:c0f=u[base]`,
+    `color=c=${layout.panelTopColor}:s=1080x1920:r=${canvas.fps}:d=${duration},drawbox=x=0:y=960:w=1080:h=960:color=${layout.panelBottomColor}:t=fill,drawbox=x=0:y=957:w=1080:h=${layout.dividerHeight}:color=${layout.dividerColor}:t=fill,format=yuv420p[base]`,
     `[base][aimg]overlay=x='(W-w)/2+${topMotion}':y=${layout.topImageY}:format=auto[tmpa]`,
     `[tmpa][bimg]overlay=x='(W-w)/2+${bottomMotion}':y=${layout.bottomImageY}:format=auto[tmpb]`,
     ...(nextQuestion ? [
@@ -370,9 +363,9 @@ const renderHookVisual = async ({ plan, assets, renderDir, duration, output, ffm
   });
   const filter = [
     ...chains,
-    `color=c=${WYR_TEMPLATE.layout.foodPaperColor}:s=1080x1920:r=30:d=${baseDuration},format=yuv420p[hookbase]`,
+    `color=c=${WYR_TEMPLATE.layout.panelTopColor}:s=1080x1920:r=30:d=${baseDuration},drawbox=x=0:y=960:w=1080:h=960:color=${WYR_TEMPLATE.layout.panelBottomColor}:t=fill,drawbox=x=0:y=957:w=1080:h=${WYR_TEMPLATE.layout.dividerHeight}:color=${WYR_TEMPLATE.layout.dividerColor}:t=fill,format=yuv420p[hookbase]`,
     ...overlays,
-    `[hookimages]drawtext=fontfile=${font}:text='THIS OR THAT':fontsize=108:fontcolor=black:x=(w-text_w)/2:y=245,drawtext=fontfile=${font}:textfile='${filterPath(titleFile)}':expansion=none:fontsize=${titleFit.fontSize}:line_spacing=${WYR_TEMPLATE.typography.lineSpacing}:fontcolor=black:x=(w-text_w)/2:y=420+(170-text_h)/2,setrange=limited,format=yuv420p[hookout]`,
+    `[hookimages]drawtext=fontfile=${font}:text='THIS OR THAT':fontsize=108:fontcolor=white:x=(w-text_w)/2:y=245,drawtext=fontfile=${font}:textfile='${filterPath(titleFile)}':expansion=none:fontsize=${titleFit.fontSize}:line_spacing=${WYR_TEMPLATE.typography.lineSpacing}:fontcolor=white:x=(w-text_w)/2:y=420+(170-text_h)/2,setrange=limited,format=yuv420p[hookout]`,
   ].join(';');
   const inputs = selected.flatMap(asset => buildStillImageInputArgs(asset.localPath));
   const args = ['-y', ...inputs, '-filter_complex', filter, '-map', '[hookout]', '-an'];

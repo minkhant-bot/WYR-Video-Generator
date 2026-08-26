@@ -13,17 +13,19 @@ export const WYR_TEMPLATE = Object.freeze({
     // Countdown cue timing and sequence duration come from config/audio-spec.json.
     countdownFadeDuration: 0.06,
     transitionOutStart: 6.18,
-    revealHoldDuration: 1,
+    // Faster-pacing retention test target: ~0.4-0.6s visible reveal hold before moving on (was 1s).
+    revealHoldDuration: 0.5,
     transitionSfxLead: 0.145,
     transitionOutDuration: 0.5,
     transitionSlideDuration: 0.2,
   }),
   layout: Object.freeze({
     safeX: 60,
-    paperColor: '0xF5F5F3',
-    paperNoiseStrength: 24,
-    foodPaperColor: '0xFFFFFF',
-    foodPaperNoiseStrength: 0,
+    panelTopColor: '0x7C0D05',
+    panelBottomColor: '0x032859',
+    dividerColor: '0xFFFFFF',
+    dividerHeight: 6,
+    accentColor: '0xFCC701',
     // The two halves mirror each other around the fixed OR medallion: 100px outer margins,
     // 600px photos, 8px photo/label gutters, and compact centered label/result slots.
     topImageY: 100,

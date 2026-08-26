@@ -11,11 +11,12 @@ test('production timing uses the reference first-scene slide and bounded post-na
   assert.equal(WYR_TEMPLATE.timing.maximumNarrationCountdownGap, 0.2);
 });
 
-test('FOOD gets a clean white canvas while unrelated categories retain the paper background', () => {
-  assert.equal(WYR_TEMPLATE.layout.paperColor, '0xF5F5F3');
-  assert.equal(WYR_TEMPLATE.layout.paperNoiseStrength, 24);
-  assert.equal(WYR_TEMPLATE.layout.foodPaperColor, '0xFFFFFF');
-  assert.equal(WYR_TEMPLATE.layout.foodPaperNoiseStrength, 0);
+test('the scene background is a red/blue split panel with a white divider and accent color', () => {
+  assert.equal(WYR_TEMPLATE.layout.panelTopColor, '0x7C0D05');
+  assert.equal(WYR_TEMPLATE.layout.panelBottomColor, '0x032859');
+  assert.equal(WYR_TEMPLATE.layout.dividerColor, '0xFFFFFF');
+  assert.equal(WYR_TEMPLATE.layout.dividerHeight, 6);
+  assert.equal(WYR_TEMPLATE.layout.accentColor, '0xFCC701');
 });
 
 test('food panels form a vertically centered stack with balanced outer margins', () => {

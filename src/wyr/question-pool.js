@@ -1,5 +1,5 @@
 import { withClient, withTransaction } from './db.js';
-import { classifyRejectionReasons, computeInsertionFields, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
+import { canonicalFoodPairKey, classifyRejectionReasons, computeInsertionFields, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { isStrictFoodPoolRow } from './food-content.js';
@@ -206,6 +206,20 @@ const recentThemesFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VI
   const { rows } = await client.query('SELECT theme_key FROM wyr_videos WHERE theme_key IS NOT NULL ORDER BY created_at DESC LIMIT $1', [windowVideos]);
   return new Set(rows.map(row => row.theme_key).filter(Boolean));
 };
+// Canonical-pair-key cooldown, the same cross-video-window shape as recentMotifsFromDb/
+// recentThemesFromDb above: only a soft deprioritization (see selectDiversePlan's relax ladder), so
+// a thin ready pool still fills a plan instead of failing outright when every remaining alternative
+// happens to echo a recently-used pair.
+const recentPairKeysFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_VIDEOS) => {
+  const { rows } = await client.query(
+    `SELECT q.option_a_text, q.option_b_text
+     FROM wyr_video_questions vq
+     JOIN wyr_questions q ON q.id = vq.question_id
+     WHERE vq.video_id IN (SELECT id FROM wyr_videos ORDER BY created_at DESC LIMIT $1)`,
+    [windowVideos],
+  );
+  return new Set(rows.map(row => canonicalFoodPairKey(row)));
+};
 
 // Atomically reserves exactly `count` diverse, duration-budgeted questions for one job, drawn only
 // from status='ready' rows -- a question retired to status='used' by commitPlanUsage (see below)
@@ -261,24 +275,48 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   const candidates = naturalWording;
   const blockedMotifs = await recentMotifsFromDb(client);
   const blockedThemes = await recentThemesFromDb(client);
+  const blockedPairKeys = await recentPairKeysFromDb(client);
   const groups = new Map();
   for (const row of candidates) {
-    if (!row.theme_key || blockedThemes.has(row.theme_key)) continue;
+    if (!row.theme_key) continue;
     if (!groups.has(row.theme_key)) groups.set(row.theme_key, []);
     groups.get(row.theme_key).push(row);
   }
+  // Recently-used themes are DEPRIORITIZED, not hard-excluded: a single theme rarely has `count`
+  // ready rows on its own (30 of the 31 seeded themes have 9, one has 10 -- see food-themes.js), so
+  // reaching `count` normally requires merging in a second theme (see the merge loop below). A hard
+  // exclusion here, combined with only 33 total themes and the existing 50-video theme cooldown
+  // window, would make the ready pool empty out (and this function return null, forcing a
+  // no-plan-this-cycle outcome) far more often than necessary once two themes are consumed per
+  // video instead of one. Array.prototype.sort is stable, so within each bucket themes keep the
+  // SQL's original least-recently-used ordering.
+  const themeOrder = [...groups.keys()].sort((left, right) => (blockedThemes.has(left) ? 1 : 0) - (blockedThemes.has(right) ? 1 : 0));
+  const byThemeThenPosition = (a, b) => (a.theme_id === b.theme_id ? Number(a.theme_position) - Number(b.theme_position) : Number(a.theme_id) - Number(b.theme_id));
   let result = null; let repair = null;
-  for (const rows of groups.values()) {
-    const ordered = [...rows].sort((a, b) => Number(a.theme_position) - Number(b.theme_position));
-    const selected = selectDiversePlan(ordered, { count, blockedMotifs });
-    if (!selected) continue;
-    const effectiveBlockedMotifs = selected.recentMotifsRelaxed ? new Set() : blockedMotifs;
-    const repaired = repairPlanForDuration({ selected: selected.selected, candidates: ordered, blockedMotifs: effectiveBlockedMotifs, count, targetTotalSeconds, baseDuration });
-    if (!repaired.fits) continue;
-    result = selected; repair = repaired; break;
+  // Try each theme as the "primary" (in LRU/deprioritization order). A single theme rarely has
+  // `count` ready rows by itself, so once the primary's own rows run out, progressively merge in
+  // the NEXT theme(s) (same order) into the same candidate pool -- selectDiversePlan's existing
+  // diversity/pair/motif rules apply across the merged pool exactly as they would within one theme,
+  // so a merged plan is never less diverse or more duplicate-prone than a single-theme one. This is
+  // a pure candidate-selection change: still one atomic `status = 'ready' ... FOR UPDATE SKIP
+  // LOCKED` read and one reservation UPDATE below, so consume-once/reservation semantics are
+  // untouched.
+  for (let start = 0; start < themeOrder.length && !result; start += 1) {
+    let mergedRows = [];
+    for (let offset = start; offset < themeOrder.length; offset += 1) {
+      mergedRows = mergedRows.concat(groups.get(themeOrder[offset]));
+      if (mergedRows.length < count) continue;
+      const ordered = [...mergedRows].sort(byThemeThenPosition);
+      const selected = selectDiversePlan(ordered, { count, blockedMotifs, blockedPairKeys });
+      if (!selected) continue;
+      const effectiveBlockedMotifs = selected.recentMotifsRelaxed ? new Set() : blockedMotifs;
+      const repaired = repairPlanForDuration({ selected: selected.selected, candidates: ordered, blockedMotifs: effectiveBlockedMotifs, count, targetTotalSeconds, baseDuration });
+      if (!repaired.fits) continue;
+      result = selected; repair = repaired; break;
+    }
   }
   if (!result || !repair) {
-    if (groups.size) throw new DurationBudgetExceededError(`Could not select a complete ${count}-question FOOD theme under the duration budget from the current ready themed pool.`);
+    if (groups.size) throw new DurationBudgetExceededError(`Could not select a complete ${count}-question FOOD plan under the duration budget from the current ready themed pool.`);
     return null;
   }
   if (!repair.fits) {
@@ -412,7 +450,7 @@ export const releaseStaleReservations = async (olderThanMs = STALE_RESERVATION_A
 // a duplicated completion callback), the second call finds those rows already at status='used'
 // with reserved_by_job=NULL and updates zero rows, instead of double-incrementing used_count or
 // double-committing usage.
-export const COMMITTED_QUESTION_COUNT = 7;
+export const COMMITTED_QUESTION_COUNT = 10;
 export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransaction(async client => {
   const ids = plan.questions.map(question => question.poolId);
   if (ids.length !== COMMITTED_QUESTION_COUNT || new Set(ids).size !== COMMITTED_QUESTION_COUNT || ids.some(id => id == null)) {

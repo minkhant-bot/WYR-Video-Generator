@@ -14,6 +14,8 @@ const questions = [
   ['Always have perfect weather', 'Always find a perfect parking spot', 71, 29],
   ['Live in a glass treehouse', 'Live on a luxury houseboat', 49, 51],
   ['Take a year-long sabbatical', 'Retire ten years early', 44, 56],
+  ['Have a personal chef every night', 'Have a personal driver every day', 55, 45],
+  ['Wake up to a sunrise every morning', 'Fall asleep to a sunset every night', 61, 39],
 ];
 
 // Eight canonical subject shapes covering the source shapes the framing system has to handle:

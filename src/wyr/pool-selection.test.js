@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { arrangeForHook, buildPlanFromPoolRows, computeDilemmaRankScore, computeInsertionFields, contentFamilyForCategory, rankCandidatesByStrength, repairPlanForDuration, selectDiversePlan } from './pool-selection.js';
+import { arrangeForHook, arrangeFoodPlanOrder, buildPlanFromPoolRows, canonicalFoodPairKey, computeDilemmaRankScore, computeInsertionFields, contentFamilyForCategory, rankCandidatesByStrength, repairPlanForDuration, selectDiversePlan } from './pool-selection.js';
 import { estimateSceneDurationFromText, DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 
 let nextId = 1;
@@ -265,14 +265,17 @@ test('computeDilemmaRankScore combines the stored hook_score with the local stre
 // long-narration questions across 6 distinct families (so the family cap of 2 never blocks any of
 // them) whose combined estimated duration lands well over DEFAULT_DURATION_BUDGET_TOTAL_SECONDS --
 // an in-repo stand-in for a real production near-budget failure, but built from estimated (not
-// TTS-measured) duration so it's deterministic and DB-free.
+// TTS-measured) duration so it's deterministic and DB-free. Option A text is deliberately a few
+// words longer than the minimum needed under the OLD (pre-pacing-test) SCENE_TAIL_SECONDS, so the
+// fixture still starts over budget now that template.js's revealHoldDuration (1s -> 0.5s) shrinks
+// every scene's fixed tail by 0.5s -- see audio.js/template.js's faster-pacing retention test change.
 const LONG_SELECTED = [
-  row({ category: 'superpowers', a: 'Read the minds of every single stranger you meet nearby', b: 'Turn completely invisible near every other person around you', isFantasy: false, motifA: 'mind-reading-long', motifB: 'invisibility-long' }),
-  row({ category: 'time', a: 'Travel back to relive your entire early happy childhood', b: 'Travel forward to witness the distant unknown future today', motifA: 'time-travel-past-long', motifB: 'time-travel-future-long' }),
-  row({ category: 'dream lifestyle', a: 'Wake up early and stay productive every single busy morning', b: 'Sleep in late and stay relaxed every single lazy day', motifA: 'morning-routine-long', motifB: 'sleep-routine-long' }),
-  row({ category: 'food', a: 'Eat extremely spicy food at every single family meal', b: 'Eat extremely sweet food at every single family meal', motifA: 'spicy-food-long', motifB: 'sweet-food-long' }),
-  row({ category: 'travel', a: 'Visit five different countries across all of western Europe', b: 'Visit five different countries across all of eastern Asia', motifA: 'europe-trip-long', motifB: 'asia-trip-long' }),
-  row({ category: 'space', a: 'Float weightlessly inside a real orbiting space station soon', b: 'Walk slowly across the dusty surface of the moon', motifA: 'zero-gravity-long', motifB: 'moonwalk-long' }),
+  row({ category: 'superpowers', a: 'Read the minds of every single stranger you happen to meet nearby today', b: 'Turn completely invisible near every other person around you', isFantasy: false, motifA: 'mind-reading-long', motifB: 'invisibility-long' }),
+  row({ category: 'time', a: 'Travel back to relive your entire early happy childhood all over again', b: 'Travel forward to witness the distant unknown future today', motifA: 'time-travel-past-long', motifB: 'time-travel-future-long' }),
+  row({ category: 'dream lifestyle', a: 'Wake up early and stay productive every single busy morning of the week', b: 'Sleep in late and stay relaxed every single lazy day', motifA: 'morning-routine-long', motifB: 'sleep-routine-long' }),
+  row({ category: 'food', a: 'Eat extremely spicy food at every single family meal for the rest of your life', b: 'Eat extremely sweet food at every single family meal', motifA: 'spicy-food-long', motifB: 'sweet-food-long' }),
+  row({ category: 'travel', a: 'Visit five different countries across all of western Europe over one long summer', b: 'Visit five different countries across all of eastern Asia', motifA: 'europe-trip-long', motifB: 'asia-trip-long' }),
+  row({ category: 'space', a: 'Float weightlessly inside a real orbiting space station soon after launch day', b: 'Walk slowly across the dusty surface of the moon', motifA: 'zero-gravity-long', motifB: 'moonwalk-long' }),
 ];
 
 // Short, valid substitutes: one per family represented above, so a straightforward swap never
@@ -345,6 +348,133 @@ test('repairPlanForDuration reports fits:false (never throws, never fabricates a
   const result = repairPlanForDuration({ selected: LONG_SELECTED, candidates: LONG_SELECTED, count: 6, targetTotalSeconds: DEFAULT_DURATION_BUDGET_TOTAL_SECONDS, baseDuration: 7 });
   assert.equal(result.fits, false);
   assert.equal(result.selected.length, 6, 'the (still over-budget) selection must still be returned so the caller has full information');
+});
+
+// -- 10-question pacing test: canonical pair-key dedup/cooldown, and Q1/Q10 ordering --
+
+const foodRow = (a, b, extra = {}) => row({ category: 'food', a, b, ...extra });
+
+test('canonicalFoodPairKey treats "A vs B" and "B vs A" as the same pair', () => {
+  const forward = foodRow('Ice Cream', 'Gelato');
+  const reversed = foodRow('Gelato', 'Ice Cream');
+  assert.equal(canonicalFoodPairKey(forward), canonicalFoodPairKey(reversed));
+});
+
+test('selectDiversePlan hard-rejects a reversed-duplicate canonical pair even when nothing else would block it', () => {
+  const candidates = [
+    foodRow('Ice Cream', 'Gelato', { hookScore: 90 }),
+    foodRow('Gelato', 'Ice Cream', { hookScore: 80 }), // same pair, reversed order, different row
+    foodRow('Pizza', 'Sushi'),
+    foodRow('Pancakes', 'Waffles'),
+    foodRow('Tacos', 'Burritos'),
+  ];
+  const result = selectDiversePlan(candidates, { count: 4 });
+  assert.ok(result);
+  const pairKeys = result.selected.map(canonicalFoodPairKey);
+  assert.equal(new Set(pairKeys).size, pairKeys.length, 'no two selected rows may share a canonical pair key');
+  assert.equal(result.selected.length, 4, 'the plan must still fill from the remaining distinct pairs');
+});
+
+test('selectDiversePlan deprioritizes a recently-used canonical pair via blockedPairKeys, but still fills when an alternative exists', () => {
+  const recentlyUsed = foodRow('Ice Cream', 'Gelato', { hookScore: 90 });
+  const candidates = [
+    recentlyUsed,
+    foodRow('Pizza', 'Sushi'),
+    foodRow('Pancakes', 'Waffles'),
+    foodRow('Tacos', 'Burritos'),
+  ];
+  const result = selectDiversePlan(candidates, { count: 3, blockedPairKeys: new Set([canonicalFoodPairKey(recentlyUsed)]) });
+  assert.ok(result);
+  assert.equal(result.selected.some(r => r.id === recentlyUsed.id), false, 'a recently-used pair should be skipped while plenty of other pairs are available');
+});
+
+test('selectDiversePlan relaxes the pair-key cooldown only when needed to fill the plan', () => {
+  const recentlyUsed = foodRow('Ice Cream', 'Gelato');
+  const candidates = [recentlyUsed, foodRow('Pizza', 'Sushi')];
+  const result = selectDiversePlan(candidates, { count: 2, blockedPairKeys: new Set([canonicalFoodPairKey(recentlyUsed)]) });
+  assert.ok(result);
+  assert.equal(result.selected.length, 2, 'a thin pool must still fill, falling back to the cooled-down pair rather than hard-failing');
+});
+
+test('arrangeFoodPlanOrder leads with the strongest hook_score food pair (Q1)', () => {
+  const rows = [
+    foodRow('Pancakes', 'Waffles', { hookScore: 40 }),
+    foodRow('Pizza', 'Burger', { hookScore: 95 }),
+    foodRow('Tacos', 'Burritos', { hookScore: 60 }),
+    foodRow('Sushi', 'Ramen', { hookScore: 55 }),
+    foodRow('Bagel', 'Croissant', { hookScore: 50 }),
+    foodRow('Donut', 'Muffin', { hookScore: 45 }),
+    foodRow('Salad', 'Soup', { hookScore: 42 }),
+    foodRow('Cake', 'Pie', { hookScore: 48 }),
+    foodRow('Chips', 'Pretzels', { hookScore: 44 }),
+    foodRow('Cookie', 'Brownie', { hookScore: 46 }),
+  ];
+  const arranged = arrangeFoodPlanOrder(rows);
+  assert.equal(arranged.length, 10);
+  assert.equal(arranged[0].hook_score, 95);
+  assert.equal(new Set(arranged.map(r => r.id)).size, 10, 'ordering must never drop or duplicate a question');
+});
+
+test('arrangeFoodPlanOrder closes on the pair with the closest/most similar wording as the single hardest choice (Q10)', () => {
+  // "Vanilla Ice Cream" vs "Chocolate Ice Cream" share the "ice cream" tokens (a genuinely close,
+  // hard-to-pick-a-favorite pair) while every other pair below shares zero tokens between its own
+  // two options (an easy, sharply-contrasting pair) -- optionSimilarity is the existing signal
+  // scoring.js already uses in reverse (computeDistinctnessBonus rewards LOW similarity for a
+  // strong Scene-1 hook), reused here to find the closest call for the final slot.
+  const rows = [
+    foodRow('Pizza', 'Burger', { hookScore: 95 }),
+    foodRow('Vanilla Ice Cream', 'Chocolate Ice Cream', { hookScore: 50 }),
+    foodRow('Tacos', 'Burritos', { hookScore: 60 }),
+    foodRow('Sushi', 'Ramen', { hookScore: 55 }),
+    foodRow('Bagel', 'Croissant', { hookScore: 50 }),
+    foodRow('Donut', 'Muffin', { hookScore: 45 }),
+    foodRow('Salad', 'Soup', { hookScore: 42 }),
+    foodRow('Cake', 'Pie', { hookScore: 48 }),
+    foodRow('Chips', 'Pretzels', { hookScore: 44 }),
+    foodRow('Cookie', 'Brownie', { hookScore: 46 }),
+  ];
+  const arranged = arrangeFoodPlanOrder(rows);
+  assert.equal(arranged.at(-1).option_a_text, 'Vanilla Ice Cream');
+  assert.equal(arranged.at(-1).option_b_text, 'Chocolate Ice Cream');
+});
+
+test('arrangeFoodPlanOrder ramps difficulty up through the closing tier (Q8-Q10 progressively closer than the Q2-Q7 middle)', () => {
+  const rows = [
+    foodRow('Pizza', 'Burger', { hookScore: 95 }), // Q1
+    foodRow('Tacos', 'Burritos', { hookScore: 60 }),
+    foodRow('Sushi', 'Ramen', { hookScore: 55 }),
+    foodRow('Bagel', 'Croissant', { hookScore: 50 }),
+    foodRow('Donut', 'Muffin', { hookScore: 45 }),
+    foodRow('Salad', 'Soup', { hookScore: 42 }),
+    foodRow('Cake', 'Pie', { hookScore: 48 }),
+    foodRow('Vanilla Ice Cream', 'Strawberry Ice Cream', { hookScore: 44 }), // shares "ice cream"
+    foodRow('Chocolate Cake', 'Chocolate Cupcake', { hookScore: 46 }), // shares "chocolate"
+    foodRow('Chocolate Ice Cream', 'Vanilla Ice Cream Cone', { hookScore: 43 }), // shares the most tokens
+  ];
+  const arranged = arrangeFoodPlanOrder(rows);
+  const similarity = r => {
+    const left = new Set(r.option_a_text.toLowerCase().split(' '));
+    const right = new Set(r.option_b_text.toLowerCase().split(' '));
+    const intersection = [...left].filter(word => right.has(word)).length;
+    return intersection / new Set([...left, ...right]).size;
+  };
+  const closing = arranged.slice(-3);
+  assert.ok(similarity(closing[2]) >= similarity(closing[1]) - 1e-9, 'Q10 must be at least as close/hard as Q9');
+  assert.ok(similarity(closing[1]) >= similarity(closing[0]) - 1e-9, 'Q9 must be at least as close/hard as Q8');
+});
+
+test('buildPlanFromPoolRows uses arrangeFoodPlanOrder (not raw theme_position) once a plan spans more than one theme', () => {
+  const themed = (a, b, themeKey, themePosition, hookScore) =>
+    ({ ...foodRow(a, b, { hookScore }), theme_key: themeKey, theme_title: `${themeKey} title`, hook_tts_text: `${themeKey}.`, theme_id: themeKey === 'breakfast' ? 1 : 2, theme_position: themePosition });
+  const rows = [
+    themed('Bacon', 'Sausage', 'breakfast', 3, 60),
+    themed('Pizza', 'Burger', 'breakfast', 1, 95), // low theme_position, but not the strongest hook
+    themed('Waffles', 'Pancakes', 'dinner', 1, 40),
+    themed('Tacos', 'Burritos', 'dinner', 2, 55),
+  ];
+  const plan = buildPlanFromPoolRows(rows);
+  assert.equal(plan.questions[0].optionA.text, 'Pizza', 'Q1 must be the strongest hook_score pair, not whichever row happens to hold theme_position 1');
+  assert.equal(plan.hook.themeKey, 'breakfast');
 });
 
 test('buildPlanFromPoolRows produces a plan shape compatible with addIllustrativePercentages / the image pipeline', () => {

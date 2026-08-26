@@ -44,11 +44,12 @@ export const getConfig = () => {
   return {
     port: integer('WYR_PORT', 3100, 1, 65535),
     rootDir: process.env.WYR_JOBS_DIR ? resolveProjectPath(process.env.WYR_JOBS_DIR) : path.join(DEFAULT_DATA_DIR, 'wyr-jobs'),
-    // Production and commitPlanUsage share one fixed contract: every rendered plan contains seven
-    // DB-backed questions. Ignore a stale Railway WYR_QUESTION_COUNT value from older deployments
-    // (the previous .env.example advertised 6) so it cannot reserve/render six and fail only after
-    // the completed render reaches the exact-seven transactional usage commit.
-    questionCount: 7,
+    // Production and commitPlanUsage share one fixed contract: every rendered plan contains ten
+    // DB-backed questions (raised from seven for the faster-pacing retention test). Ignore a stale
+    // Railway WYR_QUESTION_COUNT value from older deployments so it cannot reserve/render a
+    // different count and fail only after the completed render reaches the exact-ten transactional
+    // usage commit.
+    questionCount: 10,
     // Lightweight flow: 1 initial batched request + at most 1 repair request for whatever's still
     // missing. Do not raise this back toward an unbounded retry-everything loop.
     contentGenerationRetries: integer('WYR_CONTENT_GENERATION_RETRIES', 2, 1, 4),
@@ -69,7 +70,10 @@ export const getConfig = () => {
     // small to reach real remaining inventory -- see the CONTENT_POOL_EXHAUSTED fix that added this
     // comment.
     questionReplacementMaxAttempts: positiveIntegerOrDefault('WYR_MAX_QUESTION_REPLACEMENT_ATTEMPTS', 30),
-    secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 7, 4, 8),
+    // Faster-pacing retention test target: ~3.5-4.5s per choice (was 7). This is only a scene
+    // duration FLOOR (buildSceneTimeline still grows a scene to fit the real measured TTS duration
+    // when it's longer) -- unchanged 4-8 valid range so an operator can still raise it via env.
+    secondsPerQuestion: integer('WYR_SECONDS_PER_QUESTION', 4, 4, 8),
     voicePaddingSeconds: number('WYR_VOICE_PADDING_SECONDS', 1.5, 1, 3),
     imageSearchRetries: integer('WYR_MAX_IMAGE_SEARCH_RETRIES', 2, 0, 4),
     imageRecoveryQueryRounds: integer('WYR_IMAGE_RECOVERY_QUERY_ROUNDS', 3, 0, 3),
@@ -98,7 +102,7 @@ export const getConfig = () => {
     adminToken: process.env.WYR_ADMIN_TOKEN || '',
     pexelsApiKey: credentials.pexelsApiKey,
     pixabayApiKey: process.env.PIXABAY_API_KEY || '',
-    edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AndrewNeural',
+    edgeVoice: process.env.WYR_EDGE_VOICE || 'en-US-AriaNeural',
     edgeVoiceRate: process.env.WYR_EDGE_VOICE_RATE || '-10%',
   };
 };

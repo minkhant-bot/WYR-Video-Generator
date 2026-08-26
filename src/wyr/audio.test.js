@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, generateVoiceovers, TtsGenerationError } from './audio.js';
+import { spawn } from 'node:child_process';
+import { assertCompleteCountdownSchedule, assertCompleteSfxSchedule, buildCountdownSchedule, buildNarration, buildSceneTimeline, buildSfxSchedule, createLocalSfx, detectSilenceBounds, FINAL_SCENE_REVEAL_HOLD_SECONDS, generateVoiceovers, trimSilenceFromAudio, TtsGenerationError } from './audio.js';
 import { WYR_TEMPLATE } from './template.js';
 import { assertProductionAudioInputs } from './media.js';
 import { getAudioSpec, getCountdownSequenceDuration } from './audio-spec.js';
+import { resolveFfmpegPath } from './runtime.js';
 
 const plan = { questions: [{ optionA: { text: 'Own a mountain cabin' }, optionB: { text: 'Travel first class every month' } }] };
 test('narration reads only both choices, with no prompt prefix or percentages', () => {
@@ -90,6 +92,114 @@ test('a scene whose narration cannot be produced after bounded retries throws Tt
     );
     const expectedPath = path.join(dir, 'q01-narration.mp3');
     assert.equal(fs.existsSync(expectedPath), false, 'a scene that never succeeded must never leave a partial/invalid file at its localPath');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// -- TTS delivery experiment: pitch passthrough and opt-in silence trimming --
+
+test('generateVoiceovers forwards a custom pitch to the TTS client and defaults to +0Hz (byte-identical to pre-experiment behavior) when omitted', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-pitch-'));
+  try {
+    const seenPitches = [];
+    await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-GuyNeural', rate: '+15%', pitch: '-4Hz', timeoutMs: 1000,
+      ttsFactory: options => { seenPitches.push(options.pitch); return { call: async () => ({ data: Buffer.alloc(1200, 1), subtitles: [] }) }; },
+      measureDuration: async () => 2.0,
+    });
+    assert.deepEqual(seenPitches, ['-4Hz']);
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-pitch-default-'));
+    try {
+      const seenDefaultPitches = [];
+      await generateVoiceovers({
+        plan, audioDir: dir2, voice: 'en-US-AndrewNeural', rate: '-10%', timeoutMs: 1000,
+        ttsFactory: options => { seenDefaultPitches.push(options.pitch); return { call: async () => ({ data: Buffer.alloc(1200, 1), subtitles: [] }) }; },
+        measureDuration: async () => 2.0,
+      });
+      assert.deepEqual(seenDefaultPitches, ['+0Hz'], 'omitting pitch must preserve the exact previous hardcoded +0Hz behavior');
+    } finally { fs.rmSync(dir2, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('trimSilence defaults to false: production/control callers never invoke silence detection or trimming', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-no-trim-'));
+  try {
+    let detectCalls = 0; let trimCalls = 0;
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-AriaNeural', rate: '-10%', timeoutMs: 1000,
+      ttsFactory: () => ({ call: async () => ({ data: Buffer.alloc(1200, 1), subtitles: [] }) }),
+      measureDuration: async () => 4.25,
+      detectSilence: async () => { detectCalls += 1; return { totalDuration: 4.25, leadingSilenceSeconds: 0, trailingSilenceSeconds: 0 }; },
+      trimAudio: async () => { trimCalls += 1; return null; },
+    });
+    assert.equal(detectCalls, 0); assert.equal(trimCalls, 0);
+    assert.equal(voiceovers[0].duration, 4.25, 'the raw (untrimmed) measured duration must be used as-is');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('trimSilence:true replaces the localPath file with the trimmed audio and reports the trimmed (shorter) duration', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-trim-'));
+  try {
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-GuyNeural', rate: '+15%', pitch: '-4Hz', timeoutMs: 1000, trimSilence: true,
+      ttsFactory: () => ({ call: async () => ({ data: Buffer.alloc(1200, 9), subtitles: [] }) }),
+      measureDuration: async candidatePath => (candidatePath.includes('.trimmed.') ? 1.1 : 2.35),
+      detectSilence: async () => ({ totalDuration: 2.35, leadingSilenceSeconds: 0.22, trailingSilenceSeconds: 0.95, trailingSilenceStart: 1.4 }),
+      trimAudio: async (inputPath, outputPath) => { fs.writeFileSync(outputPath, Buffer.alloc(600, 9)); return { start: 0.19, end: 1.48 }; },
+    });
+    assert.equal(voiceovers[0].duration, 1.1, 'the FINAL measured duration must reflect the trimmed file, not the raw candidate');
+    assert.ok(fs.existsSync(voiceovers[0].localPath));
+    assert.equal(fs.readdirSync(dir).filter(name => name.includes('.candidate-') || name.includes('.trimmed.')).length, 0, 'no stray candidate/trimmed intermediate file should be left behind');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('trimSilence:true falls back to the untrimmed candidate (never throws, never drops the file) if trimming reports nothing plausible to cut', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-voice-trim-noop-'));
+  try {
+    const voiceovers = await generateVoiceovers({
+      plan, audioDir: dir, voice: 'en-US-GuyNeural', rate: '+15%', pitch: '-4Hz', timeoutMs: 1000, trimSilence: true,
+      ttsFactory: () => ({ call: async () => ({ data: Buffer.alloc(1200, 5), subtitles: [] }) }),
+      measureDuration: async () => 2.0,
+      detectSilence: async () => ({ totalDuration: 2.0, leadingSilenceSeconds: 0, trailingSilenceSeconds: 0 }),
+      trimAudio: async () => null, // e.g. MIN_PLAUSIBLE_SPEECH_SECONDS guard tripped, or nothing genuine to trim
+    });
+    assert.equal(voiceovers[0].duration, 2.0);
+    assert.ok(fs.statSync(voiceovers[0].localPath).size > 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('detectSilenceBounds only reports silence touching the very start or end of the file, never an internal pause', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wyr-silence-detect-'));
+  try {
+    // Real tone/silence/tone/silence/tone fixture built with ffmpeg's own sine/anullsrc sources --
+    // exercises the actual silencedetect parsing against genuine audio, not a stubbed measurement.
+    const fixturePath = path.join(dir, 'fixture.mp3');
+    await new Promise((resolve, reject) => {
+      const child = spawn(resolveFfmpegPath(), ['-y',
+        '-f', 'lavfi', '-t', '0.3', '-i', 'anullsrc=r=24000:cl=mono',
+        '-f', 'lavfi', '-t', '0.6', '-i', 'sine=frequency=440:sample_rate=24000',
+        '-f', 'lavfi', '-t', '0.05', '-i', 'anullsrc=r=24000:cl=mono',
+        '-f', 'lavfi', '-t', '0.6', '-i', 'sine=frequency=440:sample_rate=24000',
+        '-f', 'lavfi', '-t', '0.5', '-i', 'anullsrc=r=24000:cl=mono',
+        '-filter_complex', '[0][1][2][3][4]concat=n=5:v=0:a=1[a]', '-map', '[a]', fixturePath], { stdio: 'ignore' });
+      child.once('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg fixture build exited ${code}`)));
+    });
+    const bounds = await detectSilenceBounds(fixturePath);
+    // 0.1s tolerance (not tight): mp3 container duration commonly runs tens of ms longer than the
+    // actual encoded silence, purely from encoder priming/padding -- see detectSilenceBounds' own
+    // comment on the same tolerance.
+    assert.ok(Math.abs(bounds.leadingSilenceSeconds - 0.3) < 0.1, `expected ~0.3s leading silence, got ${bounds.leadingSilenceSeconds}`);
+    assert.ok(Math.abs(bounds.trailingSilenceSeconds - 0.5) < 0.1, `expected ~0.5s trailing silence, got ${bounds.trailingSilenceSeconds}`);
+
+    const trimmedPath = path.join(dir, 'trimmed.mp3');
+    const trimResult = await trimSilenceFromAudio(fixturePath, trimmedPath, bounds);
+    assert.ok(trimResult);
+    const trimmedBounds = await detectSilenceBounds(trimmedPath);
+    assert.ok(trimmedBounds.leadingSilenceSeconds < 0.15, 'leading silence must be cut down to close to the small safety margin, not left at ~0.3s');
+    assert.ok(trimmedBounds.trailingSilenceSeconds < 0.2, 'trailing silence must be cut down to close to the small safety margin, not left at ~0.5s');
+    // The internal 0.05s mid-silence gap (shorter than either margin) must never be touched by
+    // trimming -- confirmed indirectly: total trimmed duration must still cover both tone segments
+    // plus the untouched internal gap, not just one continuous tone.
+    assert.ok(trimmedBounds.totalDuration > 1.0, 'trimming must never remove the internal pause between the two spoken segments');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

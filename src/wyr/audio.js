@@ -8,8 +8,10 @@ import { PROJECT_ROOT, resolveFfmpegPath, resolveFfprobePath } from './runtime.j
 import { getAudioSpec, getCountdownSequenceDuration } from './audio-spec.js';
 
 // Fixed product decision (not a measured reference value): on the final scene, skip the outgoing
-// whoosh/slide-out and simply hold the revealed percentages before the video ends.
-export const FINAL_SCENE_REVEAL_HOLD_SECONDS = 2;
+// whoosh/slide-out and simply hold the revealed percentages before the video ends. Faster-pacing
+// retention test target: ~0.6s (top of the template's 0.4-0.6s reveal-hold range, since nothing
+// follows it) -- was 2s.
+export const FINAL_SCENE_REVEAL_HOLD_SECONDS = 0.6;
 
 const ffmpegPath = resolveFfmpegPath();
 const ffprobePath = resolveFfprobePath();
@@ -47,6 +49,64 @@ export const measureAudioDuration = async audioPath => {
   return duration;
 };
 
+// TTS delivery experiment (opt-in, off by default -- see generateVoiceovers' trimSilence param):
+// Edge TTS's own raw MP3 output carries real leading/trailing silence baked in (measured, not
+// assumed -- e.g. the production Aria voice at -10% rate measured ~0.22s leading and ~0.95-0.98s
+// trailing silence on a short "Pizza or burger?"-style line, consistent across -30/-35/-40dB
+// silencedetect thresholds). That trailing silence is counted as part of the "measured narration
+// duration" buildSceneTimeline treats as authoritative, so it silently pushes the countdown much
+// later than the intended countdownPauseAfterVoice (0.1s) gap after the last AUDIBLE word.
+// -35dB/50ms are picked to catch genuine leading/trailing dead air while ignoring the short
+// intra-sentence pause around "or" (measured ~60-70ms, well under the 0.05s minimum run here would
+// still catch it if it touched the very start/end -- but detectSilenceBounds only ever looks at
+// whichever silence run touches t=0 or t=totalDuration, so an internal pause is never trimmed).
+const SILENCE_NOISE_FLOOR_DB = -35;
+const SILENCE_MIN_RUN_SECONDS = 0.05;
+const runCapturingStderr = (binary, args) => new Promise((resolve, reject) => {
+  const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] }); let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; }); child.once('error', reject);
+  child.once('close', code => code === 0 ? resolve(stderr) : reject(new Error(`ffmpeg silencedetect exited with code ${code}: ${stderr.slice(-3000)}`)));
+});
+const SILENCE_START_RE = /silence_start:\s*(-?[\d.]+)/g;
+const SILENCE_END_RE = /silence_end:\s*([\d.]+)/g;
+// Only ever reports silence that touches the very start (t=0) or very end (t=totalDuration) of the
+// file -- an internal pause (e.g. around "or") is never reported here and so can never be trimmed.
+export const detectSilenceBounds = async audioPath => {
+  const totalDuration = await measureAudioDuration(audioPath);
+  const stderr = await runCapturingStderr(ffmpegPath, ['-i', audioPath, '-af', `silencedetect=noise=${SILENCE_NOISE_FLOOR_DB}dB:d=${SILENCE_MIN_RUN_SECONDS}`, '-f', 'null', '-']);
+  const starts = [...stderr.matchAll(SILENCE_START_RE)].map(match => Number(match[1]));
+  const ends = [...stderr.matchAll(SILENCE_END_RE)].map(match => Number(match[1]));
+  const leadingSilenceSeconds = starts.length && Math.abs(starts[0]) < 0.005 ? (ends[0] ?? totalDuration) : 0;
+  let trailingSilenceSeconds = 0;
+  if (starts.length) {
+    const lastStart = starts[starts.length - 1];
+    const lastEnd = ends[ends.length - 1];
+    // 0.1s tolerance (not a tight epsilon): ffprobe's container-level format=duration on an mp3
+    // commonly runs tens of ms longer than silencedetect's last logged silence_end, purely from
+    // encoder priming/padding samples (LAME info-tag frame etc.) -- not real trailing audio content.
+    const runsToEof = ends.length < starts.length || (Number.isFinite(lastEnd) && Math.abs(lastEnd - totalDuration) < 0.1);
+    if (runsToEof && lastStart > leadingSilenceSeconds + 0.001) trailingSilenceSeconds = totalDuration - lastStart;
+  }
+  return { totalDuration, leadingSilenceSeconds, trailingSilenceSeconds, trailingSilenceStart: totalDuration - trailingSilenceSeconds };
+};
+
+// Cuts detected leading/trailing silence down to a small safety margin -- never to zero -- so the
+// first consonant's onset and the final word's decay (e.g. "-er" in "burger") are never clipped.
+// Margins are asymmetric on purpose: a clean onset needs less headroom than a trailing decay.
+// Returns null (caller keeps the untrimmed candidate) if the detected "speech" region is
+// implausibly short, which only happens if silencedetect misfired on genuinely near-silent audio.
+const LEADING_SILENCE_TRIM_MARGIN_SECONDS = 0.03;
+const TRAILING_SILENCE_TRIM_MARGIN_SECONDS = 0.08;
+const MIN_PLAUSIBLE_SPEECH_SECONDS = 0.3;
+export const trimSilenceFromAudio = async (inputPath, outputPath, bounds) => {
+  const start = Math.max(0, bounds.leadingSilenceSeconds - LEADING_SILENCE_TRIM_MARGIN_SECONDS);
+  const end = bounds.trailingSilenceSeconds > 0 ? Math.min(bounds.totalDuration, bounds.trailingSilenceStart + TRAILING_SILENCE_TRIM_MARGIN_SECONDS) : bounds.totalDuration;
+  if (end - start < MIN_PLAUSIBLE_SPEECH_SECONDS) return null;
+  if (start <= 0.0001 && end >= bounds.totalDuration - 0.0001) return null; // nothing genuine to trim
+  await run(ffmpegPath, ['-y', '-i', inputPath, '-ss', String(start), '-to', String(end), '-c:a', 'libmp3lame', '-b:a', '96k', '-ar', '24000', '-ac', '1', outputPath], 'trim narration silence');
+  return { start, end };
+};
+
 // Thrown once a scene's narration cannot be produced (as valid, ffprobe-measurable audio) after
 // its own bounded retries -- distinct from a duration-budget failure so the pipeline/UI can tell
 // "TTS itself is broken" apart from "narration is simply too long to fit" (see pipeline.js).
@@ -57,7 +117,16 @@ export class TtsGenerationError extends Error {
 // Narration is always synthesized at the configured rate and never sped up or truncated to fit a
 // box -- each scene's real measured duration is authoritative, and buildSceneTimeline lets the
 // scene grow to fit it. (See pipeline.js for the global, whole-video ceiling this feeds into.)
-export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress, ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration }) => {
+export const generateVoiceovers = async ({
+  plan, audioDir, voice, rate, timeoutMs, concurrency = 4, onProgress,
+  pitch = '+0Hz', // unchanged default -- production callers that don't pass this get byte-identical behavior to before
+  // TTS delivery experiment only (see detectSilenceBounds/trimSilenceFromAudio above): off by
+  // default, so every existing/production caller is completely unaffected. detectSilence/trimAudio
+  // are separately injectable (mirroring ttsFactory/measureDuration below) purely so tests can
+  // exercise the trimming branch without decoding real audio.
+  trimSilence = false, detectSilence = detectSilenceBounds, trimAudio = trimSilenceFromAudio,
+  ttsFactory = options => new EdgeTTS(options), measureDuration = measureAudioDuration,
+}) => {
   fs.mkdirSync(audioDir, { recursive: true }); let completed = 0;
   return mapWithConcurrency(plan.questions, concurrency, async (question, index) => {
     const narration = buildNarration(question); const filename = `q${String(index + 1).padStart(2, '0')}-narration.mp3`; const localPath = path.join(audioDir, filename);
@@ -68,7 +137,7 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
     // replaced once a candidate is FULLY verified.
     const sceneRate = index === 0 ? bumpTtsRate(rate, OPENING_TTS_RATE_BUMP_PERCENT) : rate;
     const synthesizeAndMeasure = rateValue => retry(async attempt => {
-      const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch: '+0Hz', volume: '+0%', timeout: timeoutMs });
+      const client = ttsFactory({ voice, lang: 'en-US', outputFormat: 'audio-24khz-96kbitrate-mono-mp3', rate: rateValue, pitch, volume: '+0%', timeout: timeoutMs });
       let result;
       try { result = await client.call(narration); } catch (error) { throw error instanceof Error ? error : new Error(String(error)); }
       if (!Buffer.isBuffer(result?.data) || result.data.length < 1000) throw new Error(`Edge TTS returned empty or invalid audio for scene ${index + 1}.`);
@@ -78,8 +147,24 @@ export const generateVoiceovers = async ({ plan, audioDir, voice, rate, timeoutM
       try { measured = await measureDuration(candidatePath); }
       catch (error) { fs.rmSync(candidatePath, { force: true }); throw error; }
       if (!Number.isFinite(measured) || measured <= 0) { fs.rmSync(candidatePath, { force: true }); throw new Error(`Edge TTS produced unreadable or zero-duration audio for scene ${index + 1}.`); }
-      fs.renameSync(candidatePath, localPath);
-      return measured;
+      if (!trimSilence) { fs.renameSync(candidatePath, localPath); return measured; }
+      // Trim only after the raw candidate has already proven itself valid/measurable above -- a
+      // trim failure or pathological detection falls back to the untrimmed (but still fully valid)
+      // candidate rather than ever risking a truncated or missing narration file.
+      const trimmedPath = `${candidatePath}.trimmed.mp3`;
+      try {
+        const bounds = await detectSilence(candidatePath);
+        const trimResult = await trimAudio(candidatePath, trimmedPath, bounds);
+        if (!trimResult) { fs.renameSync(candidatePath, localPath); return measured; }
+        const trimmedMeasured = await measureDuration(trimmedPath);
+        fs.rmSync(candidatePath, { force: true });
+        fs.renameSync(trimmedPath, localPath);
+        return trimmedMeasured;
+      } catch (error) {
+        fs.rmSync(trimmedPath, { force: true });
+        fs.renameSync(candidatePath, localPath);
+        return measured;
+      }
     }, { attempts: 2, label: `Edge TTS scene ${index + 1}` });
 
     let duration;

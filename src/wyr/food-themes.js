@@ -195,7 +195,7 @@ const singularizeFoodWord = word => {
 // capitalization, simple singular/plural variants, and A/B order should not hide repeated content.
 export const normalizeFoodOption = value => normalize(value).split(' ').filter(Boolean).map(singularizeFoodWord).join(' ');
 const normalizedFoodPair = question => [normalizeFoodOption(question?.optionA?.text), normalizeFoodOption(question?.optionB?.text)];
-const unorderedPairKey = pair => [...pair].sort().join('|');
+export const unorderedPairKey = pair => [...pair].sort().join('|');
 const pairWords = pair => new Set(pair.flatMap(value => value.split(' ')).filter(Boolean));
 const jaccard = (left, right) => {
   const intersection = [...left].filter(word => right.has(word)).length;
