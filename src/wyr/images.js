@@ -208,6 +208,12 @@ const EMBEDDED_TEXT_GRAPHIC_PATTERN = /\b(what if (?:we|you)|would you rather|di
 const FOOD_NON_PHOTO_PATTERN = /\b(ai[ -]?generated|generative ai|nightcafe|surreal|emoji|emoticon|sticker|clip[ -]?art|cartoon|illustration|illustrated|vector|digital art|concept art|3d render|rendered|cgi|painting|drawing|art print|wall art|fine art|wallpapers?|backgrounds? free download)\b/i;
 const FOOD_HUMAN_PATTERN = /\b(person|people|man|men|woman|women|boy|girl|child|children|family|couple|crowd|chef|cook|baker|barista|waiter|waitress|hands?|holding|eating|biting|drinking)\b/i;
 const FOOD_VENUE_PATTERN = /\b(storefront|shopfront|restaurant|cafe|café|diner|dining room|sushi bar|food truck|market stall|vendor|commercial kitchen|restaurant interior|display case|waffle house|shop|outlet|branch|nagar)\b/i;
+// A shelf/case/counter/table full of many different items reads as a generic category scene, not a
+// clear photo of the one requested dish (section D/G: the named food must be the dominant subject,
+// low clutter). Generic across ALL food options -- this is what a "bakery shelf" for "Donuts" or an
+// "assorted ice cream display" for "Mango Ice Cream" trips, regardless of which specific food was
+// requested, rather than a per-food rule.
+const FOOD_GENERIC_DISPLAY_PATTERN = /\b(bakery display|bakery shelf|bakery counter|pastry display|pastry case|pastry counter|assorted pastries|assorted desserts|assorted flavors|variety of flavors|variety pack|dessert display|dessert table|dessert counter|dessert spread|ice cream counter|ice cream case|gelato counter|candy display|candy counter|buffet spread|display shelf|display counter)\b/i;
 const FOOD_EDITORIAL_PATTERN = /\b(wedding|bride|groom|wedding film|production still|movie scene|film still|logo|headline|typography|text overlay|menu board|editorial graphic)\b/i;
 const FOOD_PRODUCT_PATTERN = /\b(marketplace|product packaging|packaged food|retail package|boxed product|packet|wrapper|grocery product|product listing|for sale|buy online|shop now|merchandise|burger king|mcdonald'?s|wendy'?s|restaurant chain)\b/i;
 const FOOD_CLEAN_STUDIO_PATTERN = /\b(isolated|white background|off[ -]?white background|neutral background|plain background|transparent background|transparent png|png cutout|food cutout|product photo|product photography|product shot|single food|studio photo|close[ -]?up)\b/i;
@@ -238,6 +244,11 @@ const FOOD_IDENTITY_TERMS = new Set([
   'sushi', 'taco', 'toast', 'waffle', 'wrap', 'mozzarella sticks', 'chicken tenders',
   'chicken wings', 'onion rings', 'spring rolls', 'egg rolls', 'sausage rolls', 'hash browns',
   'tater tots', 'potato wedges',
+  // Common single raw ingredients/foods that are frequently returned as unrelated top candidates
+  // for a composed-dish query (e.g. an avocado close-up for "Green Salad") but were previously
+  // absent from this conflict list entirely, so they fell through as accepted "ambiguous" instead
+  // of being recognized as a different food. Generic additions, not tied to any specific option.
+  'avocado', 'banana', 'apple', 'orange', 'egg', 'bacon', 'cheese', 'yogurt', 'granola',
 ]);
 const FOOD_MULTIWORD_BASES = [...new Set(FOOD_IDENTITY_SYNONYM_GROUPS.flat())]
   .filter(term => term.includes(' ')).sort((left, right) => right.split(' ').length - left.split(' ').length);
@@ -301,12 +312,43 @@ export const assessFoodImageSemanticRelevance = (candidate, option) => {
   if (!requested.base || !metadata) return { accepted: true, decision: 'ambiguous', ...requested, metadata, reason: 'metadata is insufficient and has no strong conflict' };
   const baseMatched = requested.baseAliases.some(alias => phrasePresent(metadata, alias));
   if (baseMatched) {
+    // A literal word match doesn't prove the FOOD sense of that word -- e.g. "stuffing" also names
+    // furniture/pillow filling. Strong non-dish domain evidence (FOOD_METADATA_NON_DISH_PATTERN)
+    // must reject regardless of which branch matched the base word, not just the not-baseMatched
+    // branch below, otherwise a homograph conflict silently resolves to a false 'match'.
+    const nonDishWithBase = metadata.match(FOOD_METADATA_NON_DISH_PATTERN)?.[0]?.toLowerCase();
+    if (nonDishWithBase) return { accepted: false, decision: 'reject', ...requested, metadata, reason: `metadata matches requested base food "${requested.base}" but also identifies a non-dish subject (${nonDishWithBase}), likely a different sense of the word` };
+    // Requested flavor/protein modifier (FOOD_EXCLUSIVE_MODIFIER_GROUPS) that metadata neither
+    // confirms nor contradicts -- e.g. base dish "ice cream" matches, but neither "mango" nor a
+    // conflicting flavor appears in the metadata at all. The dish is real but this specific
+    // candidate can't be trusted to depict the exact variant asked for, so this must NOT resolve
+    // to a full 'match' (that previously let a generic assorted-flavor photo pass for a
+    // flavor-specific request); downgrading to 'ambiguous' keeps it accepted as a last-resort
+    // fallback while letting a genuinely confirmed match elsewhere in the ranked pool win instead
+    // (see assessImageCandidate's food decision-quality ranking bonus).
+    let unconfirmedModifierGroup = false;
+    let assortmentModifierGroup = false;
     for (const group of FOOD_EXCLUSIVE_MODIFIER_GROUPS) {
       const requestedGroupModifiers = requested.modifierWords.filter(word => group.includes(singularFoodTerm(word)));
-      if (!requestedGroupModifiers.length || requestedGroupModifiers.some(word => phrasePresent(metadata, word))) continue;
+      if (!requestedGroupModifiers.length) continue;
+      const confirmedModifier = requestedGroupModifiers.find(word => phrasePresent(metadata, word));
+      if (confirmedModifier) {
+        // Multi-flavor ASSORTMENT guard: the requested flavor/protein IS present, but so are 2+
+        // OTHER members of the same exclusive group (e.g. "mango, vanilla, chocolate, strawberry
+        // ice cream") -- a real single-flavor dish incidentally mentions at most one other member
+        // (a topping/garnish, e.g. "mango ice cream with strawberry garnish"), so requiring 2+
+        // others distinguishes "requested flavor is the dominant subject" from "requested flavor is
+        // just one item in a display of many" without rejecting normal garnish/topping mentions.
+        const otherMembersPresent = group.filter(word => singularFoodTerm(word) !== singularFoodTerm(confirmedModifier) && phrasePresent(metadata, word));
+        if (otherMembersPresent.length >= 2) assortmentModifierGroup = true;
+        continue;
+      }
       const conflictingModifier = group.find(word => phrasePresent(metadata, word));
       if (conflictingModifier) return { accepted: false, decision: 'reject', ...requested, metadata, conflictingModifier, reason: `metadata matches requested base food "${requested.base}" but identifies a conflicting modifier (${conflictingModifier})` };
+      unconfirmedModifierGroup = true;
     }
+    if (assortmentModifierGroup) return { accepted: true, decision: 'ambiguous', ...requested, metadata, reason: `metadata confirms the requested modifier for "${requested.base}" but also lists multiple other flavors/varieties (looks like a multi-item assortment, not a single dominant dish)` };
+    if (unconfirmedModifierGroup) return { accepted: true, decision: 'ambiguous', ...requested, metadata, reason: `metadata matches requested base food "${requested.base}" but does not confirm the requested modifier (${requested.modifierWords.join(', ')})` };
     return { accepted: true, decision: 'match', ...requested, metadata, reason: `metadata explicitly matches requested base food "${requested.base}"` };
   }
   const matchedModifiers = requested.modifierWords.filter(word => phrasePresent(metadata, word));
@@ -520,6 +562,8 @@ export const assessImageCandidate = (candidate, option) => {
     if (humanMatch) hardRejectionReasons.push(`hard-rejected: food candidate includes a person or eating interaction (${humanMatch})`);
     const venueMatch = hardFormatEvidence.match(FOOD_VENUE_PATTERN)?.[0]?.toLowerCase();
     if (venueMatch) hardRejectionReasons.push(`hard-rejected: food candidate depicts a venue rather than the literal dish (${venueMatch})`);
+    const genericDisplayMatch = hardFormatEvidence.match(FOOD_GENERIC_DISPLAY_PATTERN)?.[0]?.toLowerCase();
+    if (genericDisplayMatch) hardRejectionReasons.push(`hard-rejected: food candidate is a generic shelf/case/assortment display rather than the single dominant dish (${genericDisplayMatch})`);
     const editorialMatch = hardFormatEvidence.match(FOOD_EDITORIAL_PATTERN)?.[0]?.toLowerCase();
     if (editorialMatch) hardRejectionReasons.push(`hard-rejected: food candidate has editorial or unrelated scene context (${editorialMatch})`);
     const productMatch = hardFormatEvidence.match(FOOD_PRODUCT_PATTERN)?.[0]?.toLowerCase();
@@ -610,7 +654,17 @@ export const assessImageCandidate = (candidate, option) => {
   // rejectionReasons/accepted, so this cannot loosen or tighten what counts as a valid candidate,
   // only which already-valid candidate wins ordering.
   const semanticRankAdjustment = computeSemanticRankAdjustment(optionWords, searchableText, headNounMatched, foodOption);
-  const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30 + semanticRankAdjustment);
+  // Decision quality must dominate ranking among already-accepted food candidates (section G: a
+  // confirmed match beats resolution/crop/popularity, never the other way around). Without this,
+  // assessFoodImageSemanticRelevance's accept/reject gate only filtered candidates -- 'match' and
+  // 'ambiguous' scored identically once both passed, so a merely-ambiguous higher-resolution
+  // candidate could outrank a confirmed match. Implemented as an 'ambiguous' PENALTY rather than a
+  // 'match' bonus: a flat bonus on top of an already near-ceiling score just clamps every strong
+  // match to the same 100, erasing the finer-grained relevance/quality ranking between two matches
+  // (e.g. isolated product photo vs. a busier but still-matching scene) -- penalizing 'ambiguous'
+  // instead demotes genuinely unconfirmed candidates without ever touching match-vs-match ordering.
+  const foodDecisionPenalty = foodOption && foodSemanticRelevance?.decision === 'ambiguous' ? 20 : 0;
+  const finalScore = clampScore(relevanceScore * 0.42 + conceptClarity * 0.28 + qualityScore * 0.30 + semanticRankAdjustment - foodDecisionPenalty);
   if (!explicitVisualIntent(option, allTokens) || intentCoverage < 0.67) rejectionReasons.push('candidate does not explicitly represent the required visual intent');
   if (coreMatched.length === 0 || relevanceScore < 44) rejectionReasons.push(`relevance score ${relevanceScore.toFixed(1)} is below 44.0`);
   if (dominantSubjectWords.length && dominantCoverage < 0.5) rejectionReasons.push(`candidate does not show the option's dominant subject (${dominantSubjectWords.join(' ')}); matched only ${dominantMatched.join(', ') || 'none'}`);

@@ -14,7 +14,6 @@ import { rowToQuestion } from './pool-selection.js';
 import { selectContentPlan } from './content-source.js';
 import { commitPlanUsage, releaseQuestionReservation, releaseReservation, reserveReplacementQuestion } from './question-pool.js';
 import { assertStrictFoodPlan } from './food-content.js';
-import { generateHookVoiceover, prependHookToTimeline } from './hook.js';
 
 // Disposable per-job temp artifacts (raw downloaded images, TTS mp3s, rendered scene segments) --
 // always scoped to path.join(job.workspace, ...), never anything outside a job's own directory.
@@ -114,8 +113,14 @@ const buildProductionVoiceTimeline = async ({ plan, config, workspace, onProgres
   // the configured result hold plus the unchanged transition tail. A fixed scene-duration floor
   // otherwise turns into extra dead time after the reveal for shorter questions.
   const questionTimeline = buildSceneTimeline({ voiceovers, baseDuration: 0, voicePaddingSeconds: config.voicePaddingSeconds });
-  const hookVoiceover = plan.hook ? await generateHookVoiceover({ hook: plan.hook, audioDir: path.join(workspace, 'audio'), voice: config.edgeVoice, rate: config.edgeVoiceRate, timeoutMs: config.ttsTimeoutMs }) : null;
-  const timeline = hookVoiceover ? prependHookToTimeline(questionTimeline, hookVoiceover) : questionTimeline;
+  // Frame 0 must BE the choice (Q1 is the hook): the pre-Q1 intro/title scene is disabled
+  // unconditionally here, regardless of plan.hook -- plan.hook's themeKey/title/ttsText stay
+  // populated for themed plans because replaceUnfillableQuestions still needs hook.themeKey to
+  // scope a mid-flight question swap to the same theme, but no hook voiceover/scene is ever
+  // generated from it. generateHookVoiceover/prependHookToTimeline (hook.js) are kept in place,
+  // dormant, in case scripted mid-video re-hooks are revisited later against real retention data.
+  const hookVoiceover = null;
+  const timeline = questionTimeline;
   assertWithinProductionDurationCeiling(timeline);
   return { voiceovers, hookVoiceover, timeline };
 };

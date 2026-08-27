@@ -194,3 +194,39 @@ export const deriveToneBucket = (optionAText, optionBText, isFantasy = false) =>
   if (tags.has('love_social')) return 'relatable_social';
   return 'lifestyle_tradeoff';
 };
+
+// DILEMMA_STRENGTH_LEXICON above is built for general lifestyle WYR stakes (yacht, mansion,
+// superpower) and rarely fires for a FOOD pair at all ("Pizza" vs "Burger" trips zero tags), so
+// food ranking today falls back almost entirely to the stale, concision-only hook_score with no
+// signal for what section B of the retention brief actually asks for: both options being
+// INSTANTLY recognizable / broadly familiar. Deliberately its own small, self-contained lexicon
+// (not imported from food-content.js's FOOD_HEADS/EXACT_FOODS, which only answers "is this a real
+// food," not "how recognizable is it") so this stays a pure, isolated ranking signal with zero
+// coupling to the FOOD-mode validation gate. A general lookup over common US/UK staple foods --
+// never a specific hardcoded pair, so it naturally applies across the whole DB, not just one match.
+const HIGH_RECOGNIZABILITY_FOOD_WORDS = new Set([
+  'pizza', 'burger', 'burgers', 'cheeseburger', 'cheeseburgers', 'hotdog', 'hotdogs', 'hot', 'dog', 'dogs',
+  'taco', 'tacos', 'burrito', 'burritos', 'sushi', 'fries', 'nuggets', 'sandwich', 'sandwiches',
+  'pasta', 'spaghetti', 'lasagna', 'noodles', 'ramen', 'rice', 'chicken', 'steak', 'ribs', 'wings',
+  'bacon', 'egg', 'eggs', 'omelet', 'omelette', 'pancake', 'pancakes', 'waffle', 'waffles', 'toast',
+  'cereal', 'donut', 'donuts', 'doughnut', 'doughnuts', 'bagel', 'bagels', 'muffin', 'muffins',
+  'croissant', 'croissants', 'cake', 'cupcake', 'cupcakes', 'cookie', 'cookies', 'brownie', 'brownies',
+  'cheesecake', 'pie', 'icecream', 'gelato', 'milkshake', 'milkshakes', 'smoothie', 'smoothies',
+  'chocolate', 'candy', 'popcorn', 'chips', 'nachos', 'salad', 'soup', 'dumpling', 'dumplings',
+  'meatball', 'meatballs', 'shrimp', 'salmon', 'fish', 'lobster', 'pretzel', 'pretzels', 'coffee',
+  'soda', 'lemonade', 'ice', 'cream',
+]);
+const isHighlyRecognizableFood = text => {
+  const words = String(text ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  return words.some(word => HIGH_RECOGNIZABILITY_FOOD_WORDS.has(word));
+};
+// Deliberately small: a modest tie-breaker on top of hook_score/computeDilemmaStrengthScore, never
+// strong enough on its own to flip an already-clear hook_score gap (see pool-selection.js's
+// computeDilemmaRankScore/arrangeForHook, which only apply this for category:'food' rows).
+export const computeFoodRecognizabilityScore = (optionAText, optionBText) => {
+  const aRecognizable = isHighlyRecognizableFood(optionAText);
+  const bRecognizable = isHighlyRecognizableFood(optionBText);
+  if (aRecognizable && bRecognizable) return 6;
+  if (aRecognizable || bRecognizable) return 2;
+  return 0;
+};

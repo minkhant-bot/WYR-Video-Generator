@@ -61,6 +61,40 @@ const SUBJECT_WORD_FORM = Object.freeze({ shop: 'shopping', shops: 'shopping', d
 const TEMPORAL_MODIFIER_WORDS = new Set(['midnight', 'dawn', 'dusk', 'sunrise', 'sunset', 'noon', 'twilight', 'nightfall', 'daybreak']);
 const normalize = value => String(value ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 
+// A small, explicit lookup for food names that stay ambiguous even with the generic "+food" suffix
+// below -- regional/holiday dishes whose bare name is easily misread by a stock-photo search
+// (e.g. "stuffing" alone skews toward fabric/upholstery or unrelated "stuffed X" dishes, "pudding"
+// alone skews toward a generic custard cup rather than the specific dessert). Deliberately small
+// and keyed on the normalized BARE literal food term, not a general per-food dictionary --
+// everything else still falls through to the generic "+food" suffix. Never broadens to a vague
+// category (no "healthy food"/"bakery"). Applied to the bare subject BEFORE any generic decoration
+// is layered on (see disambiguateFoodLabel below) -- it must never be applied to an
+// already-decorated query string (e.g. "stuffing isolated white background product photo no
+// people"), since the lookup would then never match and silently become dead code.
+const FOOD_QUERY_DISAMBIGUATION = new Map([
+  ['stuffing', 'Thanksgiving stuffing food'],
+  ['dressing', 'Thanksgiving stuffing dressing food'],
+  ['christmas pudding', 'Christmas pudding dessert'],
+  ['plum pudding', 'Christmas plum pudding dessert'],
+  ['pound cake', 'pound cake dessert'],
+  ['trifle', 'English trifle dessert'],
+  ['pavlova', 'pavlova dessert'],
+  ['mince pie', 'mince pie dessert'],
+  ['mince pies', 'mince pies dessert'],
+  ['spotted dick', 'spotted dick pudding dessert'],
+  ['eton mess', 'Eton mess dessert'],
+  ['bread pudding', 'bread pudding dessert'],
+]);
+// Looks up a BARE food label (not a decorated query phrase) and returns a more semantically
+// specific replacement when one exists, else the label unchanged. Callers must apply this to the
+// literal subject before any "isolated white background product photo"/"+food" style decoration
+// is appended -- see buildImageQueries' food branch below, the one production call site.
+export const disambiguateFoodLabel = text => {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return trimmed;
+  return FOOD_QUERY_DISAMBIGUATION.get(normalize(trimmed)) || trimmed;
+};
+
 // Food names are often ambiguous outside their category (for example, "Mac" can resolve to an
 // Apple computer). Keep the stored/display text unchanged, but give provider searches the food
 // context needed to disambiguate them. Other categories retain their existing queries verbatim.
@@ -128,7 +162,12 @@ export const buildImageQueries = (optionText, category = '') => {
   const q1 = phrase[phrase.length - 1] || q0;
   const q2 = normalize(category);
   if (q2 === 'food') {
-    const literalFoodSubject = normalize(optionText).split(' ').slice(0, 5).join(' ');
+    // Disambiguation is applied here, to the bare subject, BEFORE the decoration below is layered
+    // on -- applying it afterward (e.g. inside withFoodSearchContext, against the fully-decorated
+    // string) was the exact bug a live-provider test caught: the lookup key never matched a
+    // decorated phrase, so "stuffing" never became "Thanksgiving stuffing food" and a real search
+    // returned a stuffed-eggplant product photo instead.
+    const literalFoodSubject = disambiguateFoodLabel(normalize(optionText).split(' ').slice(0, 5).join(' '));
     return [...new Set([
       `${literalFoodSubject} isolated white background product photo no people`,
       `${literalFoodSubject} single food close up white background`,

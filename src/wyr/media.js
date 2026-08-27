@@ -203,7 +203,7 @@ export const buildConcatSegmentList = ({ segments, timeline, gapSegmentPath }) =
   return segments.flatMap((segment, index) => timeline.scenes[index]?.gapAfter > 0 ? [segment, gapPathFor(index)] : [segment]);
 };
 export const buildComposition = ({ plan, assets, duration, timeline, voiceovers = [], sfx = null, workspace }) => {
-  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, hook: plan.hook ? { ...plan.hook, timeline: timeline?.hook || null } : null, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
+  const composition = { width: WYR_TEMPLATE.canvas.width, height: WYR_TEMPLATE.canvas.height, fps: WYR_TEMPLATE.canvas.fps, secondsPerQuestion: timeline ? null : duration, totalDuration: timeline?.totalDuration ?? plan.questions.length * duration, hook: timeline?.hook ? { ...plan.hook, timeline: timeline.hook } : null, timing: WYR_TEMPLATE.timing, layout: WYR_TEMPLATE.layout, typography: WYR_TEMPLATE.typography, slots: ['A_IMAGE', 'A_TEXT', 'A_PERCENT', 'B_IMAGE', 'B_TEXT', 'B_PERCENT', 'OR'], percentages: plan.percentages, sfx: sfx ? { provider: sfx.provider, reveal: sfx.reveal.filename, transition: sfx.transition.filename, countdownSequence: sfx.countdownSequence.filename } : null, questions: plan.questions.map((question, index) => ({ index, optionA: question.optionA, optionB: question.optionB, A_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'A')?.filename, B_IMAGE: assets.find(asset => asset.questionIndex === index && asset.slot === 'B')?.filename, narration: voiceovers.find(item => item.questionIndex === index)?.filename || null, scene: timeline?.scenes[index] || { duration } })) };
   writeJsonAtomic(path.join(workspace, 'composition.json'), composition); return composition;
 };
 const assertReadableNonEmptyFile = (localPath, label) => {
@@ -442,14 +442,19 @@ export const renderVideo = async ({ plan, assets, duration, timeline, voiceovers
   const gapSegmentByIndex = {};
   for (const index of gapIndices) gapSegmentByIndex[index] = await buildFreezeGapSegment({ renderDir, sourceSegment: segments[index], seconds: timeline.blankGapSeconds, index, ffmpegThreads });
   const questionSegments = buildConcatSegmentList({ segments, timeline, gapSegmentPath: index => gapSegmentByIndex[index] });
-  const hookSegment = plan.hook ? await renderHookVisual({ plan, assets, renderDir, duration: timeline.hook.duration, output: path.join(renderDir, 'hook.mp4'), ffmpegThreads }) : null;
+  // Gated on timeline?.hook (only ever set by prependHookToTimeline), not plan.hook -- plan.hook's
+  // themeKey stays populated for themed plans (see pool-selection.js) even though the pre-Q1 intro
+  // scene itself is unconditionally disabled in production (pipeline.js never calls
+  // generateHookVoiceover/prependHookToTimeline), so this must not re-derive the old behavior from
+  // plan.hook's mere presence.
+  const hookSegment = timeline?.hook ? await renderHookVisual({ plan, assets, renderDir, duration: timeline.hook.duration, output: path.join(renderDir, 'hook.mp4'), ffmpegThreads }) : null;
   const concatSegments = hookSegment ? [hookSegment, ...questionSegments] : questionSegments;
   const concatFile = path.join(renderDir, 'segments.txt'); fs.writeFileSync(concatFile, `${concatSegments.map(segment => `file '${path.basename(segment)}'`).join('\n')}\n`);
   const silentVideo = path.join(renderDir, 'video.mp4'); await run(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', silentVideo], 'concatenate segments');
   const totalDuration = timeline?.totalDuration ?? plan.questions.length * duration; const output = path.join(workspace, 'output', 'would-you-rather.mp4');
   if (voiceovers.length || (timeline && sfx)) {
     assertProductionAudioInputs({ plan, voiceovers, timeline, sfx });
-    if (plan.hook) assertReadableNonEmptyFile(hookVoiceover?.localPath, 'hook voiceover');
+    if (timeline?.hook) assertReadableNonEmptyFile(hookVoiceover?.localPath, 'hook voiceover');
     const schedule = sfxSchedule || buildSfxSchedule(timeline); assertCompleteSfxSchedule({ timeline, events: schedule.events });
     const countdown = countdownSchedule || buildCountdownSchedule(timeline); assertCompleteCountdownSchedule({ timeline, events: countdown.events });
     const voiceoverVolumes = computeNarrationVolumes(voiceovers, narrationPeakDbfs);

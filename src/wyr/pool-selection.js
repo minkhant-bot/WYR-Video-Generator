@@ -3,7 +3,7 @@
 // the result back) so the actual diversity/hook/fantasy rules are unit-testable without a
 // database, and reused identically by both insertion (refill) and selection (video generation).
 import { canonicalDilemma, canonicalMotifKey, deriveTopic, deriveVisualSubject, isFantasyQuestion, optionSimilarity, questionMotifs } from './content-engine.js';
-import { computeDilemmaStrengthScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
+import { computeDilemmaStrengthScore, computeFoodRecognizabilityScore, computeHookScore, computeQualityScore, computeVisualScore, deriveToneBucket } from './scoring.js';
 import { assessQuestionQuality } from './content-engine.js';
 import { estimateSceneDurationFromText } from './duration-estimate.js';
 import { assessFoodPair } from './food-content.js';
@@ -260,7 +260,13 @@ export const repairPlanForDuration = ({ selected, candidates, blockedMotifs = ne
 // the live, content-aware score keeps hook_score's readability signal in the mix while stopping it
 // from single-handedly deciding Scene 1 for a dismissible pair.
 const DILEMMA_STRENGTH_WEIGHT = 1.6;
-export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text) * DILEMMA_STRENGTH_WEIGHT;
+// computeFoodRecognizabilityScore (scoring.js) only ever fires for category:'food' rows -- the
+// general lifestyle DILEMMA_STRENGTH_LEXICON above rarely tags a food pair at all, so without this
+// food ranking had no signal for "both options broadly familiar" (retention brief section B).
+export const computeDilemmaRankScore = row => {
+  const base = Number(row.hook_score) + computeDilemmaStrengthScore(row.option_a_text, row.option_b_text) * DILEMMA_STRENGTH_WEIGHT;
+  return row.category === 'food' ? base + computeFoodRecognizabilityScore(row.option_a_text, row.option_b_text) : base;
+};
 
 // Scene 1 is the highest-priority slot: food this-or-that reliably outperforms other categories on
 // TikTok (instantly relatable, readable from the image alone), so the strongest-hook_score food
@@ -268,9 +274,14 @@ export const computeDilemmaRankScore = row => Number(row.hook_score) + computeDi
 // none of the 6 selected are food, rather than failing. The rest keep their diversity-selection
 // order rather than being fully re-sorted by score (a flat score sort would front-load every
 // strong hook and let pacing collapse afterward).
+// hookRankValue folds in computeFoodRecognizabilityScore for food rows only (see
+// computeDilemmaRankScore above) -- a small tie-breaker toward broadly-familiar pairs, never
+// strong enough to flip an already-clear hook_score gap. Non-food rows are unaffected (reduces to
+// raw hook_score, same as before).
+const hookRankValue = row => Number(row.hook_score) + (row.category === 'food' ? computeFoodRecognizabilityScore(row.option_a_text, row.option_b_text) : 0);
 export const arrangeForHook = rows => {
   if (rows.length <= 1) return [...rows];
-  const strongestOf = pool => pool.reduce((best, row) => Number(row.hook_score) > Number(best.hook_score) ? row : best, pool[0]);
+  const strongestOf = pool => pool.reduce((best, row) => hookRankValue(row) > hookRankValue(best) ? row : best, pool[0]);
   const foodRows = rows.filter(row => row.category === 'food');
   const strongest = foodRows.length ? strongestOf(foodRows) : strongestOf(rows);
   return [strongest, ...rows.filter(row => row.id !== strongest.id)];
@@ -346,6 +357,11 @@ export const buildPlanFromPoolRows = rows => {
     topic: deriveTopic(questions),
     percentages: null,
     source: 'database_pool',
+    // themeKey here is NOT purely decorative -- pipeline.js's replaceUnfillableQuestions passes
+    // hook?.themeKey to reserveReplacementQuestion so a mid-flight question swap stays within the
+    // same theme. Kept populated for that reason; the pre-Q1 intro SCENE itself is disabled
+    // separately and unconditionally in pipeline.js/media.js (Q1 is the hook, frame 0 is the
+    // choice), not by hiding this metadata.
     hook: themed ? { themeKey: arranged[0].theme_key, title: arranged[0].theme_title, ttsText: arranged[0].hook_tts_text } : null,
     contentQuality: {
       source: 'database_pool',
