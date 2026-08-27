@@ -1,5 +1,5 @@
 import { withClient, withTransaction } from './db.js';
-import { canonicalFoodPairKey, classifyRejectionReasons, computeInsertionFields, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
+import { canonicalFoodPairKey, classifyRejectionReasons, computeInsertionFields, dishFamilyOf, rankCandidatesByStrength, selectDiversePlan, repairPlanForDuration, buildPlanFromPoolRows } from './pool-selection.js';
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { isStrictFoodPoolRow } from './food-content.js';
@@ -295,10 +295,19 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   // never even sees it, so it naturally reaches for the next best 'ready' candidate instead.
   const naturalWording = visuallyFeasible.filter(row => hasNaturalWording(row.option_a_text) && hasNaturalWording(row.option_b_text));
   const wordingRejectedCount = visuallyFeasible.length - naturalWording.length;
+  // Same-base-food hard filter: a row whose own option A and option B fall in the same dish family
+  // (see pool-selection.js's dishFamilyOf, e.g. "Caesar Salad" vs "Greek Salad" both being "salad")
+  // is not a real either/or and is excluded here, never reserved -- hard, not a ranking
+  // deprioritization, because the existing similarity-based ranking signal (computeDistinctnessBonus)
+  // already applies to this exact pair in production and still let it through; only a hard exclusion
+  // actually prevents it from filling a slot. Protects the existing ready pool immediately, no
+  // insertion-time change or backfill needed.
+  const distinctDishFamilies = naturalWording.filter(row => dishFamilyOf(row.option_a_text) !== dishFamilyOf(row.option_b_text));
+  const sameDishFamilyRejectedCount = naturalWording.length - distinctDishFamilies.length;
   // Prefer stronger eligible dilemmas first (see pool-selection.js's rankCandidatesByStrength):
   // re-sorts WITHIN each LRU tier only, so a genuinely staler row never loses its fair-rotation
   // priority to a fresher-but-weaker one -- weaker questions stay in the window, just later in it.
-  const candidates = naturalWording;
+  const candidates = distinctDishFamilies;
   const blockedMotifs = await recentMotifsFromDb(client);
   const blockedThemes = await recentThemesFromDb(client);
   const blockedPairKeys = await recentPairKeysFromDb(client);
@@ -359,8 +368,8 @@ export const selectAndReservePlan = async ({ jobId, count = 8, candidateWindowSi
   );
   const distinctFamilies = new Set(selected.map(row => row.content_family)).size;
   const fantasyCount = selected.filter(row => row.is_fantasy).length;
-  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds, wordingRejectedCount, foodContentRejectedCount });
-  return { selected, distinctFamilies, fantasyCount, wordingRejectedCount, foodContentRejectedCount };
+  log('pool.reserved', { jobId, count: selected.length, distinctFamilies, fantasyCount, durationRepaired: repair.swapped, projectedTotalSeconds: repair.projectedTotalSeconds, wordingRejectedCount, foodContentRejectedCount, sameDishFamilyRejectedCount });
+  return { selected, distinctFamilies, fantasyCount, wordingRejectedCount, foodContentRejectedCount, sameDishFamilyRejectedCount };
 });
 
 export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize = 80, baseDuration, targetTotalSeconds }) => {
@@ -369,6 +378,7 @@ export const selectPlanForJob = async ({ jobId, count = 8, candidateWindowSize =
   const plan = buildPlanFromPoolRows(reservation.selected);
   plan.contentQuality.wordingRejectedCount = reservation.wordingRejectedCount;
   plan.contentQuality.foodContentRejectedCount = reservation.foodContentRejectedCount;
+  plan.contentQuality.sameDishFamilyRejectedCount = reservation.sameDishFamilyRejectedCount;
   return plan;
 };
 

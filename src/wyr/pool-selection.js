@@ -36,6 +36,28 @@ export const contentFamilyForCategory = category => CONTENT_FAMILY_BY_CATEGORY[c
 // that latent overlap reachable within a single video for the first time, so it's re-checked here.
 export const canonicalFoodPairKey = row => unorderedPairKey([normalizeFoodOption(row.option_a_text), normalizeFoodOption(row.option_b_text)]);
 
+// Groups a normalized dish's head word (its last token -- the same technique food-content.js's
+// FOOD_HEADS matching and images.js's requestedFoodIdentity already use for "the dish's base noun")
+// into a broader dish family, only where evidence in the live 361-row FOOD pool showed a real
+// cross-head-word relationship: soup/stew/chowder (19 rows across those 3 heads), potato/fry/wedge
+// (19 rows), coleslaw as a cabbage salad (3 rows), cheeseburger as unambiguously a burger (5 rows).
+// Deliberately NOT a large speculative map -- e.g. "roll" (cinnamon/spring/sausage roll) and
+// "wing"/"tender"/"chicken" were considered and left out: real dishes in the pool, but not an
+// unambiguous single family the way soup/potato/burger are. An unmapped head defaults to being its
+// own singleton family (see dishFamilyOf below) -- the safe behavior, so coverage can grow later
+// from real evidence rather than guesses now.
+const DISH_FAMILY_BY_HEAD = new Map([
+  ['stew', 'soup'], ['chowder', 'soup'],
+  ['fry', 'potato'], ['wedge', 'potato'],
+  ['coleslaw', 'salad'],
+  ['cheeseburger', 'burger'],
+]);
+export const dishFamilyOf = optionText => {
+  const normalized = normalizeFoodOption(optionText);
+  const head = normalized.split(' ').filter(Boolean).at(-1) || normalized;
+  return DISH_FAMILY_BY_HEAD.get(head) || head;
+};
+
 // Everything a raw {category, optionA, optionB} candidate (from Groq or a fixture) needs before it
 // can be inserted as a wyr_questions row: hard quality gate, motif fingerprints, content family,
 // fantasy classification, dedupe key, and the three ranking scores.
@@ -143,8 +165,8 @@ export const rankCandidatesByStrength = rows => {
 // first by the caller's SQL. Within-plan motif duplication and the fantasy cap stay hard. Motifs
 // seen in recent completed videos are preferred away from, then relaxed only when necessary.
 export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new Set(), blockedPairKeys = new Set() } = {}) => {
-  const attempt = (relaxFamilyCap, relaxRecent) => {
-    const familyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const usedPairKeys = new Set(); const selected = [];
+  const attempt = (relaxFamilyCap, relaxRecent, relaxDishFamilyCap) => {
+    const familyCounts = new Map(); const dishFamilyCounts = new Map(); let fantasyCount = 0; const usedMotifs = new Set(); const usedPairKeys = new Set(); const selected = [];
     for (const row of candidates) {
       if (selected.length >= count) break;
       const pairKey = canonicalFoodPairKey(row);
@@ -159,7 +181,20 @@ export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new S
       if (row.is_fantasy && fantasyCount >= 1) continue;
       const familyCount = familyCounts.get(row.content_family) || 0;
       if (!relaxFamilyCap && familyCount >= 2) continue;
+      // Dish-family cap (see dishFamilyOf above): a single food family (e.g. "soup" covering
+      // soup/stew/chowder) may appear as at most 2 of the plan's option slots, so one dish family
+      // can't dominate a whole video the way 4-of-10 soup-family questions did in a real production
+      // video. Deliberately its OWN relax flag, not reused from relaxFamilyCap: every FOOD row
+      // shares the same content_family ('food_and_social', see contentFamilyForCategory), so the
+      // content_family cap above is already a de-facto no-op for FOOD selection -- it caps out at 2
+      // rows and needs relaxing almost immediately in every real FOOD job. Tying dish-family to the
+      // same flag would relax it at that same moment, making the cap this feature exists for never
+      // actually bind. relaxDishFamilyCap only becomes true as the ladder's last resort below.
+      const dishFamilyA = dishFamilyOf(row.option_a_text); const dishFamilyB = dishFamilyOf(row.option_b_text);
+      const dishFamilyCountA = dishFamilyCounts.get(dishFamilyA) || 0; const dishFamilyCountB = dishFamilyCounts.get(dishFamilyB) || 0;
+      if (!relaxDishFamilyCap && (dishFamilyCountA >= 2 || dishFamilyCountB >= 2)) continue;
       selected.push(row); familyCounts.set(row.content_family, familyCount + 1);
+      dishFamilyCounts.set(dishFamilyA, dishFamilyCountA + 1); dishFamilyCounts.set(dishFamilyB, dishFamilyCountB + 1);
       usedPairKeys.add(pairKey);
       if (row.is_fantasy) fantasyCount += 1;
       if (row.motif_key_a) usedMotifs.add(row.motif_key_a);
@@ -167,15 +202,17 @@ export const selectDiversePlan = (candidates, { count = 8, blockedMotifs = new S
     }
     return { selected, distinctFamilies: familyCounts.size, fantasyCount, recentMotifsRelaxed: relaxRecent };
   };
-  // Same 4-tier relax ladder as before, now also covering the pair-key cooldown: never relax the
-  // hard within-plan pair-uniqueness rule, but recently-used pairs/motifs are only a soft
-  // deprioritization that gives way once the family cap and then the recency cooldowns themselves
-  // would otherwise leave the plan short (see the instruction to never hard-fail purely because the
-  // eligible pool is temporarily too small).
-  let result = attempt(false, false);
-  if (result.selected.length < count) result = attempt(true, false);
-  if (result.selected.length < count) result = attempt(false, true);
-  if (result.selected.length < count) result = attempt(true, true);
+  // 4-tier relax ladder, escalating in the order least-important-constraint-first: never relax the
+  // hard within-plan pair-uniqueness rule; content_family cap relaxes first (it's already a
+  // practical no-op for single-category FOOD selection); then recency cooldowns; dish-family cap
+  // relaxes LAST, as the final resort, so it stays in force through every tier that would otherwise
+  // already unblock a full plan for FOOD content (see the instruction to never hard-fail purely
+  // because the eligible pool is temporarily too small, while still holding the dish-family cap for
+  // as long as genuinely possible).
+  let result = attempt(false, false, false);
+  if (result.selected.length < count) result = attempt(true, false, false);
+  if (result.selected.length < count) result = attempt(true, true, false);
+  if (result.selected.length < count) result = attempt(true, true, true);
   if (result.selected.length < count) return null;
   return result;
 };
