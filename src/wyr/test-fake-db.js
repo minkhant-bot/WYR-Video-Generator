@@ -6,7 +6,7 @@
 let nextId = 1;
 
 export const createFakeDb = () => {
-  const state = { questions: new Map(), themes: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), foodContentReconciliations: new Map(), nextThemeId: 1, nextVideoId: 1 };
+  const state = { questions: new Map(), themes: new Map(), videos: new Map(), videoQuestions: [], migrations: new Set(), foodContentReconciliations: new Map(), usedFoodImages: [], nextThemeId: 1, nextVideoId: 1 };
   const log = [];
 
   const query = async (sql, params = []) => {
@@ -208,6 +208,17 @@ export const createFakeDb = () => {
       const [videoId, questionId, position] = params;
       if (!state.videoQuestions.some(vq => vq.video_id === videoId && vq.question_id === questionId)) state.videoQuestions.push({ video_id: videoId, question_id: questionId, position });
       return { rows: [] };
+    }
+    if (text.startsWith('INSERT INTO wyr_used_food_images')) {
+      const [foodLabel, provider, providerPhotoId, contentHash, videoId] = params;
+      state.usedFoodImages.push({ food_label: foodLabel, provider, provider_photo_id: providerPhotoId, content_hash: contentHash, video_id: videoId, used_at: new Date(Date.now() + state.usedFoodImages.length) });
+      return { rows: [] };
+    }
+    if (text.startsWith('SELECT food_label, provider, provider_photo_id, used_at')) {
+      const [foodLabels, windowVideos] = params;
+      const recentVideoIds = [...state.videos.values()].sort((left, right) => right.created_at - left.created_at).slice(0, windowVideos).map(video => video.id);
+      const rows = state.usedFoodImages.filter(row => foodLabels.includes(row.food_label) && recentVideoIds.includes(row.video_id));
+      return { rows };
     }
     if (text.startsWith("UPDATE wyr_questions SET status = 'used', reserved_by_job = NULL, reserved_at = NULL, used_count")) {
       const [ids, jobId] = params;

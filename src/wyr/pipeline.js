@@ -12,8 +12,9 @@ import { createFixturePlan, createFixtureAssets } from './fixtures.js';
 import { buildSlotDiagnostics, createImageSelection, downloadSelectedCandidates, formatUnfilledSlotDiagnostics } from './image-picker.js';
 import { rowToQuestion } from './pool-selection.js';
 import { selectContentPlan } from './content-source.js';
-import { commitPlanUsage, releaseQuestionReservation, releaseReservation, reserveReplacementQuestion } from './question-pool.js';
+import { commitPlanUsage, recentUsedFoodImageIds, releaseQuestionReservation, releaseReservation, reserveReplacementQuestion } from './question-pool.js';
 import { assertStrictFoodPlan } from './food-content.js';
+import { normalizeFoodOption } from './food-themes.js';
 
 // Disposable per-job temp artifacts (raw downloaded images, TTS mp3s, rendered scene segments) --
 // always scoped to path.join(job.workspace, ...), never anything outside a job's own directory.
@@ -141,7 +142,7 @@ const logSelectedImageDiagnostics = (assets, jobId) => {
 };
 
 export const finalizeVerifiedPoolJob = async ({ job, update, plan, outputPath, verification, timeline, assets, poolReserved, commitUsage = commitPlanUsage }) => {
-  if (poolReserved) await commitUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration });
+  if (poolReserved) await commitUsage({ jobId: job.id, plan, duration: verification.duration ?? timeline.totalDuration, assets });
   update({ status: 'completed', stage: 'completed', progress: 100, outputPath, verification });
   logSelectedImageDiagnostics(assets, job.id);
   log('job.completed', { jobId: job.id, outputPath, verification });
@@ -397,7 +398,19 @@ export const runAutomaticPipeline = async ({ job, store, config, runJobPipeline 
       assertStrictFoodPlan(plan);
       writeJsonAtomic(path.join(job.workspace, 'plan.json'), plan); update({ topic: plan.topic, caption: buildShareCaption(plan.questions), progress: 18 });
       update({ status: 'searching_images', stage: 'searching_images', progress: 22 });
-      let selection = await selectImages({ plan, config });
+      // Cross-job image rotation (see question-pool.js's recentUsedFoodImageIds / question-pool.js's
+      // commitPlanUsage write side): scoped to this plan's own food labels only, fetched once up
+      // front for the initial selection pass. Replacement-question image searches (below) don't
+      // re-fetch for any NEW label a swapped-in question introduces -- those simply get no rotation
+      // preference (image-picker.js's default recentUsage = empty Map is a safe no-op), which is an
+      // intentionally narrow scope for this change rather than threading it through the replacement
+      // path too.
+      const foodLabels = [...new Set(plan.questions
+        .filter(question => question.category === 'food')
+        .flatMap(question => [question.optionA?.text, question.optionB?.text]).filter(Boolean)
+        .map(normalizeFoodOption))];
+      const recentUsage = await recentUsedFoodImageIds(foodLabels);
+      let selection = await selectImages({ plan, config, recentUsage });
       let wordingRejectedCount = plan.contentQuality?.wordingRejectedCount || 0;
       let imageReplacementAttempts = 0;
       let rejectedPoolIds = new Set();

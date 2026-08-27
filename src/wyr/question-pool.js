@@ -3,7 +3,7 @@ import { canonicalFoodPairKey, classifyRejectionReasons, computeInsertionFields,
 import { DEFAULT_DURATION_BUDGET_TOTAL_SECONDS } from './duration-estimate.js';
 import { hasNaturalWording, isNonPhotographableAbstractOption, isVisualSubjectFeasible } from './content-engine.js';
 import { isStrictFoodPoolRow } from './food-content.js';
-import { canonicalFoodThemeKey, validateFoodTheme } from './food-themes.js';
+import { canonicalFoodThemeKey, normalizeFoodOption, validateFoodTheme } from './food-themes.js';
 import { log, redactConnectionSecrets } from './utils.js';
 
 // Diagnostics only -- max rows actually printed to Railway logs per insert_batch call, so a batch
@@ -219,6 +219,32 @@ const recentPairKeysFromDb = async (client, windowVideos = MOTIF_HISTORY_WINDOW_
     [windowVideos],
   );
   return new Set(rows.map(row => canonicalFoodPairKey(row)));
+};
+
+// Cross-job IMAGE rotation history, same window/deprioritize-not-exclude shape as the three
+// lookbacks above, one level down (images instead of questions). Standalone (opens its own client
+// via withClient) rather than threaded through selectAndReservePlan's transaction, since it's read
+// later in the pipeline (see pipeline.js), after question selection/reservation has already
+// committed -- a separate, read-only concern with no need to share that transaction.
+// Returns a Map keyed by "<food_label>::<provider>:<provider_photo_id>" -> used_at (ms since
+// epoch); image-picker.js's applyImageRotationPreference deprioritizes (never rejects) any
+// candidate whose key is present, preferring the least-recently-used one when every candidate for
+// a label has some history -- never hard-failing a slot purely because rotation history is thin.
+export const recentUsedFoodImageIds = async (foodLabels, windowVideos = MOTIF_HISTORY_WINDOW_VIDEOS) => {
+  if (!foodLabels?.length) return new Map();
+  return withClient(async client => {
+    const { rows } = await client.query(
+      `SELECT food_label, provider, provider_photo_id, used_at
+       FROM wyr_used_food_images
+       WHERE food_label = ANY($1::text[])
+         AND video_id IN (SELECT id FROM wyr_videos ORDER BY created_at DESC LIMIT $2)
+       ORDER BY used_at ASC`,
+      [foodLabels, windowVideos],
+    );
+    const usage = new Map();
+    for (const row of rows) usage.set(`${row.food_label}::${row.provider}:${row.provider_photo_id}`, new Date(row.used_at).getTime());
+    return usage;
+  });
 };
 
 // Atomically reserves exactly `count` diverse, duration-budgeted questions for one job, drawn only
@@ -451,7 +477,7 @@ export const releaseStaleReservations = async (olderThanMs = STALE_RESERVATION_A
 // with reserved_by_job=NULL and updates zero rows, instead of double-incrementing used_count or
 // double-committing usage.
 export const COMMITTED_QUESTION_COUNT = 10;
-export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransaction(async client => {
+export const commitPlanUsage = async ({ jobId, plan, duration, assets = [] }) => withTransaction(async client => {
   const ids = plan.questions.map(question => question.poolId);
   if (ids.length !== COMMITTED_QUESTION_COUNT || new Set(ids).size !== COMMITTED_QUESTION_COUNT || ids.some(id => id == null)) {
     throw new Error(`Usage commit requires exactly ${COMMITTED_QUESTION_COUNT} distinct reserved questions.`);
@@ -481,6 +507,22 @@ export const commitPlanUsage = async ({ jobId, plan, duration }) => withTransact
   const videoId = videoRows[0].id;
   for (const question of plan.questions) {
     await client.query('INSERT INTO wyr_video_questions (video_id, question_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [videoId, question.poolId, question.index]);
+  }
+  // Cross-job image rotation history (see recentUsedFoodImageIds above): recorded only here, at a
+  // completed/verified video's commit, never at download/selection time -- a job that fails after
+  // downloading images never reaches this line, so its images never poison rotation history for a
+  // video that was never actually published. food_label reuses normalizeFoodOption (food-themes.js),
+  // the same normalization canonicalFoodPairKey already uses -- no second scheme introduced here.
+  for (const asset of assets) {
+    const question = plan.questions[asset.questionIndex];
+    if (!question || question.category !== 'food') continue;
+    const optionText = asset.slot === 'A' ? question.optionA?.text : question.optionB?.text;
+    const provider = asset.selectedProvider || asset.provider;
+    if (!optionText || !provider || !asset.id || !asset.sha256) continue;
+    await client.query(
+      'INSERT INTO wyr_used_food_images (food_label, provider, provider_photo_id, content_hash, video_id) VALUES ($1, $2, $3, $4, $5)',
+      [normalizeFoodOption(optionText), provider, String(asset.id), asset.sha256, videoId],
+    );
   }
   log('pool.usage_committed', { jobId, videoId, count: ids.length, questionsUpdated });
   return videoId;

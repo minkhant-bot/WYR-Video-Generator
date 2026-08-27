@@ -8,6 +8,7 @@ import { isFantasyQuestion } from './content-engine.js';
 import { computeSubjectAwareCrop, renderableCrop } from './framing.js';
 import { WYR_TEMPLATE } from './template.js';
 import { GroqContentProvider } from './content.js';
+import { normalizeFoodOption } from './food-themes.js';
 
 export const IMAGE_PROVIDER_ORDER = Object.freeze(['Pixabay', 'Pexels']);
 const REVIEW_POOL_SIZE = 8;
@@ -241,6 +242,26 @@ const sortPool = candidates => candidates.sort((a, b) =>
   (a.position - b.position)
 );
 
+// Cross-job image rotation (see question-pool.js's recentUsedFoodImageIds): a stable reorder
+// layered on top of sortPool's existing relevance/quality ranking, never a rejection -- a
+// candidate is never removed from the pool for having been used before, only moved behind fresh
+// ones, so a food label with a genuinely thin candidate pool still fills its slot (same
+// deprioritize-not-exclude principle as the motif/theme/pair-key cooldowns in question-pool.js).
+// Among candidates that ARE in the rotation history, the least-recently-used one sorts first, so
+// exhausting every fresh candidate degrades to "the one used longest ago" rather than failing.
+export const applyImageRotationPreference = state => {
+  const foodOption = String(state.category || '').trim().toLowerCase() === 'food';
+  if (!foodOption || !state.recentUsage?.size || !state.candidates.length) return;
+  const foodLabel = normalizeFoodOption(state.requestedFoodText || state.optionText);
+  const usedAt = candidate => state.recentUsage.get(`${foodLabel}::${candidate.provider}:${candidate.id}`);
+  state.candidates.sort((a, b) => {
+    const usedAtA = usedAt(a); const usedAtB = usedAt(b);
+    if ((usedAtA !== undefined) !== (usedAtB !== undefined)) return usedAtA !== undefined ? 1 : -1;
+    if (usedAtA !== undefined && usedAtB !== undefined) return usedAtA - usedAtB;
+    return 0; // neither has rotation history -- preserve sortPool's existing relevance/quality order
+  });
+};
+
 const selectBestAvailable = state => {
   const excluded = new Set(state.replacedIds || []);
   const candidate = state.candidates.find(item => !excluded.has(item.candidateKey));
@@ -329,6 +350,7 @@ const fetchPoolForSlot = async (state, providers, config, minimumPool = REVIEW_P
         });
       }
       sortPool(state.candidates);
+      applyImageRotationPreference(state);
       state.error = null;
     } catch (error) {
       calls += 1;
@@ -552,7 +574,7 @@ export const formatUnfilledSlotDiagnostics = unfilledDiagnostics => {
 const createVisualQueryProvider = config =>
   config.groqApiKey ? new GroqContentProvider({ apiKey: config.groqApiKey, model: config.groqModel, timeoutMs: config.timeoutMs }) : null;
 
-export const createImageSelection = async ({ plan, config, visualQueryProvider = createVisualQueryProvider(config) }) => {
+export const createImageSelection = async ({ plan, config, visualQueryProvider = createVisualQueryProvider(config), recentUsage = new Map() }) => {
   const providers = createProviders(config);
   const slots = {};
 
@@ -566,6 +588,7 @@ export const createImageSelection = async ({ plan, config, visualQueryProvider =
         questionIndex: question.index,
         slot,
         category: question.category,
+        recentUsage,
         // The semantic-relevance target for image matching/query-broadening/diagnostics is the
         // option's explicit visualSubject (a concrete, photographable description -- see
         // content-engine.js's deriveVisualSubject) when one is available, else the hand-written
